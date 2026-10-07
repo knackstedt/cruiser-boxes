@@ -22,7 +22,8 @@ export interface BuildOpts {
     guestMonitors?: GuestMonitor[];
     /** virtiofsd socket per share when virtiofsd is available; else 9p. */
     virtiofs?: boolean;
-    install?: { iso: string; seedIso: string; kernel?: string; initrd?: string; serialLog?: string };
+    /** iso omitted → seed-only boot (cloudimg first-boot provisioning). */
+    install?: { iso?: string; seedIso: string; kernel?: string; initrd?: string; serialLog?: string };
     extraArgs?: string[];
 }
 
@@ -143,8 +144,10 @@ export function buildArgs(
     if (opts.mode === "install" && opts.install) {
         const ins = opts.install;
         push("-device", "virtio-scsi-pci,id=scsi0");
-        push("-drive", `file=${ins.iso},media=cdrom,if=none,id=cd0,readonly=on`);
-        push("-device", "scsi-cd,drive=cd0");
+        if (ins.iso) {
+            push("-drive", `file=${ins.iso},media=cdrom,if=none,id=cd0,readonly=on`);
+            push("-device", "scsi-cd,drive=cd0");
+        }
         push("-drive", `file=${ins.seedIso},media=cdrom,if=none,id=cd1,readonly=on`);
         push("-device", "scsi-cd,drive=cd1");
         if (ins.kernel && ins.initrd) {

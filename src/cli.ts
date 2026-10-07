@@ -40,9 +40,16 @@ usage: cruiser <area> <command> [args]
   vm snapshots <name>                   vm snapshot <name> <snapname>
   vm restore <name> <snapname>          vm snapshot-rm <name> <snapname>
   vm backup <name> <dest.qcow2>         vm resize <name> <newGiB>
-  vm rm <name> [--disk]
+  vm rm <name> [--disk]                vm view <name>   launch freerdp viewer + place window
+  host session                         detected DE/session + adapter caps
+  host monitors|desktops               probe host display topology
   usb ls                                usb attach <vm> <vid:pid>
   usb detach <vm> <id>
+  app list <vm>                         guest .desktop app catalog (via QGA)
+  app run <vm> <command...>             launch a guest app via waypipe (vsock→ssh)
+  provision cloudimg <vm> <release> [--user u] [--password p]
+  provision iso <vm> <iso-or-url> [--user u] [--password p]
+  provision guest-setup <vm>           re-run in-guest setup on a provisioned VM
   toolchain check|build|adopt-src [dir]
   doctor                                host dependency + permission report
 `);
@@ -125,6 +132,16 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
         case "backup": { const h = await needVm(args[0]); if (!args[1]) usage(); await h.backup(args[1]); console.log(`backed up -> ${args[1]}`); break; }
         case "resize": { const h = await needVm(args[0]); await h.resizeDisk(Number(args[1])); console.log(`resized to ${args[1]}G`); break; }
         case "rm": { await registry.remove(args[0]!, { deleteDisk: has("--disk") }); console.log("removed"); break; }
+        case "view": {
+            const h = await needVm(args[0]);
+            if (!h.isRunning()) { console.error(`'${h.spec.name}' is not running`); process.exit(1); }
+            const { ViewerSession } = await import("../libraries/host-int/src/session");
+            const s = new ViewerSession(h.spec);
+            console.log(`adapter: ${s.adapter.id}`);
+            await s.open();
+            console.log("viewer launched");
+            break;
+        }
         default: usage();
     }
 }
@@ -195,6 +212,46 @@ switch (area) {
         process.exit(r.status ?? 1);
     }
     case "doctor": await doctor(); break;
+    case "provision": {
+        const h = await needVm(rest[0]);
+        const o = {
+            username: flagVal("--user"), password: flagVal("--password"),
+            timezone: flagVal("--timezone"), mirrorHostMonitors: !has("--no-monitor-mirror"),
+        };
+        const { provisionVmCloudimg, provisionVmIso, reprovisionGuest } = await import("../libraries/provision/src/provision");
+        if (sub === "cloudimg") { if (!rest[1]) usage(); await provisionVmCloudimg(h, { ...o, release: rest[1] }); }
+        else if (sub === "iso") { if (!rest[1]) usage(); await provisionVmIso(h, { ...o, iso: rest[1] }); }
+        else if (sub === "guest-setup") await reprovisionGuest(h, o);
+        else usage();
+        break;
+    }
+    case "app": {
+        const h = await needVm(rest[0]);
+        const { guestAppCatalog, launchApp } = await import("../libraries/app-mode/src/waypipe");
+        if (sub === "list") {
+            for (const a of await guestAppCatalog(h)) console.log(`${a.id.padEnd(45)} ${a.name.padEnd(30)} ${a.exec}`);
+        } else if (sub === "run") {
+            if (!rest[1]) usage();
+            const l = await launchApp(h, rest.slice(1).join(" "));
+            console.log(`launched via ${l.transport}: ${l.command}`);
+        } else usage();
+        break;
+    }
+    case "host": {
+        const { detectAdapter, detectSession } = await import("../libraries/host-int/src/detect");
+        const a = detectAdapter();
+        switch (sub) {
+            case "session": {
+                console.log(`session: ${detectSession()}  adapter: ${a.id}`);
+                console.log(`caps: ${JSON.stringify(a.caps)}`);
+                break;
+            }
+            case "monitors": console.log(JSON.stringify(await a.monitors(), null, 2)); break;
+            case "desktops": console.log(JSON.stringify(await a.desktops(), null, 2)); break;
+            default: usage();
+        }
+        break;
+    }
     default: usage();
 }
 // Open monitor/QGA sockets keep the event loop alive; daemonized QEMU is unaffected by exit.
