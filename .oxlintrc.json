@@ -1,0 +1,41 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oxc-project/oxc-assets/main/schema.json",
+  "jsPlugins": [
+    {
+      "name": "downdraft",
+      "specifier": "@downdraft/engine/lint-plugin"
+    }
+  ],
+  "rules": {
+    "no-console": ["error", { "allow": ["trace"] }],
+    "no-unused-vars": "warn",
+    "no-debugger": "error",
+    "no-empty": "warn",
+    "no-unreachable": "error",
+    "no-irregular-whitespace": "error",
+    "no-loss-of-precision": "error",
+    "no-prototype-builtins": "warn",
+    "no-sparse-arrays": "warn",
+    "no-unsafe-finally": "error",
+    "no-unsafe-optional-chaining": "error",
+    "no-useless-catch": "warn",
+    "eqeqeq": "warn",
+    "default-case-last": "warn",
+    "downdraft/no-for-of": "error"
+  },
+  "overrides": [
+    {
+      "files": ["tests/**", "**/test/**", "toolchain/**", "src/cli.ts", "scripts/**", "docs/**", "guest/**"],
+      "rules": {
+        "no-console": "off"
+      }
+    },
+    {
+      "files": ["**/*.spec.ts", "**/*.spec.tsx"],
+      "rules": {
+        "no-console": "off",
+        "no-unused-vars": "off"
+      }
+    }
+  ]
+}

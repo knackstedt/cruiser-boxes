@@ -1,0 +1,54 @@
+{
+  "name": "cruiser",
+  "version": "0.1.0",
+  "productName": "Cruiser",
+  "description": "WinBoat-style QEMU/KVM VM manager for Linux guests, on the DownDraft native runtime.",
+  "author": "Andrew G. Knackstedt",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "draft dev",
+    "cli": "bun run src/cli.ts",
+    "toolchain": "bun run toolchain/build.mts",
+    "lint": "oxlint",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@downdraft/engine": "file:../downdraft-engine/packages/engine",
+    "@downdraft/platform-native": "file:../downdraft-engine/packages/platform-native",
+    "zod": "^4.1.0",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@downdraft/cli": "file:../downdraft-engine/packages/cli",
+    "@types/node": "^22.10.0",
+    "@webgpu/types": "^0.1.71",
+    "oxlint": "^1.16.0",
+    "typescript": "^5.9.3",
+    "vite": "^6.0.0"
+  },
+  "build": {
+    "appId": "dev.cruiser.app",
+    "productName": "Cruiser",
+    "linux": {
+      "target": [
+        "deb",
+        "appimage"
+      ],
+      "category": "Development;System;",
+      "maintainer": "Andrew G. Knackstedt",
+      "synopsis": "QEMU/KVM VM manager for Linux guests",
+      "description": "GPU-accelerated Linux VMs integrated into the host desktop — fullscreen, windowed, whole-desktop, and single-app head modes."
+    },
+    "deb": {
+      "section": "utils",
+      "priority": "optional",
+      "depends": [
+        "libc6",
+        "libstdc++6",
+        "libvulkan1"
+      ]
+    }
+  }
+}

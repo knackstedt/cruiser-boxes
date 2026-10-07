@@ -1,0 +1,23 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+
+# Toolchain artifacts (built from toolchain/build.mts)
+opt/
+src-tarballs/
+
+# VM artifacts — VMs live under ~/.local/share/cruiser at runtime;
+# these patterns also cover any stray in-repo testing
+*.qcow2
+*.iso
+*.fd
+run/
+vms/
+
+# DownDraft packaging output
+release/
+dd-assets/
+
+# scratch
+.playwright-mcp/

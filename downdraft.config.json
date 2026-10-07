@@ -1,0 +1,9 @@
+{
+  "name": "cruiser",
+  "version": "0.1.0",
+  "engine": "downdraft",
+  "native": {
+    "appId": "dev.cruiser.app",
+    "title": "Cruiser"
+  }
+}
