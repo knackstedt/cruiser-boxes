@@ -13,6 +13,7 @@ import { createLogger } from "@downdraft/engine/util/logger";
 import { createNativeHost } from "@downdraft/platform-native";
 import { InputBus } from "../libraries/app-shell/src/input-bus";
 import { CruiserShell } from "../libraries/app-shell/src/shell";
+import { CruiserService } from "../libraries/app-shell/src/service";
 import { createCruiserStore } from "../libraries/app-shell/src/store";
 
 const log = createLogger("info");
@@ -23,6 +24,10 @@ const HEIGHT = 720;
 const host = await createNativeHost({
     window: { title: "Cruiser", width: WIDTH, height: HEIGHT },
     services: "inline",
+    // dev harness knobs: CRUISER_SCREENSHOT=/path.png CRUISER_SHOT_FRAMES=20
+    ...(process.env.CRUISER_SCREENSHOT
+        ? { screenshotPath: process.env.CRUISER_SCREENSHOT, screenshotAfterFrames: Number(process.env.CRUISER_SHOT_FRAMES ?? 20) }
+        : {}),
 });
 
 const { surface, device, window: win } = host;
@@ -32,7 +37,15 @@ const CLEAR = { r: 0.063, g: 0.078, b: 0.102, a: 1 };
 
 const bus = new InputBus();
 const store = createCruiserStore();
-const shell = new CruiserShell(device as unknown as GPUDevice, format, surface.width, surface.height, bus, store);
+const svc = new CruiserService(store);
+const shell = new CruiserShell(device as unknown as GPUDevice, format, surface.width, surface.height, bus, store, svc);
+svc.init().catch((e) => store.getState().setStatus(`init failed: ${e}`));
+// dev harness knob: CRUISER_ROUTE=create|vm|settings preselects a route for screenshots
+if (process.env.CRUISER_ROUTE) {
+    const r = process.env.CRUISER_ROUTE as "create" | "vm" | "settings";
+    setTimeout(() => store.getState().setRoute(r, r === "vm" ? "test1" : null), 1500);
+    if (r === "settings") setTimeout(() => svc.runDoctor(), 1600);
+}
 
 // ── Input routing (surface = pointer/wheel, window = keys) ──
 
@@ -46,6 +59,10 @@ win.addEventListener("resize", (e: any) => { shell.resize(e.width, e.height); })
 
 // ── Frame loop ──
 
+const shotPath = process.env.CRUISER_SCREENSHOT;
+const shotAt = Number(process.env.CRUISER_SHOT_FRAMES ?? 30);
+let frames = 0;
+
 function frame(): void {
     const tex = gpuCtx.getCurrentTexture();
     if (!tex) { requestAnimationFrame(frame); return; }
@@ -56,14 +73,20 @@ function frame(): void {
     shell.composite(pass);
     pass.end();
     (device as unknown as GPUDevice).queue.submit([encoder.finish()]);
+    if (shotPath && ++frames === shotAt)
+        (host as { captureScreenshot?: (p: string, t: unknown) => void }).captureScreenshot?.(shotPath, tex);
     requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
 
+// dev harness knob: CRUISER_SMOKE_MS=N auto-exits after N ms (no window close needed)
+const smokeMs = Number(process.env.CRUISER_SMOKE_MS ?? 0);
 await new Promise<void>((resolve) => {
     win.addEventListener("close", () => resolve());
+    if (smokeMs > 0) setTimeout(resolve, smokeMs);
 });
 
 shell.dispose();
+svc.dispose();
 host.destroy();
 log.info("cruiser", "exit");
