@@ -1,0 +1,260 @@
+// ============================================================================
+// vm.ts — VmHandle: one VM's lifecycle. Builds argv, launches QEMU (daemonized
+// or owned), reattaches over monitor/QGA sockets, and exposes disk/usb ops.
+// ============================================================================
+
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir, writeFile, readFile, copyFile, rm } from "node:fs/promises";
+import { spawn, type ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+
+import type { VmSpec } from "../config/schema";
+import { parseVmSpec } from "../config/schema";
+import { vmPaths, type VmPaths } from "../paths";
+import { buildArgs, OVMF_VARS_TEMPLATE, type BuildOpts, type BuiltArgs, type GuestMonitor } from "../qemu/args";
+import { resolveToolchain, type Toolchain } from "../qemu/resolve";
+import { QmpClient } from "../qmp/client";
+import { QgaClient } from "../qga/client";
+import * as disk from "../disk/ops";
+import * as usb from "../usb/usb";
+import { run, spawnChild, which } from "../../../sys/src/exec";
+
+export type VmState = "stopped" | "starting" | "running" | "stopping" | "paused" | "crashed" | "unknown";
+
+export class VmHandle extends EventEmitter {
+    spec: VmSpec;
+    readonly paths: VmPaths;
+    private toolchain: Toolchain | null = null;
+    private qemuChild: ChildProcess | null = null;   // owned-mode child handle
+    private vfsChildren: ChildProcess[] = [];
+    private _qmp: QmpClient | null = null;
+    private _qga: QgaClient | null = null;
+    private lastError: string | null = null;
+
+    private constructor(spec: VmSpec, paths: VmPaths) {
+        super();
+        this.spec = spec;
+        this.paths = paths;
+    }
+
+    static async load(name: string): Promise<VmHandle> {
+        const paths = vmPaths(name);
+        const spec = parseVmSpec(JSON.parse(await readFile(paths.spec, "utf-8")));
+        return new VmHandle(spec, paths);
+    }
+
+    static async create(spec: VmSpec): Promise<VmHandle> {
+        const paths = vmPaths(spec.name);
+        await mkdir(paths.dir, { recursive: true });
+        await mkdir(paths.run, { recursive: true });
+        await writeFile(paths.spec, JSON.stringify(spec, null, 2) + "\n", { mode: 0o644 });
+        return new VmHandle(spec, paths);
+    }
+
+    async saveSpec(): Promise<void> {
+        await writeFile(this.paths.spec, JSON.stringify(this.spec, null, 2) + "\n");
+        this.emit("spec", this.spec);
+    }
+
+    // ── state probing ──
+
+    pid(): number | null {
+        try { return Number(readFileSync(this.paths.pidFile, "utf-8").trim()) || null; } catch { return null; }
+    }
+
+    /** QEMU process alive (pidfile + kill -0) AND monitor socket present. */
+    isRunning(): boolean {
+        const pid = this.pid();
+        if (!pid || !existsSync(this.paths.monitorSock)) return false;
+        try { process.kill(pid, 0); return true; } catch { return false; }
+    }
+
+    async probe(): Promise<VmState> {
+        if (!this.isRunning()) return "stopped";
+        try {
+            const q = await this.qmp();
+            const st = await q.queryStatus();
+            if (st.status === "paused" || st.status === "prelaunch") return "paused";
+            return st.running ? "running" : "stopped";
+        } catch {
+            // pid alive but QMP not answering: QEMU still initializing (or wedged).
+            // "crashed" is only for a dead pid, which isRunning() already excluded.
+            return "starting";
+        }
+    }
+
+    // ── client accessors (auto-attach) ──
+
+    async qmp(): Promise<QmpClient> {
+        if (this._qmp) return this._qmp;
+        const q = await QmpClient.connect(this.paths.monitorSock);
+        q.on("event", (e) => {
+            if (e.event === "SHUTDOWN" || e.event === "RESET") this.emit("qmp-event", e);
+            if (e.event === "SHUTDOWN" && !e.data?.guest) this.markDead();
+        });
+        q.on("close", () => { this._qmp = null; this.emit("qmp-close"); });
+        this._qmp = q;
+        return q;
+    }
+
+    async qga(timeoutMs = 15_000): Promise<QgaClient> {
+        if (this._qga) return this._qga;
+        const g = await QgaClient.connect(this.paths.qgaSock, timeoutMs);
+        await g.ping().catch(() => {});   // agent may not be up yet even if socket is
+        g.on("close", () => { this._qga = null; });
+        this._qga = g;
+        return g;
+    }
+
+    private markDead(): void {
+        this._qmp = null; this._qga = null;
+        this.emit("dead");
+    }
+
+    // ── lifecycle ──
+
+    /** Build argv — exposed for tests + `cli vm args` debugging. */
+    async buildArgv(opts: BuildOpts = {}): Promise<BuiltArgs> {
+        this.toolchain ??= await resolveToolchain();
+        if (opts.virtiofs === undefined) opts.virtiofs = (await which("virtiofsd")) !== null;
+        // GL modes need an explicit mesa render node — QEMU auto-picking NVIDIA
+        // EGL wedges init. Persist the pick so it's stable across restarts.
+        if (this.spec.gpu.mode !== "software" && !this.spec.gpu.renderNode) {
+            const { pickRenderNode } = await import("../gpu/rendernode");
+            this.spec.gpu.renderNode = (await pickRenderNode()) ?? undefined;
+            if (this.spec.gpu.renderNode) await this.saveSpec();
+        }
+        return buildArgs(this.spec, this.paths, opts, { ldLibraryPath: this.toolchain.ldLibraryPath });
+    }
+
+    async start(opts: BuildOpts & { timeoutMs?: number } = {}): Promise<void> {
+        if (this.isRunning()) return;
+        if (!existsSync(this.diskPath())) throw new Error(`no disk at ${this.diskPath()} — provision first`);
+        this.toolchain ??= await resolveToolchain();
+        await mkdir(this.paths.run, { recursive: true });
+        if (!existsSync(this.paths.ovmfVars)) await copyFile(OVMF_VARS_TEMPLATE, this.paths.ovmfVars);
+
+        const built = await this.buildArgv(opts);
+
+        // virtiofsd daemons must be up before QEMU opens the sockets.
+        for (const v of built.virtiofsd) {
+            await rm(v.socket, { force: true });
+            const c = spawnChild("virtiofsd", [
+                `--socket-path=${v.socket}`, `--shared-dir=${v.sharedDir}`,
+                "--cache=auto", "--sandbox=namespace",
+            ]);
+            this.vfsChildren.push(c);
+        }
+
+        const env = { ...process.env, ...built.env };
+        if (this.spec.persist === "daemonize") {
+            // QEMU -daemonize: spawn returns after the daemon fork.
+            await run(this.toolchain.qemu, built.argv, { env });
+        } else {
+            this.qemuChild = spawnChild(this.toolchain.qemu, built.argv, { env, stdio: "ignore" });
+            this.qemuChild.on("exit", (code) => {
+                this.qemuChild = null;
+                this.emit("exit", code);
+            });
+            this.qemuChild.unref();
+        }
+
+        // Wait for the monitor socket, then QMP handshake.
+        const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
+        for (;;) {
+            if (existsSync(this.paths.monitorSock)) {
+                try { await this.qmp(); return; } catch { /* not ready */ }
+            }
+            if (Date.now() > deadline) {
+                const tail = existsSync(this.paths.log) ? readFileSync(this.paths.log, "utf-8").slice(-2000) : "";
+                throw new Error(`qemu did not come up in ${opts.timeoutMs ?? 30000}ms\n${tail}`);
+            }
+            await new Promise((r) => setTimeout(r, 250));
+        }
+    }
+
+    async stop(timeoutMs = 30_000): Promise<void> {
+        if (!this.isRunning()) return;
+        try { (await this.qmp()).systemPowerdown(); } catch { /* fall through */ }
+        const deadline = Date.now() + timeoutMs;
+        while (this.isRunning() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 500));
+        if (this.isRunning()) throw new Error("still running after powerdown — use kill()");
+        this.cleanupRunDir();
+    }
+
+    async kill(): Promise<void> {
+        const pid = this.pid();
+        if (pid) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
+        // quit's reply races the socket teardown — swallow the rejection either way.
+        try { (await this.qmp()).quit().catch(() => {}); } catch { /* no monitor */ }
+        this.qemuChild?.kill("SIGKILL");
+        this.cleanupRunDir();
+    }
+
+    private cleanupRunDir(): void {
+        for (const c of this.vfsChildren) c.kill();
+        this.vfsChildren = [];
+        this._qmp?.close(); this._qga?.close();
+        this._qmp = null; this._qga = null;
+    }
+
+    async suspend(): Promise<void> { await (await this.qmp()).stop(); }
+    async resume(): Promise<void> { await (await this.qmp()).cont(); }
+
+    // ── disk ops ──
+
+    diskPath(): string {
+        return this.spec.disk.file.startsWith("/") ? this.spec.disk.file : `${this.paths.dir}/${this.spec.disk.file}`;
+    }
+
+    async snapshots() { return disk.snapshotList(this.tc().qemuImg, this.diskPath()); }
+    async snapshot(name: string) { return disk.snapshotCreate(this.tc().qemuImg, this.diskPath(), name); }
+    async restoreSnapshot(name: string) {
+        if (this.isRunning()) throw new Error("stop the VM before restoring a snapshot");
+        return disk.snapshotApply(this.tc().qemuImg, this.diskPath(), name);
+    }
+    async deleteSnapshot(name: string) { return disk.snapshotDelete(this.tc().qemuImg, this.diskPath(), name); }
+    async resizeDisk(newSizeGiB: number) {
+        if (this.isRunning()) throw new Error("stop the VM before resizing the disk (guest growfs happens next boot)");
+        return disk.resizeDisk(this.tc().qemuImg, this.diskPath(), newSizeGiB);
+    }
+    async backup(destPath: string) {
+        if (this.isRunning()) {
+            const q = await this.qmp();
+            const node = await disk.diskNodeName(q, this.diskPath());
+            return disk.backupLive(q, node, destPath);
+        }
+        return disk.backupOffline(this.tc().qemuImg, this.diskPath(), destPath);
+    }
+
+    // ── usb ──
+
+    listUsb() { return usb.listUsbDevices(); }
+    async usbAttach(vendorId: string, productId: string, serial?: string) {
+        const d = await usb.findUsb(vendorId, productId, serial);
+        if (!d) throw new Error(`usb ${vendorId}:${productId} not present`);
+        if (!d.writable) throw new Error(`no rw access to ${d.devNode} — run the udev setup (cruiser doctor)`);
+        return usb.usbAttach(await this.qmp(), d);
+    }
+    async usbDetach(id: string) { return usb.usbDetach(await this.qmp(), id); }
+
+    // ── guest ops ──
+
+    /** Run a command in the guest via QGA. */
+    async guestExec(path: string, args: string[] = [], timeoutMs = 60_000) {
+        return (await this.qga()).exec(path, args, { timeoutMs });
+    }
+    async guestSh(script: string, timeoutMs = 60_000) {
+        return (await this.qga()).sh(script, { timeoutMs });
+    }
+
+    /** Restart GDM in the guest (connector-probe race fix — the old fixdisplays). */
+    async fixDisplays() {
+        return this.guestExec("/bin/systemctl", ["restart", "gdm"], 10_000);
+    }
+
+    private tc(): Toolchain {
+        if (!this.toolchain) throw new Error("toolchain unresolved — call start()/buildArgv() first");
+        return this.toolchain;
+    }
+}

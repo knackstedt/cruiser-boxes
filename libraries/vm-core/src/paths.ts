@@ -1,0 +1,80 @@
+// ============================================================================
+// paths.ts — cruiser filesystem layout (XDG).
+//
+//   ~/.config/cruiser/            settings, escape-shortcut defs
+//   ~/.local/share/cruiser/vms/<name>/
+//       vm.json                   VmSpec
+//       disk.qcow2                system disk
+//       OVMF_VARS.fd              per-VM UEFI vars
+//       run/                      monitor.sock, qga.sock, spice.sock,
+//                               virtiofs.sock, qemu.pid, qemu.log
+//       snapshots/                (external snapshot files if used)
+//   ~/.cache/cruiser/             cloudimg downloads, seed work dirs
+//   <repo>/opt/                   toolchain binaries (CRUISER_OPT override)
+// ============================================================================
+
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+const HOME = homedir();
+const x = (env: string, dflt: string) => process.env[env] || dflt;
+
+export const CONFIG_DIR = join(x("XDG_CONFIG_HOME", join(HOME, ".config")), "cruiser");
+export const DATA_DIR = join(x("XDG_DATA_HOME", join(HOME, ".local", "share")), "cruiser");
+export const CACHE_DIR = join(x("XDG_CACHE_HOME", join(HOME, ".cache")), "cruiser");
+export const VMS_DIR = join(DATA_DIR, "vms");
+export const ISO_DIR = join(DATA_DIR, "iso");
+export const CLOUDIMG_DIR = join(CACHE_DIR, "cloudimg");
+
+export function vmDir(name: string): string {
+    return join(VMS_DIR, name);
+}
+
+export interface VmPaths {
+    dir: string;
+    spec: string;
+    disk: string;
+    ovmfVars: string;
+    run: string;
+    monitorSock: string;
+    qgaSock: string;
+    spiceSock: string;
+    vfsSock: string;
+    pidFile: string;
+    log: string;
+    serialLog: string;
+    snapshotsDir: string;
+    backupsDir: string;
+}
+
+export function vmPaths(name: string): VmPaths {
+    const dir = vmDir(name);
+    const run = join(dir, "run");
+    return {
+        dir,
+        spec: join(dir, "vm.json"),
+        disk: join(dir, "disk.qcow2"),
+        ovmfVars: join(dir, "OVMF_VARS.fd"),
+        run,
+        monitorSock: join(run, "monitor.sock"),
+        qgaSock: join(run, "qga.sock"),
+        spiceSock: join(run, "spice.sock"),
+        vfsSock: join(run, "virtiofs.sock"),
+        pidFile: join(run, "qemu.pid"),
+        log: join(run, "qemu.log"),
+        serialLog: join(run, "serial.log"),
+        snapshotsDir: join(dir, "snapshots"),
+        backupsDir: join(dir, "backups"),
+    };
+}
+
+/** Toolchain opt/ dir: repo-local build output, overridable. */
+export function optDir(): string {
+    if (process.env.CRUISER_OPT) return process.env.CRUISER_OPT;
+    // <repo>/opt — this file lives at libraries/vm-core/src/paths.ts
+    return join(fileDir(), "..", "..", "..", "opt");
+}
+
+function fileDir(): string {
+    return new URL(".", import.meta.url).pathname;
+}
