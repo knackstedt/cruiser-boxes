@@ -47,6 +47,19 @@ NVIDIA EGL wedges QEMU init — `gpu/rendernode.ts` auto-picks.
 RDP reaches the host via QEMU `hostfwd` (allocated ports, bind-probed —
 the devvm prototype may already hold 2222/3389).
 
+Guest-side gotchas learned the hard way (all handled in `provision/`):
+
+- `grdctl --system` re-execs through `pkexec`; on a bare server image it
+  exits 0 while applying **nothing** — `pkexec`/`polkitd` must be installed
+  and the `:3389` listener verified rather than trusting exit codes.
+- grd remote-login needs a real session stack: `gdm3` + `gnome-shell` +
+  `gnome-session`, which a server cloudimg does not have.
+- `guest-setup` runs as root over QGA; user-context steps (`gsettings`,
+  `monitors.xml`) are explicitly `runuser`'d to the provisioned account.
+- `qemu-ga` can wedge (poll spin, unkillable without SIGKILL) when no host
+  client is attached to the QGA chardev for a long stretch; all client
+  calls carry timeouts and a failed ping drops + reopens the socket.
+
 ## Head modes
 
 | mode | transport | placement |
