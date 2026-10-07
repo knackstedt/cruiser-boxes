@@ -14,7 +14,7 @@
 // ============================================================================
 
 import { existsSync } from "node:fs";
-import { mkdir, readFile, symlink, cp, writeFile } from "node:fs/promises";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { join, resolve, dirname } from "node:path";
@@ -91,14 +91,18 @@ async function check(): Promise<number> {
         if (!s || !ok) bad++;
     }
 
-    for (const [bin, tool] of Object.entries(versions.systemTools)) {
+    const toolEntries = Object.entries(versions.systemTools);
+    for (let i = 0; i < toolEntries.length; i++) {
+        const [bin, tool] = toolEntries[i]!;
         const s = await systemVersion(bin, tool.versionFlag);
         const status = s ? `${s.version} @ ${s.path}` : `MISSING (apt: ${tool.pkg})`;
         log(`${bin.padEnd(14)} ${status}${tool.why ? `  — ${tool.why}` : ""}`);
         if (!s && !tool.why?.includes("optional")) bad++;
     }
 
-    for (const [name, c] of Object.entries(versions.components)) {
+    const compEntries = Object.entries(versions.components);
+    for (let ci = 0; ci < compEntries.length; ci++) {
+        const [name, c] = compEntries[ci]!;
         if (c.kind === "tool") {
             const d = join(SRC_DIR, `${name}-${c.version}`);
             log(`${name.padEnd(14)} ${existsSync(d) ? `src ready @ ${d}` : "not extracted"}`);
@@ -170,7 +174,8 @@ async function build(): Promise<number> {
         return [...paths, process.env.PKG_CONFIG_PATH ?? ""].filter(Boolean).join(":");
     };
 
-    for (const name of want) {
+    for (let wi = 0; wi < want.length; wi++) {
+        const name = want[wi]!;
         const c = versions.components[name];
         if (!c) { msg("skip", `unknown component ${name}`); continue; }
         if (c.optional && !ONLY) { msg("skip", `${name} optional (build with --component ${name} to force)`); continue; }
@@ -222,7 +227,9 @@ async function build(): Promise<number> {
 async function adoptSrc(fromDir: string): Promise<void> {
     await mkdir(SRC_DIR, { recursive: true });
     const { readdir } = await import("node:fs/promises");
-    for (const entry of await readdir(fromDir)) {
+    const entries = await readdir(fromDir);
+    for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i]!;
         const dst = join(SRC_DIR, entry);
         if (existsSync(dst)) continue;
         await symlink(join(fromDir, entry), dst);

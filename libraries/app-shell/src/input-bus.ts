@@ -47,10 +47,10 @@ export class InputBus implements RendererInputBus {
 
     private dispatch(kind: string, e: object): void {
         this.consumed = false;
-        const self = this;
+        let consumed = false;
         const ctrl: InputEventControl = {
-            stopPropagation: () => { self.consumed = true; },
-            get propagationStopped() { return self.consumed; },
+            stopPropagation: () => { consumed = true; this.consumed = true; },
+            get propagationStopped() { return consumed; },
         };
         for (let _i = 0, _it = [...this.subs[kind]], _n = _it.length; _i < _n; _i++) { const s = _it[_i];
             if (ctrl.propagationStopped) break;
@@ -59,7 +59,7 @@ export class InputBus implements RendererInputBus {
     }
 
     destroy(): void {
-        for (const k of Object.keys(this.subs)) this.subs[k] = [];
+        Object.keys(this.subs).forEach((k) => { this.subs[k] = []; });
     }
 
     pointerMove(x: number, y: number) { this.dispatch("pmove", { clientX: x, clientY: y }); }

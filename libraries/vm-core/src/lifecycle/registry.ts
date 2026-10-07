@@ -46,7 +46,9 @@ export class VmRegistry extends EventTarget {
         try { names = (await readdir(VMS_DIR)).filter((n) => existsSync(join(VMS_DIR, n, "vm.json"))); }
         catch { return []; }
         const out: RegistryEntry[] = [];
-        for (const name of names.sort()) {
+        const sorted = names.sort();
+        for (let ni = 0; ni < sorted.length; ni++) {
+            const name = sorted[ni]!;
             try {
                 const spec = parseVmSpec(JSON.parse(await readFile(join(VMS_DIR, name, "vm.json"), "utf-8")));
                 const h = await VmHandle.load(name);
@@ -86,10 +88,10 @@ export class VmRegistry extends EventTarget {
     private async nextPort(kind: "ssh" | "rdp"): Promise<number> {
         const base = kind === "ssh" ? SSH_PORT_BASE : RDP_PORT_BASE;
         const used = new Set<number>();
-        for (const v of this.vms.values()) {
+        this.vms.forEach((v) => {
             const p = kind === "ssh" ? v.spec.network.sshPort : v.spec.network.rdpPort;
             if (p) used.add(p);
-        }
+        });
         let p = base;
         while (used.has(p) || !(await portFree(p))) p++;
         return p;

@@ -123,9 +123,9 @@ export function buildArgs(
 
     // ── USB: xhci controller + at-boot passthrough ──
     push("-device", "qemu-xhci,id=xhci");
-    for (const d of spec.usb.autoAttach.filter((u) => u.atBoot)) {
+    spec.usb.autoAttach.filter((u) => u.atBoot).forEach((d) => {
         push("-device", `usb-host,bus=xhci.0,vendorid=0x${d.vendorId},productid=0x${d.productId}`);
-    }
+    });
 
     // ── host shares ──
     spec.shares.forEach((s, i) => {

@@ -18,11 +18,11 @@
 
 import { mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { VmRegistry, VmSpec, VmHandle, defaultSpec, VMS_DIR, vmPaths } from "../libraries/vm-core/src/index";
+import { VmRegistry, VmSpec, VmHandle, defaultSpec } from "../libraries/vm-core/src/index";
 import { listUsbDevices } from "../libraries/vm-core/src/usb/usb";
 import { createDisk } from "../libraries/vm-core/src/disk/ops";
 import { resolveToolchain } from "../libraries/vm-core/src/qemu/resolve";
-import { canAccess, run, which } from "../libraries/sys/src/exec";
+import { run, which } from "../libraries/sys/src/exec";
 
 const argv = process.argv.slice(2);
 
@@ -81,7 +81,9 @@ async function needVm(name?: string): Promise<VmHandle> {
 async function vmCmd(cmd: string | undefined, args: string[]) {
     switch (cmd) {
         case "list": {
-            for (const h of registry.list()) {
+            const handles = registry.list();
+            for (let i = 0; i < handles.length; i++) {
+                const h = handles[i]!;
                 const s = await h.probe();
                 console.log(`${h.spec.name.padEnd(20)} ${s.padEnd(10)} ${h.spec.gpu.mode.padEnd(8)} ${h.spec.display.headMode.padEnd(20)} ssh:${h.spec.network.sshPort} rdp:${h.spec.network.rdpPort}`);
             }
@@ -98,8 +100,8 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const gpu = flagVal("--gpu"); if (gpu) spec.gpu.mode = gpu as VmSpec["gpu"]["mode"];
             const hm = flagVal("--head-mode"); if (hm) spec.display.headMode = hm as VmSpec["display"]["headMode"];
             const persist = flagVal("--persist"); if (persist) spec.persist = persist as VmSpec["persist"];
-            for (const [i, a] of argv.entries()) {
-                if (a === "--share") {
+            for (let i = 0; i < argv.length; i++) {
+                if (argv[i] === "--share") {
                     const [p, tag] = (argv[i + 1] ?? "").split(":");
                     spec.shares.push({ hostPath: p, tag: tag ?? "hostshare", readOnly: false });
                 }
@@ -150,9 +152,9 @@ async function usbCmd(cmd: string | undefined, args: string[]) {
     switch (cmd) {
         case "ls": {
             const devs = await listUsbDevices();
-            for (const d of devs) {
+            devs.forEach((d) => {
                 console.log(`${d.vendorId}:${d.productId}  bus${d.bus}/dev${d.addr}  ${d.vendor ?? ""} ${d.product ?? ""}  ${d.writable ? "" : "(no rw perm)"}`);
-            }
+            });
             break;
         }
         case "attach": {
@@ -180,9 +182,10 @@ async function doctor() {
     checks.push(["/dev/kvm writable (kvm group)", k.code === 0, "usermod -aG kvm $USER"]);
     const groups = (await run("id", ["-nG"])).stdout;
     checks.push(["in kvm group", groups.split(" ").includes("kvm"), "usermod -aG kvm $USER (relogin)"]);
-    for (const tool of ["xfreerdp3", "virtiofsd", "cloud-localds", "wmctrl", "xdotool", "qdbus", "waypipe", "socat"]) {
-        const p = await which(tool);
-        checks.push([`tool: ${tool}`, !!p, "see toolchain/versions.json systemTools"]);
+    const tools = ["xfreerdp3", "virtiofsd", "cloud-localds", "wmctrl", "xdotool", "qdbus", "waypipe", "socat"];
+    for (let i = 0; i < tools.length; i++) {
+        const p = await which(tools[i]!);
+        checks.push([`tool: ${tools[i]}`, !!p, "see toolchain/versions.json systemTools"]);
     }
     const tc = await resolveToolchain().catch((e) => { checks.push(["qemu toolchain", false, String(e)]); return null; });
     if (tc) {
@@ -192,9 +195,9 @@ async function doctor() {
         checks.push([`xfreerdp: ${tc.xfreerdp}`, true, ""]);
     }
     checks.push(["OVMF firmware", existsSync("/usr/share/OVMF/OVMF_CODE_4M.fd"), "apt install ovmf"]);
-    for (const [label, ok, fix] of checks) {
+    checks.forEach(([label, ok, fix]) => {
         console.log(`${ok ? " ok " : "FAIL"}  ${label}${ok ? "" : `  → ${fix}`}`);
-    }
+    });
     if (checks.some(([, ok]) => !ok)) process.exit(1);
 }
 
@@ -217,6 +220,7 @@ switch (area) {
         const o = {
             username: flagVal("--user"), password: flagVal("--password"),
             timezone: flagVal("--timezone"), mirrorHostMonitors: !has("--no-monitor-mirror"),
+            onLog: (m: string) => console.log(m),
         };
         const { provisionVmCloudimg, provisionVmIso, reprovisionGuest } = await import("../libraries/provision/src/provision");
         if (sub === "cloudimg") { if (!rest[1]) usage(); await provisionVmCloudimg(h, { ...o, release: rest[1] }); }
@@ -229,7 +233,7 @@ switch (area) {
         const h = await needVm(rest[0]);
         const { guestAppCatalog, launchApp } = await import("../libraries/app-mode/src/waypipe");
         if (sub === "list") {
-            for (const a of await guestAppCatalog(h)) console.log(`${a.id.padEnd(45)} ${a.name.padEnd(30)} ${a.exec}`);
+            (await guestAppCatalog(h)).forEach((a) => console.log(`${a.id.padEnd(45)} ${a.name.padEnd(30)} ${a.exec}`));
         } else if (sub === "run") {
             if (!rest[1]) usage();
             const l = await launchApp(h, rest.slice(1).join(" "));

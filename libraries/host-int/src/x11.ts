@@ -10,10 +10,10 @@ export async function x11Monitors(): Promise<MonitorInfo[]> {
     if (r.code !== 0) return [];
     const out: MonitorInfo[] = [];
     // " 0: +*DP-1 3440/800x1440/330+0+0  DP-1"
-    for (const line of r.stdout.split("\n")) {
+    r.stdout.split("\n").forEach((line) => {
         const m = line.match(/^\s*\d+:\s+[+*]*\s*(\S+)\s+(\d+)\/\d+x(\d+)\/\d+\+(\d+)\+(\d+)/);
         if (m) out.push({ name: m[1]!, w: Number(m[2]), h: Number(m[3]), x: Number(m[4]), y: Number(m[5]), primary: line.includes("*") });
-    }
+    });
     return out;
 }
 
@@ -33,17 +33,19 @@ export async function x11Windows(): Promise<WindowHandle[]> {
     if (r.code !== 0) return [];
     // "0x03600008  2 4176 xfreerdp.Xfreerdp  host  FreeRDP: ..."
     const out: WindowHandle[] = [];
-    for (const line of r.stdout.split("\n")) {
+    r.stdout.split("\n").forEach((line) => {
         const m = line.match(/^(0x[0-9a-fA-F]+)\s+-?\d+\s+(-?\d+)\s+(\S+)\s+\S+\s+(.*)$/);
         if (m) out.push({ id: m[1]!, pid: Number(m[2]), wmClass: m[3], title: m[4]! });
-    }
+    });
     return out;
 }
 
 export async function x11FindWindow(m: WindowMatcher, timeoutMs = 15_000): Promise<WindowHandle | null> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-        for (const w of await x11Windows()) {
+        const wins = await x11Windows();
+        for (let i = 0; i < wins.length; i++) {
+            const w = wins[i]!;
             if (m.pid !== undefined && w.pid !== m.pid) continue;
             if (m.wmClass && w.wmClass !== m.wmClass) continue;
             if (m.title !== undefined) {

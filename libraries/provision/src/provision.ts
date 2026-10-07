@@ -3,7 +3,6 @@
 // first-boot with seed, guest setup, monitor layout.
 // ============================================================================
 
-import { vmPaths } from "../../vm-core/src/paths";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import { detectAdapter } from "../../host-int/src/detect";
@@ -26,7 +25,8 @@ export interface ProvisionOpts {
     onLog?: (msg: string) => void;
 }
 
-function log(o: ProvisionOpts, m: string) { (o.onLog ?? console.log)(m); }
+const noop = () => {};
+function log(o: ProvisionOpts, m: string) { (o.onLog ?? noop)(m); }
 
 /** Generate + persist credentials; returns plaintext password for the run. */
 async function ensurePassword(spec: VmSpec, o: ProvisionOpts): Promise<string> {

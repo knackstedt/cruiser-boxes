@@ -31,7 +31,8 @@ export async function listUsbDevices(): Promise<UsbDevice[]> {
     let entries: string[];
     try { entries = await readdir(SYS_USB); } catch { return []; }
     const out: UsbDevice[] = [];
-    for (const e of entries) {
+    for (let ei = 0; ei < entries.length; ei++) {
+        const e = entries[ei]!;
         // Entries look like "1-2" (bus-port) for devices; skip "usbN" roots + interfaces "1-2:1.0".
         if (!/^(\d+)-(\d+(?:\.\d+)*)$/.test(e)) continue;
         const dir = join(SYS_USB, e);

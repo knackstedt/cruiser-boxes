@@ -39,10 +39,11 @@ export async function extractCasper(iso: string, outDir: string): Promise<{ kern
             "-extract", "/casper/vmlinuz", kernel, "-extract", "/casper/initrd", initrd]);
     } else if (await which("isoinfo")) {
         const { writeFile } = await import("node:fs/promises");
-        for (const [src, dst] of [["/casper/vmlinuz", kernel], ["/casper/initrd", initrd]] as const) {
-            const r = await run("isoinfo", ["-i", iso, "-x", src]);
+        const files: [string, string][] = [["/casper/vmlinuz", kernel], ["/casper/initrd", initrd]];
+        for (let i = 0; i < files.length; i++) {
+            const r = await run("isoinfo", ["-i", iso, "-x", files[i]![0]]);
             // isoinfo streams binary to stdout — execFile buffer is fine for vmlinuz (~15M)
-            await writeFile(dst, r.stdout, { encoding: "latin1" });
+            await writeFile(files[i]![1], r.stdout, { encoding: "latin1" });
         }
     } else {
         throw new Error("need xorriso or isoinfo (genisoimage) to extract casper kernel/initrd");
@@ -95,7 +96,10 @@ export async function runIsoInstall(
     });
     await new Promise<void>((res, rej) => {
         const timer = setTimeout(() => { child.kill("SIGKILL"); rej(new Error("iso install timed out")); }, o.timeoutMs ?? 90 * 60_000);
-        child.on("exit", (c) => { clearTimeout(timer); c === 0 || c === null ? res() : rej(new Error(`qemu install exited ${c}`)); });
+        child.on("exit", (c) => {
+            clearTimeout(timer);
+            if (c === 0 || c === null) res(); else rej(new Error(`qemu install exited ${c}`));
+        });
         child.on("error", rej);
     });
 

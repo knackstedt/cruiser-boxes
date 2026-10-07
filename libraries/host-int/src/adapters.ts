@@ -11,7 +11,7 @@
 
 import { run } from "../../sys/src/exec";
 import type {
-    AdapterCaps, DesktopInfo, EscapeActionSpec, MonitorInfo,
+    AdapterCaps, EscapeActionSpec,
     WindowHandle, WindowMatcher, WmAdapter,
 } from "./types";
 import {

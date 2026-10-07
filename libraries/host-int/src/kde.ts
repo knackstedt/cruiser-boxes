@@ -23,8 +23,10 @@ export async function kdeDesktops(): Promise<DesktopInfo[]> {
             qdbus(["org.kde.KWin", "/VirtualDesktopManager", "org.freedesktop.DBus.Properties.Get", "org.kde.KWin.VirtualDesktopManager", "current"]).catch(() => ""),
         ]);
         const out: DesktopInfo[] = [];
-        for (const m of literal.matchAll(/\(?\s*(\d+),\s*"([0-9a-fA-F-]{36})",\s*"([^"]*)"/g))
-            out.push({ index: Number(m[1]) + 1, id: m[2], name: m[3], current: m[2] === cur });
+        const re = /\(?\s*(\d+),\s*"([0-9a-fA-F-]{36})",\s*"([^"]*)"/g;
+        let mm: RegExpExecArray | null;
+        while ((mm = re.exec(literal)) !== null)
+            out.push({ index: Number(mm[1]) + 1, id: mm[2], name: mm[3], current: mm[2] === cur });
         if (!out.length) {
             const count = await qdbus(["org.kde.KWin", "/VirtualDesktopManager", "org.freedesktop.DBus.Properties.Get", "org.kde.KWin.VirtualDesktopManager", "count"]).catch(() => "0");
             for (let i = 0; i < Number(count); i++) out.push({ index: i + 1, current: i === 0 });

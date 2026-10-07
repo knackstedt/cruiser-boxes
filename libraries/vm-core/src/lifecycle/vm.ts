@@ -5,13 +5,13 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, writeFile, readFile, copyFile, rm } from "node:fs/promises";
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 
 import type { VmSpec } from "../config/schema";
 import { parseVmSpec } from "../config/schema";
 import { vmPaths, type VmPaths } from "../paths";
-import { buildArgs, OVMF_VARS_TEMPLATE, type BuildOpts, type BuiltArgs, type GuestMonitor } from "../qemu/args";
+import { buildArgs, OVMF_VARS_TEMPLATE, type BuildOpts, type BuiltArgs } from "../qemu/args";
 import { resolveToolchain, type Toolchain } from "../qemu/resolve";
 import { QmpClient } from "../qmp/client";
 import { QgaClient } from "../qga/client";
@@ -137,7 +137,8 @@ export class VmHandle extends EventEmitter {
         const built = await this.buildArgv(opts);
 
         // virtiofsd daemons must be up before QEMU opens the sockets.
-        for (const v of built.virtiofsd) {
+        for (let i = 0; i < built.virtiofsd.length; i++) {
+            const v = built.virtiofsd[i]!;
             await rm(v.socket, { force: true });
             const c = spawnChild("virtiofsd", [
                 `--socket-path=${v.socket}`, `--shared-dir=${v.sharedDir}`,
@@ -192,7 +193,7 @@ export class VmHandle extends EventEmitter {
     }
 
     private cleanupRunDir(): void {
-        for (const c of this.vfsChildren) c.kill();
+        this.vfsChildren.forEach((c) => c.kill());
         this.vfsChildren = [];
         this._qmp?.close(); this._qga?.close();
         this._qmp = null; this._qga = null;

@@ -106,7 +106,8 @@ export async function backupLive(qmp: QmpClient, diskNode: string, destPath: str
 /** Resolve the guest disk's QMP node-name for blockdev ops. */
 export async function diskNodeName(qmp: QmpClient, diskPath: string): Promise<string> {
     const blocks = await qmp.execute("query-block");
-    for (const b of blocks ?? []) {
+    for (let i = 0; i < (blocks ?? []).length; i++) {
+        const b = blocks[i];
         const f = b?.inserted?.file ?? b?.inserted?.image?.filename;
         if (typeof f === "string" && (f === diskPath || f.endsWith("/" + diskPath.split("/").pop()))) {
             return b?.inserted?.node_name ?? b?.device;

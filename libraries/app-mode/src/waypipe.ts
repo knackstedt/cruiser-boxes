@@ -11,7 +11,7 @@
 
 import type { ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { spawnChild, which, run } from "../../sys/src/exec";
+import { spawnChild, which } from "../../sys/src/exec";
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { guestCid } from "../../vm-core/src/qemu/args";
@@ -120,12 +120,12 @@ export async function guestAppCatalog(h: VmHandle): Promise<GuestApp[]> {
             printf '%s\\t%s\\t%s\\n' "$(basename "$f")" "$name" "$exec"
         done`, 30_000);
     const apps: GuestApp[] = [];
-    for (const line of String(r.stdout).split("\n")) {
+    String(r.stdout).split("\n").forEach((line) => {
         const [id, name, exec] = line.split("\t");
-        if (!id || !exec) continue;
+        if (!id || !exec) return;
         // strip .desktop field codes (%U %F etc.) — waypipe runs the raw command
         const cmd = exec.replace(/%[a-zA-Z]/g, "").replace(/\s+/g, " ").trim();
         apps.push({ id, name: name || id, exec: cmd, desktopFile: id });
-    }
+    });
     return apps;
 }

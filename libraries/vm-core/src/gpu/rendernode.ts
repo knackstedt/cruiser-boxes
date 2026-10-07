@@ -9,7 +9,6 @@
 
 import { readdir, readlink } from "node:fs/promises";
 import { basename } from "node:path";
-import { existsSync } from "node:fs";
 
 const MESA_DRIVERS = ["amdgpu", "i915", "xe", "radeon", "virtio_gpu", "msm", "panfrost", "nouveau"];
 const BAD_DRIVERS = ["nvidia", "nvidia-drm"];
@@ -20,7 +19,9 @@ export async function listRenderNodes(): Promise<RenderNode[]> {
     const out: RenderNode[] = [];
     let names: string[] = [];
     try { names = await readdir("/sys/class/drm"); } catch { return out; }
-    for (const n of names.filter((x) => /^renderD\d+$/.test(x)).sort()) {
+    const nodes = names.filter((x) => /^renderD\d+$/.test(x)).sort();
+    for (let i = 0; i < nodes.length; i++) {
+        const n = nodes[i]!;
         const dev = `/sys/class/drm/${n}/device/driver`;
         let driver = "unknown";
         try { driver = basename(await readlink(dev)); } catch { /* no driver link */ }

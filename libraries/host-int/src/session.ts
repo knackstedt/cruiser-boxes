@@ -68,7 +68,8 @@ export class ViewerSession extends EventEmitter {
 
         // Escape shortcuts need the host WM to see the keys (no keyboard grab).
         if (this.adapter.caps.shortcuts && !d.grabKeyboard) {
-            for (const s of d.escapeShortcuts) {
+            for (let i = 0; i < d.escapeShortcuts.length; i++) {
+                const s = d.escapeShortcuts[i]!;
                 const action = parseEscapeAction(s.action);
                 if (action) {
                     const un = await this.adapter.installEscapeShortcut(s.keys, action).catch(() => null);
@@ -85,7 +86,7 @@ export class ViewerSession extends EventEmitter {
 
     private async cleanup(): Promise<void> {
         const us = this.uninstallers; this.uninstallers = [];
-        for (const u of us) await u().catch(() => {});
+        for (let i = 0; i < us.length; i++) await us[i]!().catch(() => {});
     }
 }
 

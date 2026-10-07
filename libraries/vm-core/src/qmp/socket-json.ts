@@ -90,7 +90,7 @@ export class JsonSocket extends EventEmitter {
 
     private onClose(): void {
         this.closed = true;
-        for (const [, p] of this.pending) p.reject(new Error("socket closed"));
+        this.pending.forEach((p) => p.reject(new Error("socket closed")));
         this.pending.clear();
         this.emit("close");
     }

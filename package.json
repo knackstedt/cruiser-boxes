@@ -11,7 +11,7 @@
     "cli": "bun run src/cli.ts",
     "toolchain": "bun run toolchain/build.mts",
     "lint": "oxlint",
-    "test": "bun test",
+    "test": "bun test tests/",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

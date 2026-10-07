@@ -8,7 +8,7 @@ import { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import { defaultSpec, VmSpec } from "../../vm-core/src/config/schema";
 import { detectAdapter, detectSession } from "../../host-int/src/detect";
 import { ViewerSession } from "../../host-int/src/session";
-import type { CreateForm, DoctorRow, HostInfo, Store, VmSummary } from "./store";
+import type { DoctorRow, HostInfo, Store, VmSummary } from "./store";
 
 export class CruiserService {
     private registry = new VmRegistry();
@@ -20,7 +20,7 @@ export class CruiserService {
 
     async init(): Promise<void> {
         await this.registry.scan();
-        for (const h of this.registry.list()) this.handles.set(h.spec.name, h);
+        this.registry.list().forEach((h) => this.handles.set(h.spec.name, h));
         await this.refresh();
         await this.refreshHost();
         this.pollTimer = setInterval(() => this.refresh().catch(() => {}), 3000);
@@ -28,7 +28,7 @@ export class CruiserService {
 
     dispose(): void {
         if (this.pollTimer) clearInterval(this.pollTimer);
-        for (const v of this.viewers.values()) v.close().catch(() => {});
+        this.viewers.forEach((v) => v.close().catch(() => {}));
     }
 
     private async run<T>(label: string, fn: () => Promise<T>): Promise<T | undefined> {
@@ -66,7 +66,8 @@ export class CruiserService {
 
     async refresh(): Promise<void> {
         const vms: VmSummary[] = [];
-        for (const h of this.handles.values()) vms.push(await this.summarize(h));
+        const hs = [...this.handles.values()];
+        for (let i = 0; i < hs.length; i++) vms.push(await this.summarize(hs[i]!));
         vms.sort((a, b) => a.name.localeCompare(b.name));
         this.store.getState().setVms(vms);
     }
@@ -169,9 +170,9 @@ export class CruiserService {
             const rows: DoctorRow[] = [];
             const k = await run("test", ["-w", "/dev/kvm"], { noThrow: true });
             rows.push({ label: "/dev/kvm writable", ok: k.code === 0, fix: "usermod -aG kvm $USER" });
-            for (const t of ["xfreerdp3", "virtiofsd", "cloud-localds", "wmctrl", "xdotool", "qdbus", "waypipe", "socat"]) {
-                rows.push({ label: `tool: ${t}`, ok: !!(await which(t)), fix: "see toolchain/versions.json systemTools" });
-            }
+            const tools = ["xfreerdp3", "virtiofsd", "cloud-localds", "wmctrl", "xdotool", "qdbus", "waypipe", "socat"];
+            for (let i = 0; i < tools.length; i++)
+                rows.push({ label: `tool: ${tools[i]}`, ok: !!(await which(tools[i]!)), fix: "see toolchain/versions.json systemTools" });
             const tc = await resolveToolchain().catch(() => null);
             rows.push({ label: "qemu toolchain", ok: !!tc, fix: "cruiser toolchain build" });
             rows.push({ label: "OVMF firmware", ok: existsSync("/usr/share/OVMF/OVMF_CODE_4M.fd"), fix: "apt install ovmf" });
