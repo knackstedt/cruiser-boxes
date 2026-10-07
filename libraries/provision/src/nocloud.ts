@@ -27,7 +27,8 @@ export interface SeedOpts {
 export function cloudimgUserData(o: SeedOpts): string {
     const pkgs = [
         "qemu-guest-agent", "spice-vdagent", "mesa-vulkan-drivers",
-        "gnome-remote-desktop", "xdotool", "openssh-server",
+        "gnome-remote-desktop", "pkexec", "polkitd", "xdotool", "openssh-server",
+        "gdm3", "gnome-shell", "gnome-session",
         ...(o.extraPackages ?? []),
     ];
     return `#cloud-config

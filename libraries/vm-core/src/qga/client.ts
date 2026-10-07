@@ -24,9 +24,11 @@ export class QgaClient extends JsonSocket {
     }
 
     /** guest-sync-delimited resync — establishes the response channel. */
-    async sync(): Promise<void> {
+    async sync(timeoutMs = 10_000): Promise<void> {
+        // 0xFF sentinel resets the agent's parser before the sync request.
+        this.sock.write("\xff");
         const id = Math.floor(Math.random() * 2 ** 31);
-        const r = await this.send("guest-sync-delimited", { id });
+        const r = await this.send("guest-sync-delimited", { id }, timeoutMs);
         if (Number(r) !== id) throw new Error(`qga sync mismatch: ${r} != ${id}`);
     }
 
@@ -34,7 +36,7 @@ export class QgaClient extends JsonSocket {
         this.emit("event", msg);
     }
 
-    ping(): Promise<any> { return this.send("guest-ping"); }
+    ping(timeoutMs = 5_000): Promise<any> { return this.send("guest-ping", undefined, timeoutMs); }
 
     async exec(path: string, arg: string[] = [], opts: { inputB64?: string; timeoutMs?: number } = {}): Promise<GuestExecResult> {
         const r = await this.send("guest-exec", {

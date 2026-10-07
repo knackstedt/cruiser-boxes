@@ -13,7 +13,7 @@ export interface JsonSocketEvents {
 }
 
 export class JsonSocket extends EventEmitter {
-    private sock: Socket;
+    protected sock: Socket;
     private buf: Buffer = Buffer.alloc(0);
     private pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
     private nextId = 1;
@@ -78,12 +78,20 @@ export class JsonSocket extends EventEmitter {
         });
     }
 
-    send(cmd: string, args?: Record<string, unknown>): Promise<any> {
+    send(cmd: string, args?: Record<string, unknown>, timeoutMs?: number): Promise<any> {
         const id = this.nextId++;
         const pkt = JSON.stringify(args ? { execute: cmd, arguments: args, id } : { execute: cmd, id }) + "\n";
         return new Promise((resolve, reject) => {
             if (this.closed) return reject(new Error("socket closed"));
-            this.pending.set(id, { resolve, reject });
+            let to: ReturnType<typeof setTimeout> | undefined;
+            if (timeoutMs) to = setTimeout(() => {
+                this.pending.delete(id);
+                reject(new Error(`${cmd} timed out after ${timeoutMs}ms`));
+            }, timeoutMs);
+            this.pending.set(id, {
+                resolve: (v: any) => { if (to) clearTimeout(to); resolve(v); },
+                reject: (e: Error) => { if (to) clearTimeout(to); reject(e); },
+            });
             this.sock.write(pkt);
         });
     }
