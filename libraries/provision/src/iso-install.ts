@@ -4,7 +4,7 @@
 // install runs text-mode on the serial console (log to run/install-serial.log).
 // ============================================================================
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -32,18 +32,31 @@ export async function extractCasper(iso: string, outDir: string): Promise<{ kern
     await mkdir(outDir, { recursive: true });
     const kernel = join(outDir, "vmlinuz");
     const initrd = join(outDir, "initrd");
-    if (existsSync(kernel) && existsSync(initrd)) return { kernel, initrd };
+    const nonEmpty = (p: string) => existsSync(p) && statSync(p).size > 0;
+    if (nonEmpty(kernel) && nonEmpty(initrd)) return { kernel, initrd };
 
     if (await which("xorriso")) {
         await run("xorriso", ["-osirrox", "on", "-indev", iso,
             "-extract", "/casper/vmlinuz", kernel, "-extract", "/casper/initrd", initrd]);
     } else if (await which("isoinfo")) {
-        const { writeFile } = await import("node:fs/promises");
+        // -R = Rock Ridge names (/casper/vmlinuz); without it isoinfo only
+        // sees ISO9660 mangled names (/CASPER/VMLINUZ.;) and emits nothing.
+        // stdout is binary — stream straight to disk, never through a string.
+        const { spawn } = await import("node:child_process");
+        const { createWriteStream } = await import("node:fs");
         const files: [string, string][] = [["/casper/vmlinuz", kernel], ["/casper/initrd", initrd]];
         for (let i = 0; i < files.length; i++) {
-            const r = await run("isoinfo", ["-i", iso, "-x", files[i]![0]]);
-            // isoinfo streams binary to stdout — execFile buffer is fine for vmlinuz (~15M)
-            await writeFile(files[i]![1], r.stdout, { encoding: "latin1" });
+            const [isoPath, dst] = files[i]!;
+            await new Promise<void>((resolve, reject) => {
+                const out = createWriteStream(dst);
+                const c = spawn("isoinfo", ["-R", "-i", iso, "-x", isoPath]);
+                c.stdout.pipe(out);
+                c.stderr.on("data", () => {});
+                c.on("exit", (code) => code === 0 ? out.close(() => resolve()) : reject(new Error(`isoinfo -x ${isoPath} exited ${code}`)));
+                c.on("error", reject);
+            });
+            const { size } = await (await import("node:fs/promises")).stat(dst);
+            if (!size) throw new Error(`isoinfo extracted empty ${isoPath} — ISO layout not recognized`);
         }
     } else {
         throw new Error("need xorriso or isoinfo (genisoimage) to extract casper kernel/initrd");

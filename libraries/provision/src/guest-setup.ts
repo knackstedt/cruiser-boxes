@@ -43,14 +43,24 @@ UUID=$(id -u "$U")
 # fails *silently* (exit 0, error on stderr) when it is missing.
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
     gnome-remote-desktop qemu-guest-agent spice-vdagent mesa-vulkan-drivers xdotool \
-    pkexec polkitd gdm3 gnome-shell gnome-session || true
+    pkexec polkitd gdm3 gnome-shell gnome-session xauth xwayland || true
 usermod -aG render "$U" || true
 
-# host shares (9p tags — virtiofs mounts use the same tag names)
-${spec.shares.map((s) => `grep -q ' ${s.tag} ' /etc/fstab || tee -a /etc/fstab <<'FSTAB'
-${s.tag} /mnt/${s.tag} 9p trans=virtio,version=9p2000.L,msize=262144,_netdev,x-systemd.automount,x-systemd.idle-timeout=60 0 0
+# host shares — virtiofs when a virtio-fs device is bound, 9p otherwise.
+# (virtiofs devices have no mount_tag sysfs attr; driver binding is the test.)
+SHARE_FSTYPE=9p; ls -d /sys/bus/virtio/drivers/virtiofs/virtio* >/dev/null 2>&1 && SHARE_FSTYPE=virtiofs
+${spec.shares.map((s) => `mkdir -p /mnt/${s.tag}
+if [ "$SHARE_FSTYPE" = virtiofs ]; then
+    grep -q ' /mnt/${s.tag} ' /etc/fstab || tee -a /etc/fstab <<'FSTAB'
+${s.tag} /mnt/${s.tag} virtiofs rw,nofail,_netdev,x-systemd.automount 0 0
 FSTAB
-mkdir -p /mnt/${s.tag}`).join("\n")}
+    mount -t virtiofs ${s.tag} /mnt/${s.tag} 2>/dev/null || true
+else
+    grep -q ' /mnt/${s.tag} ' /etc/fstab || tee -a /etc/fstab <<'FSTAB'
+${s.tag} /mnt/${s.tag} 9p trans=virtio,version=9p2000.L,msize=262144,_netdev,x-systemd.automount,x-systemd.idle-timeout=60,nofail 0 0
+FSTAB
+    mount -t 9p -o trans=virtio,version=9p2000.L ${s.tag} /mnt/${s.tag} 2>/dev/null || true
+fi`).join("\n")}
 systemctl daemon-reload || true
 systemctl enable gdm.service 2>/dev/null || systemctl enable gdm3.service 2>/dev/null || true
 
@@ -73,7 +83,7 @@ chown -R gnome-remote-desktop:gnome-remote-desktop /var/lib/gnome-remote-desktop
 systemctl enable --now gnome-remote-desktop.service
 grdctl --system rdp set-tls-cert /var/lib/gnome-remote-desktop/tls/cert.pem
 grdctl --system rdp set-tls-key /var/lib/gnome-remote-desktop/tls/key.pem
-printf '%s\n%s\n' '${u}' '${o.rdpPassword}' | grdctl --system rdp set-credentials
+grdctl --system rdp set-credentials '${u}' '${o.rdpPassword}'
 grdctl --system rdp set-auth-methods credentials
 grdctl --system rdp disable-view-only
 grdctl --system rdp disable-port-negotiation
@@ -83,6 +93,8 @@ grdctl --system rdp enable
 systemctl restart gnome-remote-desktop.service || true
 sleep 3
 ss -tln | grep -q ':3389' || { echo "GRD RDP server is not listening on 3389"; exit 1; }
+[ -s /var/lib/gnome-remote-desktop/.local/share/gnome-remote-desktop/credentials.ini ] || \
+    { echo "GRD credentials were not persisted"; exit 1; }
 
 # no lock/suspend inside the VM (user session bus may not exist pre-login)
 runuser -u "$U" -- env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/"$UUID"/bus \
@@ -105,6 +117,8 @@ export async function runGuestSetup(
     o: { rdpPassword: string; monitorsXml?: string; timeoutMs?: number },
 ): Promise<void> {
     const monitorsXmlB64 = o.monitorsXml ? Buffer.from(o.monitorsXml).toString("base64") : undefined;
+    const { authorizeInGuest } = await import("../../vm-core/src/sshkey");
+    await authorizeInGuest(h);
     const script = guestSetupScript(h.spec, { rdpPassword: o.rdpPassword, monitorsXmlB64 });
     const res = await h.guestSh(script, o.timeoutMs ?? 10 * 60_000);
     const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;

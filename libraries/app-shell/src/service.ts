@@ -165,14 +165,15 @@ export class CruiserService {
     async runDoctor(): Promise<void> {
         await this.run("doctor", async () => {
             const { existsSync } = await import("node:fs");
-            const { run, which } = await import("../../sys/src/exec");
+            const { run, which, virtiofsdPath } = await import("../../sys/src/exec");
             const { resolveToolchain } = await import("../../vm-core/src/qemu/resolve");
             const rows: DoctorRow[] = [];
             const k = await run("test", ["-w", "/dev/kvm"], { noThrow: true });
             rows.push({ label: "/dev/kvm writable", ok: k.code === 0, fix: "usermod -aG kvm $USER" });
-            const tools = ["xfreerdp3", "virtiofsd", "cloud-localds", "wmctrl", "xdotool", "qdbus", "waypipe", "socat"];
+            const tools = ["xfreerdp3", "cloud-localds", "genisoimage", "wmctrl", "xdotool", "qdbus", "waypipe", "socat", "sshfs"];
             for (let i = 0; i < tools.length; i++)
                 rows.push({ label: `tool: ${tools[i]}`, ok: !!(await which(tools[i]!)), fix: "see toolchain/versions.json systemTools" });
+            rows.push({ label: "tool: virtiofsd", ok: (await virtiofsdPath()) !== null, fix: "apt install virtiofsd" });
             const tc = await resolveToolchain().catch(() => null);
             rows.push({ label: "qemu toolchain", ok: !!tc, fix: "cruiser toolchain build" });
             rows.push({ label: "OVMF firmware", ok: existsSync("/usr/share/OVMF/OVMF_CODE_4M.fd"), fix: "apt install ovmf" });

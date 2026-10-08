@@ -1,12 +1,19 @@
 // ============================================================================
-// waypipe.ts — app-only head mode. Single-app windows streamed host↔guest
-// via waypipe (protocol-level forwarding, no video compression artifacts).
+// appmode.ts — app-only head mode. Single guest applications appear as host
+// windows. Transport is chosen by host session type:
 //
-// Transport preference: vsock (guest-cid bridge via socat) → ssh fallback.
+//   host Wayland  → waypipe (protocol-level forwarding, no video artifacts)
+//                     · vsock: host socat VSOCK-LISTEN → waypipe client sock;
+//                       guest socat unix→VSOCK-CONNECT:host, waypipe server+app
+//                     · ssh:   `waypipe ssh -p port user@host CMD`
+//   host X11      → ssh -X (X11 forwarding; waypipe needs a host compositor
+//                     to display into and simply cannot run on X11)
 //
-//   guest:  waypipe -s /tmp/wp.sock server  +  socat VSOCK-LISTEN:fork→unix
-//   host:   socat UNIX-LISTEN:wp-host.sock,fork → VSOCK-CONNECT:cid:port
-//   app:    waypipe -s wp-host.sock client <command>
+// waypipe direction (read the man page carefully — it's counterintuitive):
+//   `waypipe client` runs on the COMPOSITOR side (host): listens on a socket,
+//   displays whatever a matching `waypipe server` sends into $WAYLAND_DISPLAY.
+//   `waypipe server -- CMD` runs on the APP side (guest): fake compositor for
+//   CMD, channel socket connects back to the host client.
 // ============================================================================
 
 import type { ChildProcess } from "node:child_process";
@@ -14,15 +21,16 @@ import { existsSync } from "node:fs";
 import { spawnChild, which } from "../../sys/src/exec";
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import type { VmSpec } from "../../vm-core/src/config/schema";
-import { guestCid } from "../../vm-core/src/qemu/args";
+import { ensureKeypair, authorizeInGuest } from "../../vm-core/src/sshkey";
 import { vmPaths } from "../../vm-core/src/paths";
 
 export const WAYPIPE_VSOCK_PORT = 9922;
+const HOST_CID = 2;
 const GUEST_SOCK = "/tmp/waypipe-cruiser.sock";
 
 export interface AppLaunch {
     child: ChildProcess;
-    transport: "vsock" | "ssh";
+    transport: "waypipe-vsock" | "waypipe-ssh" | "ssh-x";
     command: string;
 }
 
@@ -33,20 +41,25 @@ export async function waypipeAvailable(): Promise<{ waypipe: boolean; socat: boo
     return { waypipe: !!(await which("waypipe")), socat: !!(await which("socat")) };
 }
 
-// ── guest side (via QGA) ──
+/** Does the host session have a Wayland compositor to render into? */
+export function hostHasWayland(): boolean {
+    if (process.env.WAYLAND_DISPLAY) return true;
+    const rt = process.env.XDG_RUNTIME_DIR;
+    return !!rt && existsSync(`${rt}/wayland-0`);
+}
+
+// ── guest side (via QGA, runs as root — runuser for the app itself) ──
 
 /**
- * Install + start the guest waypipe server and vsock→unix bridge.
- * Idempotent. Requires `waypipe` and `socat` inside the guest (the guest
- * setup script installs them; apt fallback attempted here).
+ * Ensure guest waypipe + socat and the unix→vsock bridge are running.
+ * Idempotent. Guest `waypipe server` connects GUEST_SOCK → host CID:9922.
  */
 export async function ensureGuestServer(h: VmHandle): Promise<void> {
-    await h.guestSh(`command -v waypipe >/dev/null || sudo -n apt-get install -y waypipe socat`, 120_000).catch(() => {});
-    const probe = await h.guestSh(`pgrep -f 'waypipe -s ${GUEST_SOCK} server' || true`);
-    if (String(probe.stdout).trim()) return; // already running
+    await h.guestSh(`command -v waypipe >/dev/null || apt-get install -y waypipe socat`, 120_000).catch(() => {});
+    const probe = await h.guestSh(`pgrep -f 'socat UNIX-LISTEN:${GUEST_SOCK}' || true`);
+    if (String(probe.stdout).trim()) return; // bridge already up
     await h.guestSh(`
-        nohup waypipe -s ${GUEST_SOCK} server >/tmp/waypipe-server.log 2>&1 &
-        nohup socat VSOCK-LISTEN:${WAYPIPE_VSOCK_PORT},fork UNIX-CONNECT:${GUEST_SOCK} >/tmp/wp-bridge.log 2>&1 &
+        nohup socat UNIX-LISTEN:${GUEST_SOCK},fork,unlink-early VSOCK-CONNECT:${HOST_CID}:${WAYPIPE_VSOCK_PORT} >/tmp/wp-bridge.log 2>&1 &
         sleep 0.5; echo bridge-up
     `, 10_000);
 }
@@ -57,61 +70,92 @@ function hostSock(spec: VmSpec): string {
     return `${vmPaths(spec.name).run}/waypipe.sock`;
 }
 
-/** Bring up the host bridge; returns the unix socket the client should use. */
-async function hostBridge(spec: VmSpec): Promise<{ socket: string; transport: "vsock" | "ssh"; bridge?: ChildProcess }> {
+/**
+ * Bring up the host half: `waypipe client` (per VM — displays incoming guest
+ * app channels into the host compositor) + `socat VSOCK-LISTEN → client sock`.
+ */
+async function hostBridge(spec: VmSpec): Promise<ChildProcess | null> {
     const sock = hostSock(spec);
-    if (spec.network.vsock && (await which("socat")) && existsSync("/dev/vhost-vsock")) {
-        const bridge = spawnChild("socat", [
-            `UNIX-LISTEN:${sock},fork,unlink-early`,
-            `VSOCK-CONNECT:${guestCid(spec.name)}:${WAYPIPE_VSOCK_PORT}`,
-        ], { detached: true });
-        bridge.unref();
-        // give socat a beat to bind
-        await new Promise((r) => setTimeout(r, 300));
-        if (existsSync(sock)) return { socket: sock, transport: "vsock", bridge };
-    }
-    return { socket: "", transport: "ssh" };
+    if (!spec.network.vsock || !(await which("socat")) || !existsSync("/dev/vhost-vsock"))
+        return null;
+    const wp = spawnChild("waypipe", ["-s", sock, "--unlink-socket", "client"], { detached: true });
+    wp.unref();
+    const bridge = spawnChild("socat", [
+        `VSOCK-LISTEN:${WAYPIPE_VSOCK_PORT},fork`,
+        `UNIX-CONNECT:${sock}`,
+    ], { detached: true });
+    bridge.unref();
+    await new Promise((r) => setTimeout(r, 400));
+    return existsSync(sock) ? bridge : null;
 }
 
 /**
  * Launch a guest application as a host-side window.
- *  - vsock: bridge socket + `waypipe -s sock client CMD`
- *  - ssh:   `waypipe ssh -p <port> user@127.0.0.1 CMD` (needs key auth or sshpass)
+ *   - Wayland host + vsock: waypipe client+socat on host, `waypipe server`
+ *     run in the guest via QGA (returns immediately — the app is a detached
+ *     guest process, so `child` is a held-open placeholder process).
+ *   - Wayland host, no vsock: `waypipe ssh` single-shot.
+ *   - X11 host: `ssh -X` (needs xauth in guest; setup script installs it).
  */
 export async function launchApp(h: VmHandle, command: string): Promise<AppLaunch> {
-    const wp = await waypipeAvailable();
-    if (!wp.waypipe) throw new WaypipeError("waypipe not installed on host (apt install waypipe)");
-
     const spec = h.spec;
-    // vsock needs the guest bridge; ssh needs nothing extra.
-    let br: Awaited<ReturnType<typeof hostBridge>> = { socket: "", transport: "ssh" };
-    if (spec.network.vsock) {
-        try { await ensureGuestServer(h); } catch { /* falls back to ssh */ }
-        br = await hostBridge(spec);
-    }
 
-    if (br.transport === "vsock") {
-        const child = spawnChild("waypipe", ["-s", br.socket, "client", command], { detached: true });
-        child.unref();
-        return { child, transport: "vsock", command };
+    if (hostHasWayland() && (await waypipeAvailable()).waypipe) {
+        if (spec.network.vsock) {
+            try {
+                await ensureGuestServer(h);
+                const bridge = await hostBridge(spec);
+                if (bridge) {
+                    // run `waypipe server` in the guest — it connects through the
+                    // bridge to the host client and execs the app against the
+                    // fake compositor it creates.
+                    const u = spec.credentials.username;
+                    await h.guestSh(`runuser -u ${u} -- env XDG_RUNTIME_DIR=/run/user/$(id -u ${u}) ` +
+                        `nohup waypipe -s ${GUEST_SOCK} server -- ${command} >/tmp/wp-app.log 2>&1 &`, 15_000);
+                    return { child: bridge, transport: "waypipe-vsock", command };
+                }
+            } catch { /* falls through to ssh transports */ }
+        }
+        const port = spec.network.sshPort;
+        if (port) {
+            const { priv } = await ensureKeypair();
+            const child = spawnChild("waypipe", [
+                "--login-shell", "ssh", "-p", String(port),
+                "-i", priv, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                `${spec.credentials.username}@127.0.0.1`, command,
+            ], { detached: true });
+            child.unref();
+            return { child, transport: "waypipe-ssh", command };
+        }
     }
 
     const port = spec.network.sshPort;
-    if (!port) throw new WaypipeError("no sshPort on spec and vsock unavailable");
-    const child = spawnChild("waypipe", [
-        "--login-shell", "ssh", "-p", String(port), "-o", "StrictHostKeyChecking=no",
-        `${spec.credentials.username}@127.0.0.1`, command,
+    if (!port) throw new WaypipeError(`no usable app transport for ${spec.name} (no wayland host, no ssh port)`);
+    try { await authorizeInGuest(h); } catch { /* rely on existing auth */ }
+    const { priv } = await ensureKeypair();
+    const child = spawnChild("ssh", [
+        "-X", "-p", String(port),
+        "-i", priv, "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+        `${spec.credentials.username}@127.0.0.1`,
+        // force X11 backend so wayland-native toolkits go through the X
+        // forward instead of the guest's own compositor
+        `GDK_BACKEND=x11 QT_QPA_PLATFORM=xcb ${command}`,
     ], { detached: true });
     child.unref();
-    return { child, transport: "ssh", command };
+    return { child, transport: "ssh-x", command };
 }
 
 /** Enumerate guest .desktop apps via QGA. */
 export interface GuestApp { id: string; name: string; exec: string; desktopFile: string }
 
 export async function guestAppCatalog(h: VmHandle): Promise<GuestApp[]> {
+    // guestSh runs as root — enumerate the configured user's local apps dir too
+    const u = h.spec.credentials.username;
     const r = await h.guestSh(`
-        for f in /usr/share/applications/*.desktop "$HOME"/.local/share/applications/*.desktop; do
+        UHOME=$(getent passwd '${u}' | cut -d: -f6)
+        for f in /usr/share/applications/*.desktop "$UHOME"/.local/share/applications/*.desktop; do
             [ -f "$f" ] || continue
             name=$(grep -m1 '^Name=' "$f" | cut -d= -f2-)
             exec=$(grep -m1 '^Exec=' "$f" | cut -d= -f2-)
@@ -123,7 +167,7 @@ export async function guestAppCatalog(h: VmHandle): Promise<GuestApp[]> {
     String(r.stdout).split("\n").forEach((line) => {
         const [id, name, exec] = line.split("\t");
         if (!id || !exec) return;
-        // strip .desktop field codes (%U %F etc.) — waypipe runs the raw command
+        // strip .desktop field codes (%U %F etc.) — transports run the raw command
         const cmd = exec.replace(/%[a-zA-Z]/g, "").replace(/\s+/g, " ").trim();
         apps.push({ id, name: name || id, exec: cmd, desktopFile: id });
     });

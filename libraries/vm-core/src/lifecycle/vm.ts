@@ -17,7 +17,7 @@ import { QmpClient } from "../qmp/client";
 import { QgaClient } from "../qga/client";
 import * as disk from "../disk/ops";
 import * as usb from "../usb/usb";
-import { run, spawnChild, which } from "../../../sys/src/exec";
+import { run, spawnChild, virtiofsdPath } from "../../../sys/src/exec";
 
 export type VmState = "stopped" | "starting" | "running" | "stopping" | "paused" | "crashed" | "unknown";
 
@@ -116,7 +116,7 @@ export class VmHandle extends EventEmitter {
     /** Build argv — exposed for tests + `cli vm args` debugging. */
     async buildArgv(opts: BuildOpts = {}): Promise<BuiltArgs> {
         this.toolchain ??= await resolveToolchain();
-        if (opts.virtiofs === undefined) opts.virtiofs = (await which("virtiofsd")) !== null;
+        if (opts.virtiofs === undefined) opts.virtiofs = (await virtiofsdPath()) !== null;
         // GL modes need an explicit mesa render node — QEMU auto-picking NVIDIA
         // EGL wedges init. Persist the pick so it's stable across restarts.
         if (this.spec.gpu.mode !== "software" && !this.spec.gpu.renderNode) {
@@ -137,10 +137,11 @@ export class VmHandle extends EventEmitter {
         const built = await this.buildArgv(opts);
 
         // virtiofsd daemons must be up before QEMU opens the sockets.
+        const vfsdBin = built.virtiofsd.length ? await virtiofsdPath() : null;
         for (let i = 0; i < built.virtiofsd.length; i++) {
             const v = built.virtiofsd[i]!;
             await rm(v.socket, { force: true });
-            const c = spawnChild("virtiofsd", [
+            const c = spawnChild(vfsdBin!, [
                 `--socket-path=${v.socket}`, `--shared-dir=${v.sharedDir}`,
                 "--cache=auto", "--sandbox=namespace",
             ]);
@@ -183,12 +184,22 @@ export class VmHandle extends EventEmitter {
         this.cleanupRunDir();
     }
 
-    async kill(): Promise<void> {
+    async kill(timeoutMs = 10_000): Promise<void> {
         const pid = this.pid();
         if (pid) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
         // quit's reply races the socket teardown — swallow the rejection either way.
         try { (await this.qmp()).quit().catch(() => {}); } catch { /* no monitor */ }
         this.qemuChild?.kill("SIGKILL");
+        // SIGKILL delivery is not synchronous — a start() that runs while the
+        // old pid is still dying would early-return on isRunning() and leave
+        // the VM down. Wait for the process to actually be reaped.
+        if (pid) {
+            const deadline = Date.now() + timeoutMs;
+            while (Date.now() < deadline) {
+                try { process.kill(pid, 0); } catch { break; }
+                await new Promise((r) => setTimeout(r, 100));
+            }
+        }
         this.cleanupRunDir();
     }
 

@@ -14,3 +14,4 @@ export * from "./disk/ops";
 export * from "./usb/usb";
 export * from "./lifecycle/vm";
 export * from "./lifecycle/registry";
+export * from "./sshkey";

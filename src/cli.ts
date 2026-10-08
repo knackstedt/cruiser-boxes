@@ -22,7 +22,7 @@ import { VmRegistry, VmSpec, VmHandle, defaultSpec } from "../libraries/vm-core/
 import { listUsbDevices } from "../libraries/vm-core/src/usb/usb";
 import { createDisk } from "../libraries/vm-core/src/disk/ops";
 import { resolveToolchain } from "../libraries/vm-core/src/qemu/resolve";
-import { run, which } from "../libraries/sys/src/exec";
+import { run, which, virtiofsdPath } from "../libraries/sys/src/exec";
 
 const argv = process.argv.slice(2);
 
@@ -45,6 +45,8 @@ usage: cruiser <area> <command> [args]
   host monitors|desktops               probe host display topology
   usb ls                                usb attach <vm> <vid:pid>
   usb detach <vm> <id>
+  vm mount <name> [guestPath] [mp]      sshfs-mount a guest dir on the host
+  vm umount <name> [mp]                 unmount (default ~/.local/share/cruiser/mounts/<vm>)
   app list <vm>                         guest .desktop app catalog (via QGA)
   app run <vm> <command...>             launch a guest app via waypipe (vsock→ssh)
   provision cloudimg <vm> <release> [--user u] [--password p]
@@ -134,6 +136,20 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
         case "backup": { const h = await needVm(args[0]); if (!args[1]) usage(); await h.backup(args[1]); console.log(`backed up -> ${args[1]}`); break; }
         case "resize": { const h = await needVm(args[0]); await h.resizeDisk(Number(args[1])); console.log(`resized to ${args[1]}G`); break; }
         case "rm": { await registry.remove(args[0]!, { deleteDisk: has("--disk") }); console.log("removed"); break; }
+        case "mount": {
+            const h = await needVm(args[0]);
+            const { mountGuest } = await import("../libraries/host-int/src/mount");
+            const m = await mountGuest(h, args[1], args[2]);
+            console.log(`mounted ${m.vm}:${m.guestPath} -> ${m.mountpoint}`);
+            break;
+        }
+        case "umount": {
+            if (!args[0]) usage();
+            const { umountGuest } = await import("../libraries/host-int/src/mount");
+            await umountGuest(args[0], args[1]);
+            console.log("unmounted");
+            break;
+        }
         case "view": {
             const h = await needVm(args[0]);
             if (!h.isRunning()) { console.error(`'${h.spec.name}' is not running`); process.exit(1); }
@@ -182,11 +198,13 @@ async function doctor() {
     checks.push(["/dev/kvm writable (kvm group)", k.code === 0, "usermod -aG kvm $USER"]);
     const groups = (await run("id", ["-nG"])).stdout;
     checks.push(["in kvm group", groups.split(" ").includes("kvm"), "usermod -aG kvm $USER (relogin)"]);
-    const tools = ["xfreerdp3", "virtiofsd", "cloud-localds", "wmctrl", "xdotool", "qdbus", "waypipe", "socat"];
+    const tools = ["xfreerdp3", "cloud-localds", "genisoimage", "wmctrl", "xdotool", "qdbus", "waypipe", "socat", "sshfs"];
     for (let i = 0; i < tools.length; i++) {
         const p = await which(tools[i]!);
         checks.push([`tool: ${tools[i]}`, !!p, "see toolchain/versions.json systemTools"]);
     }
+    const vfsd = await virtiofsdPath();
+    checks.push(["tool: virtiofsd", vfsd !== null, "apt install virtiofsd"]);
     const tc = await resolveToolchain().catch((e) => { checks.push(["qemu toolchain", false, String(e)]); return null; });
     if (tc) {
         const env = { LD_LIBRARY_PATH: tc.ldLibraryPath };

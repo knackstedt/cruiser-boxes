@@ -59,6 +59,18 @@ export function spawnChild(
     return child;
 }
 
+/** virtiofsd ships off-PATH on Debian/Ubuntu (/usr/libexec, /usr/lib/qemu). */
+export async function virtiofsdPath(): Promise<string | null> {
+    const onPath = await which("virtiofsd");
+    if (onPath) return onPath;
+    const candidates = ["/usr/libexec/virtiofsd", "/usr/lib/qemu/virtiofsd", "/usr/lib/virtiofsd/virtiofsd"];
+    for (let i = 0; i < candidates.length; i++) {
+        const p = candidates[i]!;
+        if (await canAccess(p, 1 /* X_OK */)) return p;
+    }
+    return null;
+}
+
 /** Parse "X.Y.Z" out of a version string; returns [major,minor,patch]. */
 export function parseVersion(s: string): [number, number, number] | null {
     const m = s.match(/(\d+)\.(\d+)(?:\.(\d+))?/);

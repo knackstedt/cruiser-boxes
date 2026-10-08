@@ -48,11 +48,13 @@ async function monitorsXml(spec: VmSpec, o: ProvisionOpts): Promise<string | und
 export async function provisionVmCloudimg(h: VmHandle, o: ProvisionOpts): Promise<void> {
     const spec = h.spec;
     const pw = await ensurePassword(spec, o);
+    const { pubText } = await (await import("../../vm-core/src/sshkey")).ensureKeypair();
+    const sshKeys = [...(o.sshKeys ?? []), pubText];
     log(o, `fetching cloud image (ubuntu ${o.release})…`);
     const tc = await (await import("../../vm-core/src/qemu/resolve")).resolveToolchain();
     const { seedIso } = await provisionCloudimg(spec, tc.qemuImg, {
         release: o.release!, username: spec.credentials.username, password: pw,
-        sshKeys: o.sshKeys, timezone: o.timezone,
+        sshKeys, timezone: o.timezone,
     });
     await h.saveSpec();
 
@@ -75,16 +77,20 @@ export async function provisionVmCloudimg(h: VmHandle, o: ProvisionOpts): Promis
 export async function provisionVmIso(h: VmHandle, o: ProvisionOpts): Promise<void> {
     const spec = h.spec;
     const pw = await ensurePassword(spec, o);
+    const { pubText } = await (await import("../../vm-core/src/sshkey")).ensureKeypair();
+    const sshKeys = [...(o.sshKeys ?? []), pubText];
     const iso = o.iso!.startsWith("http") ? await ensureIso(o.iso!) : o.iso!;
 
     log(o, "running unattended install (watch: tail -f run/install-serial.log)…");
-    await runIsoInstall(spec, { iso, username: spec.credentials.username, password: pw, sshKeys: o.sshKeys, timezone: o.timezone });
+    await runIsoInstall(spec, { iso, username: spec.credentials.username, password: pw, sshKeys, timezone: o.timezone });
     await h.saveSpec();
 
     log(o, "install complete — first normal boot…");
     await h.start();
     log(o, "waiting for guest agent…");
-    await waitForAgent(h, 8 * 60_000);
+    // first boot of a fully installed desktop is slow (gdm/snap/agent init) —
+    // the 26.04 desktop ISO took ~9min to a live agent
+    await waitForAgent(h, 15 * 60_000);
 
     log(o, "running guest setup…");
     const xml = await monitorsXml(spec, o);
