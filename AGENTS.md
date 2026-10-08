@@ -60,3 +60,12 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   `position:absolute; top:X; bottom:Y` paint nothing — use flow + fixed height.
 - Escape shortcuts require `-grab-keyboard` (host keeps combos) — the schema
   default `grabKeyboard:false` is load-bearing.
+- Text quality: `PanelSpec.scale` = raster px per display px (supersample;
+  1 = hard edges, 2 = smooth-but-soft). `PanelSpec.zoom` (added in
+  ../downdraft-engine) = display px per CSS px — the UI scale knob; pointer
+  input is converted automatically. Cruiser mounts zoom≈1.25 + scale=1
+  (native-res raster, CRUISER_UI_ZOOM/CRUISER_UI_SCALE env knobs). The OSR
+  cdylib embeds only DejaVu Sans; real system fonts are bound via
+  `registerResource` (ui:// blobs) + `@font-face` — see
+  `libraries/app-shell/src/fonts.ts`. Call before mount so the first doc
+  resolve sees them.

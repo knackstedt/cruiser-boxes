@@ -3,59 +3,75 @@
 // Blitz html-ui stack; interactivity via data-action + DOM input events.
 // ============================================================================
 
+import { VMS_DIR } from "../../vm-core/src/paths";
 import type { CruiserState, VmSummary } from "./store";
 
 const CSS = `
+@font-face { font-family:'Cruiser Sans'; font-weight:400; src:url('ui://cruiser-fonts/regular'); }
+@font-face { font-family:'Cruiser Sans'; font-weight:700; src:url('ui://cruiser-fonts/bold'); }
 * { margin:0; padding:0; box-sizing:border-box; }
-body { background:#10141a; color:#e8ecf1; font-family:sans-serif; overflow:hidden; }
-.topbar { display:flex; align-items:center; gap:12px; padding:0 16px; height:52px;
+html, body { height:100%; }
+body { background:#10141a; color:#e8ecf1; font-family:'Cruiser Sans',sans-serif; overflow:hidden;
+       display:flex; flex-direction:column; }
+.topbar { display:flex; align-items:center; gap:12px; padding:0 18px; height:56px;
           background:#161b23; border-bottom:1px solid #2a313c; }
-.brand { font-size:16px; font-weight:bold; color:#7fd0ff; }
+.brand { font-size:17px; font-weight:bold; color:#7fd0ff; }
 .nav { display:flex; gap:4px; }
-.nav .item { padding:7px 14px; border-radius:4px; font-size:12px; color:#8a94a3; cursor:default; }
+.nav .item { padding:8px 15px; border-radius:4px; font-size:13px; color:#8a94a3; cursor:default; }
 .nav .item.on { background:#2e4361; color:#7fd0ff; font-weight:bold; }
-.content { padding:20px; height:642px; overflow-y:scroll; }
-.h1 { font-size:18px; font-weight:bold; margin-bottom:14px; }
-.h2 { font-size:13px; font-weight:bold; margin:18px 0 8px; color:#8a94a3; }
+.content { padding:20px; flex:1; overflow-y:scroll; }
+.h1 { font-size:20px; font-weight:bold; margin-bottom:14px; }
+.h2 { font-size:14px; font-weight:bold; margin:18px 0 8px; color:#8a94a3; }
 .vmlist { display:flex; flex-direction:column; gap:8px; }
-.vmrow { display:flex; align-items:center; gap:14px; padding:12px 16px;
+.vmrow { display:flex; align-items:center; gap:14px; padding:13px 16px;
          background:#161b23; border:1px solid #2a313c; border-radius:6px; }
 .vmrow .grow { flex:1; }
-.vmname { font-size:14px; font-weight:bold; min-width:140px; }
-.pill { padding:3px 10px; border-radius:10px; font-size:11px; white-space:nowrap; }
+.vmname { font-size:15px; font-weight:bold; min-width:140px; }
+.pill { padding:4px 11px; border-radius:11px; font-size:12px; white-space:nowrap; }
 .pill.running { background:#1d3a24; color:#9fd89f; }
 .pill.stopped { background:#212933; color:#8a94a3; }
 .pill.other { background:#3a2e1d; color:#f0c98a; }
-.meta { font-size:11px; color:#5d6775; }
-.empty { padding:40px; text-align:center; color:#5d6775; font-size:13px;
+.meta { font-size:12px; color:#5d6775; }
+.empty { padding:40px; text-align:center; color:#5d6775; font-size:14px;
          border:1px dashed #2a313c; border-radius:8px; }
-.btn { display:inline-block; padding:7px 14px; border-radius:4px; font-size:12px;
+.btn { display:inline-block; padding:8px 15px; border-radius:4px; font-size:13px;
        background:#1d3547; color:#7fd0ff; border:1px solid #4fc2f7; margin-right:6px; }
 .btn:active { background:#2a4a63; }
 .btn.warn { background:#3a2530; color:#f08aa8; border-color:#a04868; }
 .btn.dim { background:#161b23; color:#8a94a3; border-color:#2a313c; }
 .row { display:flex; gap:16px; align-items:center; margin-bottom:10px; }
-.lbl { width:130px; font-size:12px; color:#8a94a3; }
+.lbl { width:140px; font-size:13px; color:#8a94a3; }
 input { background:#0b0e13; border:1px solid #2a313c; border-radius:4px; color:#e8ecf1;
-        padding:7px 10px; font-size:13px; width:220px; }
+        padding:8px 10px; font-size:14px; width:220px; }
 input:focus { border-color:#4fc2f7; outline:none; }
 .opts { display:flex; gap:6px; }
-.opt { padding:6px 12px; border-radius:4px; font-size:12px; border:1px solid #2a313c;
+.opts.wrap { flex-wrap:wrap; max-width:680px; }
+.opt { padding:7px 13px; border-radius:4px; font-size:13px; border:1px solid #2a313c;
        background:#161b23; color:#8a94a3; }
 .opt.on { background:#2e4361; color:#7fd0ff; border-color:#4fc2f7; font-weight:bold; }
-.kv { display:grid; grid-template-columns:150px 1fr; gap:6px 16px; font-size:12px;
+.opt.dim { opacity:.45; }
+.hint { font-size:12px; color:#5d6775; margin:-4px 0 10px 156px; max-width:560px; line-height:1.45; }
+.hostsum { font-size:13px; color:#8a94a3; background:#161b23; border:1px solid #2a313c;
+           border-radius:6px; padding:9px 12px; margin-bottom:14px; }
+.hostsum b { color:#e8ecf1; }
+.vdgrid { display:grid; gap:6px; }
+.spinwrap { display:flex; flex-direction:column; align-items:center; justify-content:center;
+            height:540px; gap:18px; }
+.spinglyph { font-size:64px; color:#7fd0ff; }
+.spinlbl { font-size:14px; color:#8a94a3; max-width:460px; text-align:center; line-height:1.5; }
+.kv { display:grid; grid-template-columns:160px 1fr; gap:7px 16px; font-size:13px;
       margin-bottom:16px; }
 .kv .k { color:#8a94a3; }
-.docrow { display:flex; gap:10px; padding:8px 12px; font-size:12px; align-items:center; }
+.docrow { display:flex; gap:10px; padding:9px 12px; font-size:13px; align-items:center; }
 .docrow .ok { color:#9fd89f; font-weight:bold; width:40px; }
 .docrow .bad { color:#f08aa8; font-weight:bold; width:40px; }
-.docrow .fix { color:#5d6775; font-size:11px; }
-.snap { display:inline-block; padding:4px 10px; margin:0 6px 6px 0; font-size:11px;
-        background:#212933; border-radius:10px; color:#8a94a3; }
-.footer { position:absolute; left:0; right:0; bottom:0; height:26px;
-          display:flex; align-items:center; padding:0 16px;
+.docrow .fix { color:#5d6775; font-size:12px; }
+.snap { display:inline-block; padding:5px 11px; margin:0 6px 6px 0; font-size:12px;
+        background:#212933; border-radius:11px; color:#8a94a3; }
+.footer { height:28px; flex-shrink:0;
+          display:flex; align-items:center; padding:0 18px;
           background:#161b23; border-top:1px solid #2a313c;
-          font-size:11px; color:#5d6775; }
+          font-size:12px; color:#5d6775; }
 `;
 
 function esc(s: string): string {
@@ -103,24 +119,74 @@ function optRow(label: string, key: string, cur: string, choices: [string, strin
     }</div></div>`;
 }
 
+const PERSIST_HINT: Record<string, string> = {
+    daemonize: "keeps running after you close cruiser — reattach anytime",
+    owned: "shuts down when you close cruiser — the VM and its disk are kept",
+    ephemeral: "shuts down and deletes the VM (config + disk) when you close cruiser",
+};
+
 function create(s: CruiserState): string {
     const f = s.create;
-    const provRows = f.method === "cloudimg"
-        ? field("Ubuntu release", "release", f.release)
-        : f.method === "iso" ? field("ISO path or URL", "iso", f.iso, 340) : "";
+    const r = s.hostRes;
+    const hostsum = r
+        ? `<div class="hostsum">host — <b>${r.cpus}</b> CPUs · <b>${r.memGiB}</b> GiB RAM · <b>${r.diskFreeGiB}</b> GiB free at ${esc(f.diskDir || "default location")}</div>`
+        : "";
+    const memVal = f.memUnit === "GiB" ? Math.round((f.memMiB / 1024) * 100) / 100 : f.memMiB;
+    const memRow = `<div class="row"><div class="lbl">Memory</div>
+        <input data-field="memInput" value="${memVal}" style="width:100px">
+        <div class="opts">${(["MiB", "GiB"] as const).map((u) =>
+            `<div class="opt${f.memUnit === u ? " on" : ""}" data-action="set-field" data-field="memUnit" data-value="${u}">${u}</div>`).join("")}</div>
+        ${r ? `<div class="meta">of ${r.memGiB} GiB</div>` : ""}</div>`;
+    const diskRow = `<div class="row"><div class="lbl">Disk GiB</div>
+        <input data-field="diskGiB" value="${f.diskGiB}" style="width:100px">
+        ${r ? `<div class="meta">of ${r.diskFreeGiB} GiB free</div>` : ""}</div>
+        <div class="row"><div class="lbl">Disk location</div>
+        <div class="meta" style="width:280px">${esc(f.diskDir || `${VMS_DIR}/‹name›/`)}</div>
+        <div class="opt" data-action="pick-disk-dir">Choose…</div></div>`;
+    const vdPicker = f.headMode === "virtual-desktop" && s.desktops.length
+        ? `<div class="row"><div class="lbl">Desktop</div>
+            <div class="opt${f.vd === 0 ? " on" : ""}" data-action="set-vd" data-vd="0">auto</div>
+            <div class="vdgrid" style="grid-template-columns:repeat(${Math.max(1, Math.ceil(s.desktops.length / Math.max(1, s.vdRows)))},auto)">
+            ${s.desktops.map((d) =>
+                `<div class="opt${f.vd === d.index ? " on" : ""}" data-action="set-vd" data-vd="${d.index}">${esc(d.name || String(d.index))}${d.current ? "•" : ""}</div>`).join("")}
+            </div></div>
+            <div class="hint">the viewer window lands on this desktop (${s.vdRows > 1 ? `${s.vdRows}×${Math.ceil(s.desktops.length / s.vdRows)} grid` : "row"} layout) — • is where you are now</div>`
+        : "";
+    const provRows =
+        f.method === "cloudimg" ? `
+            <div class="hint">A <b>cloud image</b> is a prebuilt Ubuntu disk published by Canonical — cruiser downloads it once, resizes it to your disk size, and injects a cloud-init seed that creates your user, sets the password, and enables SSH/RDP. Fastest path to a working VM — no installer.</div>
+            ${field("Ubuntu release", "release", f.release)}` :
+        f.method === "iso" ? `${field("ISO path or URL", "iso", f.iso, 340)}
+            <div class="hint">Boots the ISO with a NoCloud autoinstall seed — slower (~20 min) but runs the real Ubuntu installer unattended.</div>` :
+        f.method === "imported" ? `
+            <div class="row"><div class="lbl">Image file</div>
+                <input data-field="importPath" value="${esc(f.importPath)}" style="width:340px">
+                <div class="opt" data-action="pick-import">Browse…</div></div>
+            <div class="hint">Boots an existing disk image in place (qcow2/raw/vmdk/… — format is auto-detected). Use for images you've already installed elsewhere.</div>` : "";
+    const usbSection = `<div class="h2">USB passthrough</div>
+        ${s.usbDevices.length
+            ? `<div class="opts wrap">${s.usbDevices.map((d) =>
+                `<div class="opt${f.usb.includes(d.key) ? " on" : ""}${d.writable ? "" : " dim"}" data-action="usb-toggle" data-key="${esc(d.key)}">${esc(d.label)} <span class="meta">${d.vendorId}:${d.productId}${d.writable ? "" : " · no access"}</span></div>`).join("")}</div>
+               <div class="hint" style="margin-left:0">selected devices are passed straight to the guest at boot — "no access" needs a udev rule or group fix</div>`
+            : `<div class="meta">no USB devices found</div>`}`;
     return `<div class="h1">New VM</div>
+        ${hostsum}
         ${field("Name", "name", f.name || "my-vm")}
         <div class="h2">Resources</div>
         ${field("vCPUs", "cpus", f.cpus, 80)}
-        ${field("Memory MiB", "memMiB", f.memMiB, 100)}
-        ${field("Disk GiB", "diskGiB", f.diskGiB, 100)}
+        ${memRow}
+        ${diskRow}
         <div class="h2">Graphics &amp; display</div>
         ${optRow("GPU mode", "gpu", f.gpu, [["venus", "Venus (Vulkan)"], ["virgl", "virgl (GL)"], ["software", "software"]])}
         ${optRow("Head mode", "headMode", f.headMode, [["virtual-desktop", "virtual desktop"], ["fullscreen-monitor", "fullscreen monitor"], ["windowed", "windowed"], ["app", "app-only"]])}
-        ${optRow("Persist", "persist", f.persist, [["daemonize", "survives app"], ["owned", "dies with app"]])}
+        ${vdPicker}
+        ${optRow("Persist", "persist", f.persist, [["daemonize", "survives app"], ["owned", "stops with app"], ["ephemeral", "deleted on exit"]])}
+        <div class="hint">${PERSIST_HINT[f.persist] ?? ""}</div>
         <div class="h2">Provisioning</div>
-        ${optRow("Method", "method", f.method, [["none", "none"], ["cloudimg", "cloud image"], ["iso", "ISO autoinstall"]])}
+        ${optRow("Method", "method", f.method, [["none", "none"], ["cloudimg", "cloud image"], ["iso", "ISO autoinstall"], ["imported", "import existing"]])}
         ${provRows}
+        ${usbSection}
+        <div class="h2">Credentials</div>
         ${field("Username", "username", f.username)}
         ${field("Password", "password", f.password)}
         <div style="margin-top:18px">${btn("Create VM", "vm-create")}${btn("Cancel", "nav", attr("route", "home"), "btn dim")}</div>`;
@@ -160,15 +226,49 @@ function settings(s: CruiserState): string {
             <div class="k">session</div><div>${esc(h.session)}</div>
             <div class="k">wm adapter</div><div>${esc(h.adapterId)}</div>
             <div class="k">monitors</div><div>${h.monitors.map((m) => `${esc(m.name)} ${m.w}x${m.h}@${m.x},${m.y}${m.primary ? "*" : ""}`).join(" · ") || "none"}</div>
-            <div class="k">desktops</div><div>${h.desktops.map((d) => `${d.index}${d.current ? "*" : ""}`).join(" ") || "none"}</div>
+            <div class="k">desktops</div><div>${h.desktops.map((d) => `${d.index}${d.name ? ` ${d.name}` : ""}${d.current ? "*" : ""}`).join("  ") || "none"}</div>
             <div class="k">caps</div><div>${Object.entries(h.caps).filter(([k]) => k !== "notes").map(([k, v]) => `${k}:${v ? "yes" : "no"}`).join(" ")}</div>
         </div>` : `<div class="empty">probing host…</div>`;
+    const res = s.hostRes ? `<div class="kv">
+            <div class="k">cpu</div><div>${s.hostRes.cpus} cores</div>
+            <div class="k">memory</div><div>${s.hostRes.memGiB} GiB</div>
+            <div class="k">disk free</div><div>${s.hostRes.diskFreeGiB} GiB (at vm dir)</div>
+        </div>` : "";
+    const si = s.sysinfo;
+    const sysBlock = si ? `<div class="kv">
+            <div class="k">runtime</div><div>${esc(si.runtime)}</div>
+            <div class="k">display</div><div>${esc(si.displayEnv)}</div>
+            <div class="k">ui backend</div><div>${esc(si.uiBackend)}</div>
+            <div class="k">qemu</div><div>${si.qemu ? `${esc(si.qemu)}${si.qemuFromOpt ? " <span class='meta'>(opt/ toolchain)</span>" : " <span class='meta'>(system)</span>"}` : `<span class="bad">not found</span>`}</div>
+            <div class="k">xfreerdp</div><div>${si.xfreerdp ? esc(si.xfreerdp) : `<span class="bad">not found</span>`}</div>
+        </div>` : `<div class="empty">probing…</div>`;
+    const pathBlock = si ? `<div class="kv">
+            <div class="k">vms</div><div>${esc(si.vmsDir)}</div>
+            <div class="k">isos</div><div>${esc(si.isoDir)}</div>
+            <div class="k">cloud cache</div><div>${esc(si.cloudimgDir)}</div>
+            <div class="k">data</div><div>${esc(si.dataDir)}</div>
+            <div class="k">config</div><div>${esc(si.configDir)}</div>
+            <div class="k">cache</div><div>${esc(si.cacheDir)}</div>
+        </div>` : "";
+    const usbBlock = s.usbDevices.length
+        ? s.usbDevices.map((d) => `<div class="docrow"><div class="${d.writable ? "ok" : "bad"}">${d.writable ? " ok" : "ro"}</div>
+            <div style="flex:1">${esc(d.label)}</div><div class="fix">${d.vendorId}:${d.productId}</div></div>`).join("")
+        : `<div class="empty">no USB devices found</div>`;
+    const blocked = s.usbDevices.filter((d) => !d.writable).length;
     const docRows = s.doctor === null
         ? ""
         : s.doctor.map((d) => `<div class="docrow"><div class="${d.ok ? "ok" : "bad"}">${d.ok ? " ok" : "FAIL"}</div><div style="flex:1">${esc(d.label)}</div><div class="fix">${esc(d.fix)}</div></div>`).join("");
     return `<div class="h1">Settings &amp; Doctor</div>
         <div class="h2">Host session</div>
         ${hostBlock}
+        <div class="h2">Host resources</div>
+        ${res}
+        <div class="h2">Runtime &amp; toolchain</div>
+        ${sysBlock}
+        <div class="h2">Paths</div>
+        ${pathBlock}
+        <div class="h2">USB devices ${blocked ? `<span class="meta">(${blocked} need permission — run doctor for the udev fix)</span>` : ""}</div>
+        ${usbBlock}
         <div class="h2">Doctor</div>
         ${btn("Run doctor", "doctor")}${docRows ? `<div style="margin-top:8px">${docRows}</div>` : `<div class="meta" style="display:inline-block;margin-left:10px">not run</div>`}`;
 }
@@ -176,7 +276,11 @@ function settings(s: CruiserState): string {
 export function renderRoute(s: CruiserState): string {
     const nav = (r: string, label: string) =>
         `<div class="item${s.route === r ? " on" : ""}" data-action="nav" data-route="${r}">${label}</div>`;
+    const spinner = `<div class="spinwrap"><div class="spinglyph" data-spin>◐</div>
+        <div class="spinlbl">${esc(s.status)}</div>
+        ${s.route === "create" ? `<div class="meta">provisioning can take a few minutes — the image download is cached for future VMs</div>` : ""}</div>`;
     const body =
+        s.busy ? spinner :
         s.route === "home" ? home(s) :
         s.route === "create" ? create(s) :
         s.route === "vm" ? vmDetail(s) : settings(s);

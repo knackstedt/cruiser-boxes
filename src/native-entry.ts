@@ -59,8 +59,8 @@ surface.addEventListener("mousedown", (e: any) => { bus.pointerDown(e.clientX, e
 surface.addEventListener("mouseup", (e: any) => { bus.pointerUp(e.clientX, e.clientY, e.button ?? 0); });
 surface.addEventListener("mousemove", (e: any) => { bus.pointerMove(e.clientX, e.clientY); });
 surface.addEventListener("wheel", (e: any) => { bus.wheel(e.clientX, e.clientY, e.deltaX ?? 0, e.deltaY ?? 0); });
-win.addEventListener("keydown", (e: any) => { if (!e.repeat) bus.key(true, e.key ?? "", e.code ?? ""); });
-win.addEventListener("keyup", (e: any) => { bus.key(false, e.key ?? "", e.code ?? ""); });
+win.addEventListener("keydown", (e: any) => { bus.key(true, e.key ?? "", e.code ?? "", e); });
+win.addEventListener("keyup", (e: any) => { bus.key(false, e.key ?? "", e.code ?? "", e); });
 win.addEventListener("resize", (e: any) => { shell.resize(e.width, e.height); });
 
 // ── Frame loop ──
@@ -68,10 +68,18 @@ win.addEventListener("resize", (e: any) => { shell.resize(e.width, e.height); })
 const shotPath = process.env.CRUISER_SCREENSHOT;
 const shotAt = Number(process.env.CRUISER_SHOT_FRAMES ?? 30);
 let frames = 0;
+let lastW = surface.width, lastH = surface.height;
 
 let firstFrameMarked = false;
 function frame(): void {
     if (!firstFrameMarked) { firstFrameMarked = true; mark("first-frame"); }
+    // The WM can resize the window before/without a "resize" event (initial
+    // layout, tiling). Track the real swapchain size — the panel and the
+    // render pass must match it or wgpu drops the copy.
+    if (surface.width !== lastW || surface.height !== lastH) {
+        lastW = surface.width; lastH = surface.height;
+        shell.resize(lastW, lastH);
+    }
     const tex = gpuCtx.getCurrentTexture();
     if (!tex) { requestAnimationFrame(frame); return; }
     const encoder = (device as unknown as GPUDevice).createCommandEncoder();
@@ -95,6 +103,6 @@ await new Promise<void>((resolve) => {
 });
 
 shell.dispose();
-svc.dispose();
+await svc.dispose();
 host.destroy();
 log.info("cruiser", "exit");

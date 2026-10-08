@@ -66,6 +66,8 @@ export class InputBus implements RendererInputBus {
     pointerDown(x: number, y: number, button = 0) { this.dispatch("pdown", { clientX: x, clientY: y, button }); }
     pointerUp(x: number, y: number, button = 0) { this.dispatch("pup", { clientX: x, clientY: y, button }); }
     wheel(x: number, y: number, dx: number, dy: number) { this.dispatch("wheel", { clientX: x, clientY: y, deltaX: dx, deltaY: dy }); }
-    key(down: boolean, key: string, code: string) { this.dispatch(down ? "kdown" : "kup", { key, code }); }
+    key(down: boolean, key: string, code: string, mods?: { ctrlKey?: boolean; shiftKey?: boolean; altKey?: boolean; metaKey?: boolean }) {
+        this.dispatch(down ? "kdown" : "kup", { key, code, ...mods });
+    }
     drag(_d: DragDelta) { /* synthetic drags not used */ }
 }
