@@ -61,8 +61,9 @@ export const VmSpec = z.object({
     }).prefault({}),
 
     disk: z.object({
-        file: z.string().default("disk.qcow2"),   // relative to vm dir
+        file: z.string().default("disk.qcow2"),   // relative to vm dir, or absolute
         sizeGiB: z.number().int().min(4).default(100),
+        format: z.string().default("qcow2"),      // qemu-img format (qcow2|raw|vmdk|vdi|qed|vhdx)
     }).prefault({}),
 
     gpu: z.object({
@@ -101,8 +102,11 @@ export const VmSpec = z.object({
         vsock: z.boolean().default(true),         // vhost-vsock-pci for waypipe
     }).prefault({}),
 
-    /** daemonize = QEMU survives app exit; owned = child of app process. */
-    persist: z.enum(["daemonize", "owned"]).default("daemonize"),
+    /**
+     * daemonize = QEMU survives app exit; owned = QEMU stops with the app;
+     * ephemeral = owned + the VM dir (incl. disk) is deleted when the app exits.
+     */
+    persist: z.enum(["daemonize", "owned", "ephemeral"]).default("daemonize"),
 
     provisioned: z.object({
         method: z.enum(["cloudimg", "iso", "imported"]).optional(),

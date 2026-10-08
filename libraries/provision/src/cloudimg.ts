@@ -4,9 +4,9 @@
 
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { run } from "../../sys/src/exec";
-import { CLOUDIMG_DIR, vmPaths } from "../../vm-core/src/paths";
+import { CLOUDIMG_DIR, vmPaths, diskPath } from "../../vm-core/src/paths";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { buildSeedIso, cloudimgUserData, metaData, passwordHash, type SeedOpts } from "./nocloud";
 
@@ -40,10 +40,13 @@ export async function provisionCloudimg(
     const base = join(CLOUDIMG_DIR, `ubuntu-${o.release}-server-cloudimg-amd64.img`);
     await fetchImg(cloudimgUrl(o.release), base);
 
-    // qcow2 overlay sized to spec
+    // qcow2 overlay sized to spec — at spec.disk.file, which may live outside
+    // the vm dir (custom disk location).
+    const disk = diskPath(spec, paths.dir);
     await mkdir(paths.dir, { recursive: true });
-    if (!existsSync(paths.disk))
-        await run(qemuImg, ["create", "-f", "qcow2", "-b", base, "-F", "qcow2", paths.disk, `${spec.disk.sizeGiB}G`]);
+    await mkdir(dirname(disk), { recursive: true });
+    if (!existsSync(disk))
+        await run(qemuImg, ["create", "-f", "qcow2", "-b", base, "-F", "qcow2", disk, `${spec.disk.sizeGiB}G`]);
 
     const hash = await passwordHash(o.password);
     const opts: SeedOpts = {
@@ -54,5 +57,5 @@ export async function provisionCloudimg(
 
     spec.credentials.username = o.username;
     spec.provisioned = { method: "cloudimg", source: base };
-    return { disk: paths.disk, seedIso };
+    return { disk, seedIso };
 }

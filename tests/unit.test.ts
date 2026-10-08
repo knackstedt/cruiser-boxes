@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { createServer, type Socket } from "node:net";
 import { rm } from "node:fs/promises";
 import { defaultSpec, parseVmSpec } from "../libraries/vm-core/src/config/schema";
+import { diskPath, VMS_DIR } from "../libraries/vm-core/src/paths";
+import { join } from "node:path";
 import { JsonSocket } from "../libraries/vm-core/src/qmp/socket-json";
 import { guestLayoutFromHost } from "../libraries/provision/src/monitors";
 import { freerdpArgs } from "../libraries/host-int/src/freerdp";
@@ -22,6 +24,28 @@ describe("VmSpec", () => {
     test("rejects bad names / values", () => {
         expect(() => parseVmSpec({ name: "Bad Name" })).toThrow();
         expect(() => parseVmSpec({ name: "ok", gpu: { mode: "nvidia" } })).toThrow();
+    });
+    test("ephemeral persist + imported provision parse", () => {
+        const s = parseVmSpec({
+            name: "ok",
+            persist: "ephemeral",
+            provisioned: { method: "imported", source: "/data/img.qcow2" },
+        });
+        expect(s.persist).toBe("ephemeral");
+        expect(s.provisioned.method).toBe("imported");
+    });
+    test("absolute disk.file survives parsing", () => {
+        const s = parseVmSpec({ name: "ok", disk: { file: "/mnt/fast/vm.qcow2" } });
+        expect(s.disk.file).toBe("/mnt/fast/vm.qcow2");
+    });
+});
+
+describe("diskPath", () => {
+    test("relative file resolves under the vm dir; absolute passes through", () => {
+        const rel = defaultSpec("t1");
+        expect(diskPath(rel)).toBe(join(VMS_DIR, "t1", "disk.qcow2"));
+        const abs = parseVmSpec({ name: "t2", disk: { file: "/mnt/fast/d.qcow2" } });
+        expect(diskPath(abs)).toBe("/mnt/fast/d.qcow2");
     });
 });
 

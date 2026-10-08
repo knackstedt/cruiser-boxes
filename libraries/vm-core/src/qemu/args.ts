@@ -9,7 +9,7 @@
 // ============================================================================
 
 import type { VmSpec } from "../config/schema";
-import type { VmPaths } from "../paths";
+import { diskPath, type VmPaths } from "../paths";
 
 export const OVMF_CODE = "/usr/share/OVMF/OVMF_CODE_4M.fd";
 export const OVMF_VARS_TEMPLATE = "/usr/share/OVMF/OVMF_VARS_4M.fd";
@@ -54,7 +54,7 @@ export function buildArgs(
 
     const memBytes = spec.resources.memoryMiB * 1024 * 1024;
     const cpus = spec.resources.cpus;
-    const disk = spec.disk.file.startsWith("/") ? spec.disk.file : `${paths.dir}/${spec.disk.file}`;
+    const disk = diskPath(spec, paths.dir);
 
     push("-name", spec.name);
     push("-machine", "q35,kernel_irqchip=on,memory-backend=mem0");
@@ -64,7 +64,7 @@ export function buildArgs(
     push("-smp", `${cpus},sockets=${spec.resources.sockets},cores=${cpus},threads=${spec.resources.threads}`);
     push("-drive", `if=pflash,format=raw,unit=0,readonly=on,file=${OVMF_CODE}`);
     push("-drive", `if=pflash,format=raw,unit=1,file=${paths.ovmfVars}`);
-    push("-drive", `file=${disk},if=virtio,format=qcow2,discard=unmap`);
+    push("-drive", `file=${disk},if=virtio,format=${spec.disk.format},discard=unmap`);
 
     // ── GPU ──
     const outs = opts.guestMonitors ?? [{ name: "cruiser-1", xres: 1920, yres: 1080 }];

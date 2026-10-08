@@ -30,6 +30,12 @@ export function vmDir(name: string): string {
     return join(VMS_DIR, name);
 }
 
+/** Absolute path to the VM's disk — spec.disk.file is relative to the vm dir
+ *  or absolute (custom location / imported image). */
+export function diskPath(spec: { name: string; disk: { file: string } }, vmDirOverride?: string): string {
+    return spec.disk.file.startsWith("/") ? spec.disk.file : join(vmDirOverride ?? vmDir(spec.name), spec.disk.file);
+}
+
 export interface VmPaths {
     dir: string;
     spec: string;

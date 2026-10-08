@@ -125,7 +125,7 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             console.log(`${h.spec.name} started (pid ${h.pid()})`);
             break;
         }
-        case "stop": { const h = await needVm(args[0]); await h.stop(); console.log("stopped"); break; }
+        case "stop": { const h = await needVm(args[0]); const out = await h.stop(); console.log(out === "stopped" ? "stopped" : "still running — guest ignored shutdown; use kill"); break; }
         case "kill": { const h = await needVm(args[0]); await h.kill(); console.log("killed"); break; }
         case "status": { const h = await needVm(args[0]); console.log(await h.probe()); break; }
         case "args": { const h = await needVm(args[0]); const b = await h.buildArgv(); console.log(b.argv.map((a) => (a.includes(" ") ? JSON.stringify(a) : a)).join(" \\\n  ")); break; }
@@ -213,6 +213,11 @@ async function doctor() {
         checks.push([`xfreerdp: ${tc.xfreerdp}`, true, ""]);
     }
     checks.push(["OVMF firmware", existsSync("/usr/share/OVMF/OVMF_CODE_4M.fd"), "apt install ovmf"]);
+    // usb-host needs rw on /dev/bus/usb nodes — most distros ship root-only.
+    const usbDevs = await listUsbDevices().catch(() => []);
+    const blocked = usbDevs.filter((d) => !d.writable);
+    checks.push([`usb passthrough (${blocked.length}/${usbDevs.length} devices lack rw)`, blocked.length === 0,
+        'udev rule: SUBSYSTEM=="usb", GROUP="plugdev", MODE="0660" → /etc/udev/rules.d/99-cruiser-usb.rules']);
     checks.forEach(([label, ok, fix]) => {
         console.log(`${ok ? " ok " : "FAIL"}  ${label}${ok ? "" : `  → ${fix}`}`);
     });

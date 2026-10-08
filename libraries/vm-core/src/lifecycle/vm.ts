@@ -10,7 +10,7 @@ import { EventEmitter } from "node:events";
 
 import type { VmSpec } from "../config/schema";
 import { parseVmSpec } from "../config/schema";
-import { vmPaths, type VmPaths } from "../paths";
+import { vmPaths, diskPath as resolveDiskPath, type VmPaths } from "../paths";
 import { buildArgs, OVMF_VARS_TEMPLATE, type BuildOpts, type BuiltArgs } from "../qemu/args";
 import { resolveToolchain, type Toolchain } from "../qemu/resolve";
 import { QmpClient } from "../qmp/client";
@@ -175,13 +175,26 @@ export class VmHandle extends EventEmitter {
         }
     }
 
-    async stop(timeoutMs = 30_000): Promise<void> {
-        if (!this.isRunning()) return;
+    /**
+     * Graceful shutdown: asks the guest OS to power off via ACPI
+     * (`system_powerdown`) — this is a normal shutdown, NOT suspend-to-disk;
+     * memory contents are discarded. `onWait` fires ~every 500ms with the
+     * elapsed time while the guest drains. Returns "stopped" once the QEMU
+     * process exits, or "timeout" if the guest ignored the request — callers
+     * decide whether to escalate to kill().
+     */
+    async stop(timeoutMs = 30_000, onWait?: (elapsedMs: number) => void): Promise<"stopped" | "timeout"> {
+        if (!this.isRunning()) return "stopped";
         try { (await this.qmp()).systemPowerdown(); } catch { /* fall through */ }
         const deadline = Date.now() + timeoutMs;
-        while (this.isRunning() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 500));
-        if (this.isRunning()) throw new Error("still running after powerdown — use kill()");
+        const started = Date.now();
+        while (this.isRunning() && Date.now() < deadline) {
+            onWait?.(Date.now() - started);
+            await new Promise((r) => setTimeout(r, 500));
+        }
+        if (this.isRunning()) return "timeout";
         this.cleanupRunDir();
+        return "stopped";
     }
 
     async kill(timeoutMs = 10_000): Promise<void> {
@@ -216,7 +229,7 @@ export class VmHandle extends EventEmitter {
     // ── disk ops ──
 
     diskPath(): string {
-        return this.spec.disk.file.startsWith("/") ? this.spec.disk.file : `${this.paths.dir}/${this.spec.disk.file}`;
+        return resolveDiskPath(this.spec, this.paths.dir);
     }
 
     async snapshots() { return disk.snapshotList(this.tc().qemuImg, this.diskPath()); }

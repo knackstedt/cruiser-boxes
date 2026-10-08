@@ -6,10 +6,10 @@
 
 import { existsSync, statSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import { run, which } from "../../sys/src/exec";
-import { ISO_DIR, vmPaths } from "../../vm-core/src/paths";
+import { ISO_DIR, vmPaths, diskPath } from "../../vm-core/src/paths";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { buildSeedIso, autoinstallUserData, metaData, passwordHash, type SeedOpts } from "./nocloud";
 import { resolveToolchain } from "../../vm-core/src/qemu/resolve";
@@ -78,8 +78,11 @@ export async function runIsoInstall(
     await mkdir(paths.dir, { recursive: true });
     await mkdir(paths.run, { recursive: true });
 
-    if (!existsSync(paths.disk))
-        await createDisk(tc.qemuImg, paths.disk, spec.disk.sizeGiB);
+    // spec.disk.file may point outside the vm dir (custom disk location).
+    const disk = diskPath(spec, paths.dir);
+    await mkdir(dirname(disk), { recursive: true });
+    if (!existsSync(disk))
+        await createDisk(tc.qemuImg, disk, spec.disk.sizeGiB);
     const { copyFile } = await import("node:fs/promises");
     if (!existsSync(paths.ovmfVars))
         await copyFile("/usr/share/OVMF/OVMF_VARS_4M.fd", paths.ovmfVars);
