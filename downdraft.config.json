@@ -2,6 +2,7 @@
   "name": "cruiser",
   "version": "0.1.0",
   "engine": "downdraft",
+  "runtime": "node",
   "native": {
     "appId": "dev.cruiser.app",
     "title": "Cruiser"

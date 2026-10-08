@@ -37,11 +37,19 @@ export async function run(
     }
 }
 
+// PATH is fixed for the process lifetime — memoize lookups so repeat
+// callers (qdbus wrappers, doctor checks) don't respawn `which` each time.
+const whichCache = new Map<string, Promise<string | null>>();
+
 /** First-found binary on PATH (via `command -v` semantics without a shell). */
-export async function which(name: string): Promise<string | null> {
-    const r = await run("which", [name], { noThrow: true });
-    const p = r.stdout.trim();
-    return r.code === 0 && p ? p : null;
+export function which(name: string): Promise<string | null> {
+    let p = whichCache.get(name);
+    if (!p) {
+        p = run("which", [name], { noThrow: true })
+            .then((r) => (r.code === 0 && r.stdout.trim() ? r.stdout.trim() : null));
+        whichCache.set(name, p);
+    }
+    return p;
 }
 
 /** Spawn a long-running child (daemon helper, viewer, virtiofsd…). */

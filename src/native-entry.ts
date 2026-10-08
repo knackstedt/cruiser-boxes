@@ -10,13 +10,17 @@
 // ============================================================================
 
 import { createLogger } from "@downdraft/engine/util/logger";
-import { createNativeHost } from "@downdraft/platform-native";
+import { createNativeHost } from "@downdraft/platform-native/native-host";
 import { InputBus } from "../libraries/app-shell/src/input-bus";
 import { CruiserShell } from "../libraries/app-shell/src/shell";
 import { CruiserService } from "../libraries/app-shell/src/service";
 import { createCruiserStore } from "../libraries/app-shell/src/store";
+import { mark } from "../libraries/app-shell/src/startup-profile";
 
 const log = createLogger("info");
+
+// Runtime boot + module-graph eval happened before this line ran.
+mark("entry-module");
 
 const WIDTH = 1100;
 const HEIGHT = 720;
@@ -30,6 +34,7 @@ const host = await createNativeHost({
         : {}),
 });
 
+mark("host");
 const { surface, device, window: win } = host;
 const gpuCtx = surface.getContext("webgpu")!;
 const format = host.gpu.getPreferredCanvasFormat() as GPUTextureFormat;
@@ -39,7 +44,8 @@ const bus = new InputBus();
 const store = createCruiserStore();
 const svc = new CruiserService(store);
 const shell = new CruiserShell(device as unknown as GPUDevice, format, surface.width, surface.height, bus, store, svc);
-svc.init().catch((e) => store.getState().setStatus(`init failed: ${e}`));
+mark("shell");
+svc.init().then(() => mark("service-init")).catch((e) => store.getState().setStatus(`init failed: ${e}`));
 // dev harness knob: CRUISER_ROUTE=create|vm|settings preselects a route for screenshots
 if (process.env.CRUISER_ROUTE) {
     const r = process.env.CRUISER_ROUTE as "create" | "vm" | "settings";
@@ -63,7 +69,9 @@ const shotPath = process.env.CRUISER_SCREENSHOT;
 const shotAt = Number(process.env.CRUISER_SHOT_FRAMES ?? 30);
 let frames = 0;
 
+let firstFrameMarked = false;
 function frame(): void {
+    if (!firstFrameMarked) { firstFrameMarked = true; mark("first-frame"); }
     const tex = gpuCtx.getCurrentTexture();
     if (!tex) { requestAnimationFrame(frame); return; }
     const encoder = (device as unknown as GPUDevice).createCommandEncoder();

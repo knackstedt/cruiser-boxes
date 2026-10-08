@@ -64,7 +64,10 @@ export function kdeX11(): WmAdapter {
     const base = x11Base("kde-x11", { monitors: true, desktops: true, placeWindows: true, shortcuts: true });
     return {
         ...base,
-        desktops: async () => (await kdeDesktops()).length ? kdeDesktops() : x11Desktops(),
+        desktops: async () => {
+            const ds = await kdeDesktops();
+            return ds.length ? ds : x11Desktops();
+        },
         installEscapeShortcut: (keys, action) => kdeInstallEscapeShortcut(keys, action),
         // keep runEscape usable for runtime (non-installed) escapes
     };

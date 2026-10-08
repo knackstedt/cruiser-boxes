@@ -18,6 +18,9 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   CRUISER_ROUTE=create|vm|settings bun run src/native-entry.ts` — headless-ish
   UI smoke/screenshot harness (still needs a GPU + display; captures the real
   window surface).
+- `DD_STARTUP_PROFILE=1` — boot timing marks (`[startup] label t=Nms` since
+  process start): entry/host/shell/service stages in `startup-profile.ts`
+  plus per-stage marks inside `createNativeHost` (engine).
 
 ## Layout
 
@@ -45,6 +48,14 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 - QEMU argv is structured arrays only — never assemble shell strings for qemu.
 - Passwords live in 0600 files under `<vm>/secrets/`; never in vm.json or logs.
 - DownDraft fixes go to `../downdraft-engine` and are committed there.
+- `downdraft.config.json` sets `"runtime": "node"` — the `draft dev` shell's
+  Vite ModuleRunner is ~5× slower under Bun's node:vm (≈2.2s vs ≈11.8s to
+  first frame). Game code stays runtime-agnostic; `--runtime bun` overrides.
+- Import **leaf subpaths** (`@downdraft/engine/util/logger`,
+  `@downdraft/platform-native/native-host`), never the package barrels, in
+  startup-path code — each bare `@downdraft/engine` value-import pulls ~340
+  core modules into the dev transform graph. Type-only imports are erased
+  and don't count.
 - Blitz quirks learned: `.content` blocks over-constrained with
   `position:absolute; top:X; bottom:Y` paint nothing — use flow + fixed height.
 - Escape shortcuts require `-grab-keyboard` (host keeps combos) — the schema
