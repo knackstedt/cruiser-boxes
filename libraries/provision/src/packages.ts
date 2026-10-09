@@ -65,7 +65,7 @@ export const PACKAGES: PkgEntry[] = [
     { id: "growfs",        pkgs: { ...deb("cloud-guest-utils"), fedora: "cloud-utils-growpart" } },
 
     // ── tools ──
-    { id: "cli-tools",     pkgs: ["curl", "wget", "git", "htop"] },
+    { id: "cli-tools",     pkgs: { ...deb(["curl", "wget", "git", "htop"]), fedora: ["curl", "wget2", "git", "htop"] } },
     { id: "bus-tools",     pkgs: ["usbutils", "pciutils"] },
     { id: "clipboard",     pkgs: ["wl-clipboard", "xclip"] },
     { id: "xdotool",       pkgs: "xdotool" },
@@ -79,7 +79,9 @@ export const PACKAGES: PkgEntry[] = [
     { id: "gl-tools",      pkgs: { ...deb("mesa-utils"), fedora: "mesa-demos" } },
     { id: "vk-tools",      pkgs: "vulkan-tools" },
     { id: "va-tools",      pkgs: { ...deb("vainfo"), fedora: "libva-utils" } },
-    { id: "va-drivers",    pkgs: { ...deb("va-driver-all"), fedora: ["libva-intel-driver", "intel-media-driver", "libva-vdpau-driver"] } },
+    // fedora's hw va/vdpau drivers moved to rpmfusion — null = skip on fedora;
+    // irrelevant for virtio-gpu anyway (vainfo still installed for checks)
+    { id: "va-drivers",    pkgs: { ...deb("va-driver-all"), fedora: null } },
 
     // ── audio — RDP audio redirection needs pipewire + wireplumber ──
     { id: "audio",         pkgs: { ...deb(["pipewire", "pipewire-pulse", "pipewire-alsa", "wireplumber", "rtkit", "libspa-0.2-bluetooth"]),
@@ -88,8 +90,10 @@ export const PACKAGES: PkgEntry[] = [
     // ── fonts: base bundle always; CJK/MS-core behind extraFonts ──
     { id: "fonts-base",    pkgs: { ubuntu: ["fonts-ubuntu", "fonts-cantarell", "fonts-liberation", "fonts-noto-core", "fonts-noto-color-emoji"],
                                    debian: ["fonts-dejavu", "fonts-cantarell", "fonts-liberation", "fonts-noto-core", "fonts-noto-color-emoji"],
-                                   fedora: ["dejavu-sans-fonts", "abattis-cantarell-vf-fonts", "liberation-fonts", "google-noto-sans-fonts", "google-noto-emoji-color-fonts"] } },
-    { id: "fonts-cjk",     pkgs: { ...deb("fonts-noto-cjk"), fedora: "google-noto-sans-cjk-ttc-fonts" },
+                                   fedora: ["dejavu-sans-fonts", "abattis-cantarell-vf-fonts",
+                                            "liberation-sans-fonts", "liberation-serif-fonts", "liberation-mono-fonts",
+                                            "google-noto-sans-fonts", "google-noto-emoji-fonts"] } },
+    { id: "fonts-cjk",     pkgs: { ...deb("fonts-noto-cjk"), fedora: "google-noto-sans-cjk-fonts" },
                            when: (p) => p.extraFonts },
     { id: "fonts-extra",   pkgs: { ...deb("fonts-noto-extra"), fedora: "google-noto-fonts-all" },
                            when: (p) => p.extraFonts },
@@ -113,12 +117,20 @@ export const PACKAGES: PkgEntry[] = [
 
     // ── KDE desktop — only on releases shipping krdp (see distros.ts) ──
     { id: "kde-core",      desktops: ["kde"],
-                           pkgs: { ...deb(["sddm", "plasma-desktop", "plasma-workspace-wayland", "krdp",
-                                           "xdg-desktop-portal-kde", "kwin-x11"]),
-                                   fedora: ["sddm", "plasma-workspace", "plasma-workspace-wayland", "krdp",
+                           // plasma-workspace-wayland was merged into plasma-workspace
+                           // (ubuntu ≥25.10, debian trixie, fedora) — wayland is the
+                           // default kwin session; kwin-x11 stays as fallback.
+                           pkgs: { ubuntu: ["sddm", "plasma-desktop", "plasma-workspace", "krdp",
+                                            "xdg-desktop-portal-kde", "kwin-wayland", "kwin-x11"],
+                                   debian: ["sddm", "plasma-desktop", "plasma-workspace", "krdp",
+                                            "xdg-desktop-portal-kde", "kwin-wayland", "kwin-x11"],
+                                   // fedora folds the wayland session into plasma-workspace
+                                   fedora: ["sddm", "plasma-workspace", "krdp",
                                             "xdg-desktop-portal-kde"] } },
     { id: "kde-applets",   desktops: ["kde"], pkgs: ["plasma-nm", "plasma-pa", "powerdevil", "kinfocenter"] },
-    { id: "kde-apps",      desktops: ["kde"], pkgs: ["dolphin", "konsole", "systemsettings", "ark", "kwrite"] },
+    { id: "kde-apps",      desktops: ["kde"],
+                           pkgs: { ...deb(["dolphin", "konsole", "systemsettings", "ark", "kwrite"]),
+                                   fedora: ["dolphin", "konsole", "plasma-systemsettings", "ark", "kwrite"] } },
     { id: "kde-store",     desktops: ["kde"],
                            pkgs: { ...deb(["plasma-discover", "plasma-discover-backend-flatpak"]),
                                    fedora: ["plasma-discover", "plasma-discover-flatpak"] } },

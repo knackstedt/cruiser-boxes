@@ -116,9 +116,12 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
                     spec.shares.push({ hostPath: p, tag: tag ?? "hostshare", readOnly: false });
                 }
             }
-            const h = await registry.create(spec);
-            console.log(`created ${spec.name} @ ${h.paths.dir}`);
-            console.log(`  ssh:${spec.network.sshPort} rdp:${spec.network.rdpPort} gpu:${spec.gpu.mode} head:${spec.display.headMode}`);
+            // flag values were cast unchecked — re-parse so a bad --distro /
+            // --cpus / --share tag fails here instead of poisoning vm.json.
+            const checked = VmSpec.parse(spec);
+            const h = await registry.create(checked);
+            console.log(`created ${h.spec.name} @ ${h.paths.dir}`);
+            console.log(`  ssh:${h.spec.network.sshPort} rdp:${h.spec.network.rdpPort} gpu:${h.spec.gpu.mode} head:${h.spec.display.headMode}`);
             console.log(`  next: cruiser provision cloudimg ${spec.name} <release>  (or drop a disk.qcow2 in)`);
             break;
         }
@@ -143,7 +146,7 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
         case "snapshot-rm": { const h = await needVm(args[0]); await h.deleteSnapshot(args[1]!); console.log("deleted"); break; }
         case "backup": { const h = await needVm(args[0]); if (!args[1]) usage(); await h.backup(args[1]); console.log(`backed up -> ${args[1]}`); break; }
         case "resize": { const h = await needVm(args[0]); await h.resizeDisk(Number(args[1])); console.log(`resized to ${args[1]}G`); break; }
-        case "rm": { await registry.remove(args[0]!, { deleteDisk: has("--disk") }); console.log("removed"); break; }
+        case "rm": { await needVm(args[0]); await registry.remove(args[0]!, { deleteDisk: has("--disk") }); console.log("removed"); break; }
         case "mount": {
             const h = await needVm(args[0]);
             const { mountGuest } = await import("../libraries/host-int/src/mount");

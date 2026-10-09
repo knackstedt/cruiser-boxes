@@ -46,7 +46,8 @@ export type UsbDeviceRef = z.infer<typeof UsbDeviceRef>;
 
 export const ShareSpec = z.object({
     hostPath: z.string(),
-    tag: z.string().default("hostshare"),
+    // mount_tag goes into fstab + qemu -virtfs unquoted — safe charset only.
+    tag: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/).default("hostshare"),
     readOnly: z.boolean().default(false),
 });
 export type ShareSpec = z.infer<typeof ShareSpec>;
@@ -120,8 +121,9 @@ export const VmSpec = z.object({
         snap: z.boolean().default(false),
         /** extended font sets (CJK + MS core fonts) beyond the base bundle. */
         extraFonts: z.boolean().default(false),
-        /** escape hatch: extra distro packages, installed at setup. */
-        extraPackages: z.array(z.string()).default([]),
+        /** escape hatch: extra distro packages, installed at setup —
+         *  expanded unquoted into the pkg manager line, hence strict names. */
+        extraPackages: z.array(z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9.+:~_=-]*$/)).default([]),
     }).prefault({}),
 
     network: z.object({
@@ -144,7 +146,8 @@ export const VmSpec = z.object({
     }).prefault({}),
 
     credentials: z.object({
-        username: z.string().default("cruiser"),
+        // POSIX username — interpolated into shell scripts and ini files.
+        username: z.string().regex(/^[a-z_][a-z0-9_-]{0,31}$/).default("cruiser"),
         /** Path to a 0600 file holding the RDP/SSH password (never inline). */
         passwordFile: z.string().optional(),
     }).prefault({}),

@@ -3,7 +3,7 @@
 // first-boot with seed, guest setup, monitor layout.
 // ============================================================================
 
-import type { VmSpec } from "../../vm-core/src/config/schema";
+import { VmSpec } from "../../vm-core/src/config/schema";
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import { detectAdapter } from "../../host-int/src/detect";
 import { guestLayoutFromHost } from "./monitors";
@@ -31,7 +31,9 @@ function log(o: ProvisionOpts, m: string) { (o.onLog ?? noop)(m); }
 /** Generate + persist credentials; returns plaintext password for the run. */
 async function ensurePassword(spec: VmSpec, o: ProvisionOpts): Promise<string> {
     const pw = o.password ?? randomBytes(9).toString("base64url");
-    spec.credentials.username = o.username ?? spec.credentials.username;
+    // o.username is unchecked CLI/UI input — run it through the schema regex
+    // (POSIX username) since it lands in cloud-init YAML and guest shell.
+    if (o.username) spec.credentials.username = VmSpec.shape.credentials.unwrap().shape.username.parse(o.username);
     await writePasswordFile(spec, pw);
     return pw;
 }

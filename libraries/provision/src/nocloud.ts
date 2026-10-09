@@ -79,9 +79,11 @@ ${o.sshAuthorizedKeys?.length ? `    authorized-keys:\n${o.sshAuthorizedKeys.map
   shutdown: poweroff
   late-commands:
     - curtin in-target --target=/target -- apt-get update
+    # per-package loop — one name missing on the ISO's release (e.g. krdp on
+    # 24.04) must not fail the whole subiquity install.
     - >-
-      curtin in-target --target=/target -- apt-get install -y
-      ${pkgs.join(" ")}
+      curtin in-target --target=/target -- sh -c 'export DEBIAN_FRONTEND=noninteractive; for p in
+      ${pkgs.join(" ")}; do apt-get install -y "$p" || echo "skip: $p"; done'
     - curtin in-target --target=/target -- systemctl enable qemu-guest-agent
 `;
 }

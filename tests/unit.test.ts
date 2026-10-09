@@ -110,7 +110,7 @@ describe("guestSetupScript", () => {
         const sh = guestSetupScript(spec(), { rdpPassword: "pw" });
         expect(sh).toContain("gnome-remote-desktop");
         expect(sh).toContain("grdctl --system rdp enable");
-        expect(sh).toContain("apt-get install -y $WANTED");
+        expect(sh).toContain("apt-get install -y $PKGS");
         expect(sh).toContain("dnf install -y --skip-unavailable $WANTED"); // imported-disk detect
         expect(sh).not.toContain("krdpserverrc");
         expect(sh).toContain("CRUISER_GUEST_SETUP_OK");

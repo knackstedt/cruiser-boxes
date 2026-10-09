@@ -150,9 +150,15 @@ export class CruiserService {
     }
 
     async refresh(): Promise<void> {
-        const vms = await Promise.all([...this.handles.values()].map((h) => this.summarize(h)));
-        vms.sort((a, b) => a.name.localeCompare(b.name));
-        this.store.getState().setVms(vms);
+        // Flush incrementally: a running VM with a slow/wedged QGA sample
+        // (~2.5s) must not hide every other row behind "No VMs yet".
+        const acc = new Map<string, VmSummary>();
+        const flush = () => this.store.getState().setVms(
+            [...acc.values()].sort((a, b) => a.name.localeCompare(b.name)));
+        await Promise.all([...this.handles.values()].map(async (h) => {
+            const s = await this.summarize(h).catch(() => null);
+            if (s) { acc.set(h.spec.name, s); flush(); }
+        }));
     }
 
     private usbToStore(usb: Awaited<ReturnType<typeof listUsbDevices>>): void {

@@ -31,6 +31,9 @@ export async function waitForAgent(h: VmHandle, timeoutMs = 5 * 60_000): Promise
     }
 }
 
+/** POSIX single-quote escape — every interpolated value goes through this. */
+const sq = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
+
 /** The guest setup script — run via `qga sh` (one bash -c per section batch). */
 export function guestSetupScript(spec: VmSpec, o: { rdpPassword: string; monitorsXmlB64?: string }): string {
     const u = spec.credentials.username;
@@ -68,8 +71,34 @@ echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select t
     debconf-set-selections 2>/dev/null || true` : ""}
 if command -v apt-get >/dev/null; then
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq || true
-    apt-get install -y $WANTED || true
+${p.extraFonts ? `    # MS core fonts live outside main — debian contrib, ubuntu multiverse.
+    # Cloud images ship main only; enable the component then refresh.
+    case "$FAM" in
+        debian) for f in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list; do
+            [ -f "$f" ] || continue
+            grep -q contrib "$f" || sed -i -e 's/^Components: main\\>/Components: main contrib/' \\
+                -e 's/ main$/ main contrib/' "$f" 2>/dev/null || true
+        done ;;
+        ubuntu) for f in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
+            [ -f "$f" ] || continue
+            grep -q multiverse "$f" || sed -i -e 's/^Components: main\\>/Components: main multiverse/' \\
+                -e 's/ main$/ main multiverse/' "$f" 2>/dev/null || true
+        done ;;
+    esac
+` : ""}    apt-get update -qq || true
+    # one unresolvable name aborts apt's whole transaction — filter to
+    # packages with a real candidate first (release drift, arch gaps).
+    PKGS=""
+    for p in $WANTED; do
+        # no grep -q here: under pipefail, grep -q's early exit SIGPIPEs
+        # apt-cache (141) and the pipeline reads as failure — false skips.
+        if apt-cache policy "$p" 2>/dev/null | grep "Candidate: [^ (]" >/dev/null; then
+            PKGS="$PKGS $p"
+        else
+            echo "guest-setup: no apt candidate for $p — skipped" >&2
+        fi
+    done
+    [ -n "$PKGS" ] && apt-get install -y $PKGS || true
 elif command -v dnf5 >/dev/null; then dnf5 install -y --skip-unavailable $WANTED || true
 elif command -v dnf >/dev/null; then dnf install -y --skip-unavailable $WANTED || true
 elif command -v zypper >/dev/null; then zypper --non-interactive install $WANTED || true
@@ -87,17 +116,17 @@ command -v firewall-cmd >/dev/null && {
     const shareSection = `# host shares — virtiofs when a virtio-fs device is bound, 9p otherwise.
 # (virtiofs devices have no mount_tag sysfs attr; driver binding is the test.)
 SHARE_FSTYPE=9p; ls -d /sys/bus/virtio/drivers/virtiofs/virtio* >/dev/null 2>&1 && SHARE_FSTYPE=virtiofs
-${spec.shares.map((s) => `mkdir -p /mnt/${s.tag}
+${spec.shares.map((s) => `mkdir -p ${sq(`/mnt/${s.tag}`)}
 if [ "$SHARE_FSTYPE" = virtiofs ]; then
-    grep -q ' /mnt/${s.tag} ' /etc/fstab || tee -a /etc/fstab <<'FSTAB'
+    grep -q ${sq(` /mnt/${s.tag} `)} /etc/fstab || tee -a /etc/fstab <<'FSTAB'
 ${s.tag} /mnt/${s.tag} virtiofs rw,nofail,_netdev,x-systemd.automount 0 0
 FSTAB
-    mount -t virtiofs ${s.tag} /mnt/${s.tag} 2>/dev/null || true
+    mount -t virtiofs ${sq(s.tag)} ${sq(`/mnt/${s.tag}`)} 2>/dev/null || true
 else
-    grep -q ' /mnt/${s.tag} ' /etc/fstab || tee -a /etc/fstab <<'FSTAB'
+    grep -q ${sq(` /mnt/${s.tag} `)} /etc/fstab || tee -a /etc/fstab <<'FSTAB'
 ${s.tag} /mnt/${s.tag} 9p trans=virtio,version=9p2000.L,msize=262144,_netdev,x-systemd.automount,x-systemd.idle-timeout=60,nofail 0 0
 FSTAB
-    mount -t 9p -o trans=virtio,version=9p2000.L ${s.tag} /mnt/${s.tag} 2>/dev/null || true
+    mount -t 9p -o trans=virtio,version=9p2000.L ${sq(s.tag)} ${sq(`/mnt/${s.tag}`)} 2>/dev/null || true
 fi`).join("\n")}
 systemctl daemon-reload || true`;
 
@@ -133,7 +162,7 @@ systemctl enable sddm.service 2>/dev/null || true`;
 mkdir -p /var/lib/gnome-remote-desktop/tls
 [ -f /var/lib/gnome-remote-desktop/tls/cert.pem ] || openssl req -x509 \\
     -newkey rsa:2048 -keyout /var/lib/gnome-remote-desktop/tls/key.pem \\
-    -out /var/lib/gnome-remote-desktop/tls/cert.pem -days 3650 -nodes -subj /CN=${spec.name}
+    -out /var/lib/gnome-remote-desktop/tls/cert.pem -days 3650 -nodes -subj ${sq(`/CN=${spec.name}`)}
 chown -R gnome-remote-desktop:gnome-remote-desktop /var/lib/gnome-remote-desktop
 systemctl enable --now gnome-remote-desktop.service
 # GRD ≥47: grdctl talks to a separate configuration daemon — it must be up
@@ -142,10 +171,11 @@ systemctl enable --now gnome-remote-desktop-configuration.service 2>/dev/null ||
 sleep 1
 grdctl --system rdp set-tls-cert /var/lib/gnome-remote-desktop/tls/cert.pem
 grdctl --system rdp set-tls-key /var/lib/gnome-remote-desktop/tls/key.pem
-grdctl --system rdp set-credentials '${u}' '${o.rdpPassword}'
-grdctl --system rdp set-auth-methods credentials
-grdctl --system rdp disable-view-only
-grdctl --system rdp disable-port-negotiation
+grdctl --system rdp set-credentials ${sq(u)} ${sq(o.rdpPassword)}
+# optional knobs vary across grdctl versions (trixie lacks set-auth-methods)
+grdctl --system rdp set-auth-methods credentials 2>/dev/null || true
+grdctl --system rdp disable-view-only 2>/dev/null || true
+grdctl --system rdp disable-port-negotiation 2>/dev/null || true
 grdctl --system rdp enable
 # grdctl lies: it exits 0 while printing polkit/dbus errors to stderr and
 # applying nothing. Trust only the socket.
@@ -169,7 +199,7 @@ if [ -z "$rdpok" ]; then echo "GRD RDP server is not listening on 3389"; exit 1;
 KDIR="$UHOME/.local/share/krdpserver"
 mkdir -p "$KDIR"
 [ -f "$KDIR/krdp.crt" ] || openssl req -nodes -new -x509 \\
-    -keyout "$KDIR/krdp.key" -out "$KDIR/krdp.crt" -days 3650 -batch -subj /CN=${spec.name}
+    -keyout "$KDIR/krdp.key" -out "$KDIR/krdp.crt" -days 3650 -batch -subj ${sq(`/CN=${spec.name}`)}
 chown -R "$U":"$U" "$KDIR"
 KUSR() { runuser -u "$U" -- env XDG_RUNTIME_DIR=/run/user/"$UUID" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/"$UUID"/bus "$@"; }
 KUSR flatpak permission-set kde-authorized remote-desktop org.kde.krdpserver yes 2>/dev/null || true
@@ -177,7 +207,7 @@ KUSR kwriteconfig6 --file krdpserverrc --group General --key Certificate "$KDIR/
 KUSR kwriteconfig6 --file krdpserverrc --group General --key CertificateKey "$KDIR/krdp.key"
 KUSR kwriteconfig6 --file krdpserverrc --group General --key SystemUserEnabled true
 KUSR kwriteconfig6 --file krdpserverrc --group General --key User "$U"
-KUSR kwriteconfig6 --file krdpserverrc --group General --key Password '${o.rdpPassword}'
+KUSR kwriteconfig6 --file krdpserverrc --group General --key Password ${sq(o.rdpPassword)}
 KUSR kwriteconfig6 --file krdpserverrc --group General --key Port 3389
 KUSR kwriteconfig6 --file krdpserverrc --group General --key Autostart true
 systemctl --global enable app-org.kde.krdpserver.service 2>/dev/null || \\
@@ -221,9 +251,10 @@ systemctl enable --now snapd.socket 2>/dev/null || true` : ""}`;
 
     // NOTE: runs as root via QGA — user-context steps are explicitly `runuser`'d.
     // PATH is set explicitly: QGA exec on Fedora gets /usr/local/bin:/usr/bin.
-    return `set -euo pipefail
+    return `set -eu
+set -o pipefail 2>/dev/null || true   # dash (QGA /bin/sh) lacks pipefail
 export PATH=/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin
-U='${u}'
+U=${sq(u)}
 UHOME=$(getent passwd "$U" | cut -d: -f6)
 UUID=$(id -u "$U")
 
