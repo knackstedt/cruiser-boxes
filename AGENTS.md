@@ -60,6 +60,12 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   `position:absolute; top:X; bottom:Y` paint nothing — use flow + fixed height.
 - Escape shortcuts require `-grab-keyboard` (host keeps combos) — the schema
   default `grabKeyboard:false` is load-bearing.
+- HMR (`draft dev`): `native-entry.ts` is a "blocking entry" — its
+  close-wait must release via `__ddSession.onDispose(() => resolve())` and
+  skip `host.destroy()` on session end (the host is persistent-layer; the
+  supervisor owns it). Without this the entry import never settles, the
+  supervisor's reimport queue jams after the first Tier-3 restart, and the
+  window stays open with dead rendering.
 - Text quality: `PanelSpec.scale` = raster px per display px (supersample;
   1 = hard edges, 2 = smooth-but-soft). `PanelSpec.zoom` (added in
   ../downdraft-engine) = display px per CSS px — the UI scale knob; pointer

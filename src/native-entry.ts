@@ -95,14 +95,40 @@ function frame(): void {
 }
 requestAnimationFrame(frame);
 
+// Boot is complete — under the dev shell this is the real "boot done":
+// the supervisor's finishSessionBoot waits on the entry import settling,
+// which for this blocking entry only resolves at session end.
+try { (globalThis as any).__ddSession?.finishSessionBoot?.(); } catch { /* no dev shell */ }
+
 // dev harness knob: CRUISER_SMOKE_MS=N auto-exits after N ms (no window close needed)
 const smokeMs = Number(process.env.CRUISER_SMOKE_MS ?? 0);
+const tracker = (globalThis as any).__ddSession;
+const bootSession = tracker?.session;
+let windowClosed = false;
 await new Promise<void>((resolve) => {
-    win.addEventListener("close", () => resolve());
+    const s = tracker?.session;
+    // Our session dead/absent/superseded (a restart landed during boot):
+    // resolve now — the close listener and onDispose registration would
+    // both be dropped by the tracker, leaving this frame parked forever.
+    if (tracker && (!s || s.dead || (bootSession && s !== bootSession))) return resolve();
+    // The close may already have fired during boot — a listener registered
+    // now would never see it.
+    if ((win as any).closed) { windowClosed = true; return resolve(); }
+    win.addEventListener("close", () => { windowClosed = true; resolve(); });
+    // Dev-shell session restart (Tier 3): teardown releases this wait via
+    // onDispose so the suspended frame completes instead of pinning the
+    // dead module env and jamming the supervisor's reimport queue.
+    tracker?.onDispose?.(() => resolve());
     if (smokeMs > 0) setTimeout(resolve, smokeMs);
 });
 
 shell.dispose();
 await svc.dispose();
-host.destroy();
+if (windowClosed || !tracker) {
+    host.destroy();
+} else {
+    // Session restart — the host is persistent-layer (the supervisor owns
+    // its lifecycle); join the in-flight teardown and finish.
+    try { await tracker.teardown?.({ destroyDevices: false }); } catch { /* already down */ }
+}
 log.info("cruiser", "exit");
