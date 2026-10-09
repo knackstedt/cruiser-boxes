@@ -4,11 +4,10 @@
 // ============================================================================
 
 import { VMS_DIR } from "../../vm-core/src/paths";
+import { fontFaceCss } from "./fonts";
 import type { CruiserState, VmSummary } from "./store";
 
 const CSS = `
-@font-face { font-family:'Cruiser Sans'; font-weight:400; src:url('ui://cruiser-fonts/regular'); }
-@font-face { font-family:'Cruiser Sans'; font-weight:700; src:url('ui://cruiser-fonts/bold'); }
 * { margin:0; padding:0; box-sizing:border-box; }
 html, body { height:100%; }
 body { background:#10141a; color:#e8ecf1; font-family:'Cruiser Sans',sans-serif; overflow:hidden;
@@ -32,6 +31,14 @@ body { background:#10141a; color:#e8ecf1; font-family:'Cruiser Sans',sans-serif;
 .vmname { font-size:15px; font-weight:bold; }
 .vmspecs { font-size:12px; color:#8a94a3; margin-top:3px; }
 .vmmode { font-size:12px; color:#5d6775; margin-top:2px; }
+.vmdisk { font-size:12px; color:#5d6775; margin-top:2px; }
+.sparks { display:flex; gap:16px; margin:0 4px; }
+.spark { display:flex; flex-direction:column; align-items:flex-end; gap:3px; }
+.spbars { display:flex; align-items:flex-end; gap:1px; height:24px; }
+.spb { width:2px; border-radius:1px; background:#212933; }
+.spark.cpu .spb.v { background:#4fc2f7; }
+.spark.mem .spb.v { background:#9fd89f; }
+.splbl { font-size:10px; color:#5d6775; white-space:nowrap; }
 .pill { padding:4px 11px; border-radius:11px; font-size:12px; white-space:nowrap; }
 .pill.running { background:#1d3a24; color:#9fd89f; }
 .pill.stopped { background:#212933; color:#8a94a3; }
@@ -101,9 +108,45 @@ const HEAD_LABEL: Record<string, string> = {
     app: "app-only",
 };
 
+const GiB = 1024 ** 3;
+
+function fmtBytes(b: number): string {
+    const g = b / GiB;
+    return g >= 10 ? `${Math.round(g)} GiB`
+        : g >= 1 ? `${g.toFixed(1)} GiB`
+        : `${Math.round(b / 1048576)} MiB`;
+}
+
+/** Guest fs usage vs the disk cap: "guest 34.5 / 98 GiB". */
+function guestDiskStr(vm: VmSummary): string | null {
+    if (vm.guestUsedBytes === undefined) return null;
+    const cap = vm.guestTotalBytes ?? vm.diskGiB * GiB;
+    return `guest ${fmtBytes(vm.guestUsedBytes)} / ${fmtBytes(cap)}`;
+}
+
+const SPARK_N = 40;
+const SPARK_H = 24;
+
+function spark(kind: "cpu" | "mem", samples: number[]): string {
+    const cur = samples.length ? Math.round(samples[samples.length - 1]!) : null;
+    let bars = "";
+    for (let i = 0; i < SPARK_N; i++) {
+        const v = samples[samples.length - SPARK_N + i];
+        bars += v === undefined
+            ? `<div class="spb" style="height:1px"></div>`
+            : `<div class="spb v" style="height:${Math.max(1, Math.round(v * SPARK_H / 100))}px"></div>`;
+    }
+    return `<div class="spark ${kind}"><div class="spbars">${bars}</div>
+        <div class="splbl">${kind} ${cur === null ? "–" : `${cur}%`}</div></div>`;
+}
+
 function vmRow(vm: VmSummary): string {
     const up = vm.state === "running";
-    const specs = `${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB RAM · ${vm.diskGiB} GiB disk`;
+    const specs = `${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB RAM · ${vm.diskGiB} GiB cap`;
+    const diskParts = [
+        vm.hostDiskBytes !== undefined ? `${fmtBytes(vm.hostDiskBytes)} file` : "",
+        guestDiskStr(vm) ?? "",
+    ].filter(Boolean).join(" · ");
     const ports = up
         ? [vm.sshPort && `ssh :${vm.sshPort}`, vm.rdpPort && `rdp :${vm.rdpPort}`]
             .filter(Boolean).join(" · ")
@@ -115,7 +158,9 @@ function vmRow(vm: VmSummary): string {
             <div class="vmname">${esc(vm.name)}</div>
             <div class="vmspecs">${esc(specs)}</div>
             <div class="vmmode">${esc(mode)}${vm.provisioned ? "" : ` · <span style="color:#f0c98a">not provisioned</span>`}</div>
+            ${diskParts ? `<div class="vmdisk">${esc(diskParts)}</div>` : ""}
         </div>
+        <div class="sparks">${spark("cpu", vm.cpu)}${spark("mem", vm.mem)}</div>
         <div class="pill ${pillClass(vm.state)}">${esc(vm.state)}</div>
         ${up
             ? btn("View", "vm-view", attr("vm", vm.name)) + btn("Stop", "vm-stop", attr("vm", vm.name), "btn dim")
@@ -228,9 +273,14 @@ function vmDetail(s: CruiserState): string {
     const snaps = vm.snapshots.length
         ? vm.snapshots.map((sn) => `<span class="snap" data-action="vm-restore" data-vm="${esc(vm.name)}" data-snap="${esc(sn)}">${esc(sn)}</span>`).join("")
         : `<span class="meta">none</span>`;
+    const diskDetail = [
+        vm.hostDiskBytes !== undefined ? `${fmtBytes(vm.hostDiskBytes)} file` : "",
+        guestDiskStr(vm) ?? "",
+    ].filter(Boolean).join(" · ");
     return `<div class="h1">${esc(vm.name)} <span class="pill ${pillClass(vm.state)}">${esc(vm.state)}</span></div>
         <div class="kv">
             <div class="k">resources</div><div>${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB · ${vm.diskGiB} GiB disk</div>
+            ${diskDetail ? `<div class="k">disk usage</div><div>${esc(diskDetail)}</div>` : ""}
             <div class="k">gpu / head</div><div>${esc(vm.gpuMode)} / ${esc(vm.headMode)}</div>
             <div class="k">ports</div><div>ssh 127.0.0.1:${vm.sshPort ?? "–"} · rdp 127.0.0.1:${vm.rdpPort ?? "–"}</div>
             <div class="k">provisioned</div><div>${esc(vm.provisioned ?? "no")}</div>
@@ -311,7 +361,7 @@ export function renderRoute(s: CruiserState): string {
         s.route === "home" ? home(s) :
         s.route === "create" ? create(s) :
         s.route === "vm" ? vmDetail(s) : settings(s);
-    return `<html><head><style>${CSS}</style></head><body>
+    return `<html><head><style>${fontFaceCss()}${CSS}</style></head><body>
         <div class="topbar"><div class="brand">cruiser</div>
             <div class="nav">${nav("home", "VMs")}${nav("settings", "Settings")}</div>
             <div style="flex:1"></div>
