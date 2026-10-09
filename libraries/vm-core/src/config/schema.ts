@@ -20,6 +20,20 @@ export type GuestDesktop = z.infer<typeof GuestDesktop>;
 export const GuestBrowser = z.enum(["none", "firefox", "chrome", "chromium", "vivaldi", "brave"]);
 export type GuestBrowser = z.infer<typeof GuestBrowser>;
 
+/** Developer tooling groups — labels/package lists live in provision/packages.ts. */
+export const DevTool = z.enum([
+    "toolchain",   // compilers + build systems (gcc/clang, make, cmake, ninja, meson)
+    "python",
+    "node",
+    "rust",
+    "go",
+    "containers",  // podman + buildah + distrobox
+    "linters",
+    "debug",       // gdb/strace/ltrace/valgrind/perf
+    "shell",       // jq, ripgrep, fd, fzf, tmux…
+]);
+export type DevTool = z.infer<typeof DevTool>;
+
 export const EscapeAction = z.enum([
     "host-desktop",        // host-desktop:<n> — jump host to desktop n
     "desktop-cycle-left",
@@ -121,6 +135,9 @@ export const VmSpec = z.object({
         snap: z.boolean().default(false),
         /** extended font sets (CJK + MS core fonts) beyond the base bundle. */
         extraFonts: z.boolean().default(false),
+        /** developer tooling groups (the "Developer" preset) — installed at
+         *  guest-setup; retrofits running VMs on re-provision. */
+        devtools: z.array(DevTool).default([]),
         /** escape hatch: extra distro packages, installed at setup —
          *  expanded unquoted into the pkg manager line, hence strict names. */
         extraPackages: z.array(z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9.+:~_=-]*$/)).default([]),

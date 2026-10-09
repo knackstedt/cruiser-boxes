@@ -10,6 +10,7 @@ import type { CruiserService } from "./service";
 import type { Store, CreateForm } from "./store";
 import { renderRoute } from "./screens";
 import { DISTROS } from "../../provision/src/distros";
+import { DEVTOOLS } from "../../provision/src/packages";
 import { registerUiFonts } from "./fonts";
 import { RenderGate } from "./render-gate";
 import { mark } from "./startup-profile";
@@ -139,6 +140,13 @@ export class CruiserShell {
             st().setField("release", DISTROS[fam].releases[0]!.id);
         });
         this.host.onAction("set-vd", (d) => st().setField("vd", Number(d.vd) || 0));
+        this.host.onAction("set-preset", (d) => {
+            const preset = d.value === "developer" ? "developer" : "standard";
+            st().setField("preset", preset);
+            // developer pre-checks the whole tooling menu; user can untoggle
+            st().setField("devtools", preset === "developer" ? DEVTOOLS.map((t) => t.id) : []);
+        });
+        this.host.onAction("devtools-toggle", (d) => { if (d.key) st().toggleDevtool(d.key); });
         this.host.onAction("usb-toggle", (d) => {
             if (!d.key) return;
             const dev = st().usbDevices.find((u) => u.key === d.key);

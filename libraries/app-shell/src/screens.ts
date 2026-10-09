@@ -5,6 +5,7 @@
 
 import { VMS_DIR } from "../../vm-core/src/paths";
 import { DISTROS, supportsKrdp } from "../../provision/src/distros";
+import { DEVTOOLS } from "../../provision/src/packages";
 import { fontFaceCss } from "./fonts";
 import type { CruiserState, VmSummary } from "./store";
 
@@ -300,6 +301,11 @@ function create(s: CruiserState): string {
         <div class="hint">installed via Flathub</div>
         ${checkRow("Snap support", "snap", f.snap, "off → flatpak is the only app channel")}
         ${checkRow("Extra fonts", "extraFonts", f.extraFonts, "CJK + MS core fonts on top of the base bundle")}
+        ${optRow("Preset", "preset", f.preset, [["standard", "Standard"], ["developer", "Developer"]], "set-preset")}
+        ${f.preset === "developer" ? `<div class="opts wrap" style="margin:0 0 6px 140px">${DEVTOOLS.map((t) =>
+            `<div class="opt${f.devtools.includes(t.id) ? " on" : ""}" data-action="devtools-toggle" data-key="${esc(t.id)}"
+                 title="${esc(t.desc)}">${esc(t.label)} <span class="meta">${esc(t.desc)}</span></div>`).join("")}</div>
+            <div class="hint">installs the selected tooling during guest setup — uncheck what you don't want. "Containers" includes distrobox, which shells into other distros' packages.</div>` : ""}
         <div class="hint">The base bundle — desktop, RDP/audio/GPU stack, flatpak + software store, fonts — is always installed.</div>`}
         ${usbSection}
         <div class="h2">Credentials</div>

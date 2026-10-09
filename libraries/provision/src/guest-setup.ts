@@ -188,7 +188,14 @@ rdpok=; i=0
 while [ $i -lt 60 ]; do
     if ss -tln | grep -q ':3389'; then rdpok=1; break; fi
     i=$((i+1))
-    if [ $((i % 15)) -eq 0 ]; then systemctl restart gnome-remote-desktop.service || true; fi
+    if [ $((i % 15)) -eq 0 ]; then
+        systemctl restart gnome-remote-desktop.service || true
+        # rdp-enable doesn't latch while the daemon's DM connect is still
+        # racing (RDP status stays "disabled" — daemon restarts alone never
+        # retry it). Re-issue on the same cadence; a big first-boot install
+        # (devtools) pushes gdm's settle time past the initial call.
+        grdctl --system rdp enable 2>/dev/null || true
+    fi
     sleep 2
 done
 if [ -z "$rdpok" ]; then echo "GRD RDP server is not listening on 3389"; exit 1; fi

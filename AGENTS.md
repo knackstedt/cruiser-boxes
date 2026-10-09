@@ -33,7 +33,10 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   gnome-x11; gnome-wayland stub), xfreerdp viewer + ViewerSession.
 - `libraries/provision` — cloudimg+NoCloud, ISO autoinstall, guest-setup driver
   (QGA), monitors.xml generation. `packages.ts` is the single scoped package
-  manifest (entries carry `stages: seed|setup`, `desktops`, `distros`, `when`);
+  manifest (entries carry `stages: seed|setup`, `desktops`, `distros`, `when`).
+  `os.devtools` groups (DevTool enum, DEVTOOLS catalog) power the "Developer"
+  preset — setup-stage only so a stale name can't abort cloud-init. Fedora's
+  nodejs/npm resolve via provides (versioned nodejsXX pkgs), not `dnf list`;
   `distros.ts` holds the curated release matrix + cloud-image URL resolvers
   (Debian/Fedora resolve filenames by scraping mirror indexes).
 - `libraries/app-mode` — waypipe over vsock (socat bridge) / ssh fallback.

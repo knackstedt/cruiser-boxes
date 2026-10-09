@@ -43,6 +43,8 @@ export interface CreateForm {
     browser: string;               // none|firefox|chrome|chromium|vivaldi|brave
     snap: boolean;                 // install snapd (off → flatpak only)
     extraFonts: boolean;           // CJK + MS core fonts beyond the base bundle
+    preset: string;                // standard|developer — developer reveals the devtools menu
+    devtools: string[];            // DevTool ids selected in the developer preset
     iso: string;                   // iso path/url
     importPath: string;            // imported: existing disk image (absolute)
     diskDir: string;               // "" = default (vms dir); else disk file's dir
@@ -133,6 +135,7 @@ export interface CruiserActions {
     setDesktops(ds: { index: number; name?: string; current?: boolean }[], rows: number): void;
     setUsbDevices(ds: UsbChoice[]): void;
     toggleUsb(key: string): void;
+    toggleDevtool(id: string): void;
     setSysinfo(si: SysInfo | null): void;
     setConfirm(c: string | null): void;
 }
@@ -144,6 +147,7 @@ const defaultCreate = (): CreateForm => ({
     gpu: "venus", headMode: "virtual-desktop", persist: "daemonize",
     method: "cloudimg", distro: "ubuntu", release: "26.04", desktop: "gnome",
     browser: "none", snap: false, extraFonts: false,
+    preset: "standard", devtools: [],
     iso: "", importPath: "", diskDir: "",
     username: "cruiser", password: "",
     memUnit: "GiB", vd: 0, usb: [],
@@ -182,6 +186,14 @@ export function createCruiserStore() {
             create: {
                 ...s.create,
                 usb: s.create.usb.includes(key) ? s.create.usb.filter((k) => k !== key) : [...s.create.usb, key],
+            },
+        })),
+        toggleDevtool: (id) => set((s) => ({
+            create: {
+                ...s.create,
+                devtools: s.create.devtools.includes(id)
+                    ? s.create.devtools.filter((k) => k !== id)
+                    : [...s.create.devtools, id],
             },
         })),
     }));

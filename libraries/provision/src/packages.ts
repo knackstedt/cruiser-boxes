@@ -11,7 +11,7 @@
 // flatpaks (flatpak uniform across distros) — see BROWSER_FLATPAK.
 // ============================================================================
 
-import type { DistroFamily, GuestBrowser, GuestDesktop, VmSpec } from "../../vm-core/src/config/schema";
+import type { DevTool, DistroFamily, GuestBrowser, GuestDesktop, VmSpec } from "../../vm-core/src/config/schema";
 
 export type PkgStage = "seed" | "setup";
 
@@ -22,6 +22,7 @@ export interface GuestProfile {
     browser: GuestBrowser;
     snap: boolean;
     extraFonts: boolean;
+    devtools: DevTool[];
     extraPackages: string[];
 }
 
@@ -29,9 +30,23 @@ export function profileFromSpec(spec: VmSpec): GuestProfile {
     const o = spec.os;
     return {
         family: o.family, desktop: o.desktop, browser: o.browser,
-        snap: o.snap, extraFonts: o.extraFonts, extraPackages: [...o.extraPackages],
+        snap: o.snap, extraFonts: o.extraFonts, devtools: [...o.devtools],
+        extraPackages: [...o.extraPackages],
     };
 }
+
+/** The "Developer" preset menu — id/label/desc shown as toggles in the UI. */
+export const DEVTOOLS: readonly { id: DevTool; label: string; desc: string }[] = [
+    { id: "toolchain",  label: "Compilers & build", desc: "gcc/g++/clang, make, cmake, ninja, meson, pkg-config, ccache" },
+    { id: "python",     label: "Python",            desc: "python3 + pip, venv, dev headers" },
+    { id: "node",       label: "Node.js",           desc: "nodejs + npm (distro release)" },
+    { id: "rust",       label: "Rust",              desc: "rustc, cargo, rustfmt, clippy" },
+    { id: "go",         label: "Go",                desc: "golang toolchain" },
+    { id: "containers", label: "Containers",        desc: "podman, buildah, distrobox — distrobox shells into other distros" },
+    { id: "linters",    label: "Linters",           desc: "shellcheck, yamllint, clang-format/tidy" },
+    { id: "debug",      label: "Debug tools",       desc: "gdb, strace, ltrace, valgrind, perf" },
+    { id: "shell",      label: "Shell extras",      desc: "jq, ripgrep, fd, fzf, tmux, tree, btop" },
+];
 
 type Names = string | string[] | Partial<Record<DistroFamily, string | string[] | null>>;
 
@@ -52,6 +67,9 @@ export interface PkgEntry {
 
 /** Shorthand: same package name(s) on both deb families. */
 const deb = (pkgs: string | string[]) => ({ ubuntu: pkgs, debian: pkgs });
+
+/** Predicate shorthand: entry applies when the profile has this devtool on. */
+const dev = (t: DevTool) => (p: GuestProfile) => p.devtools.includes(t);
 
 export const PACKAGES: PkgEntry[] = [
     // ── agent & integration — must land before guest-setup can run ──
@@ -140,6 +158,35 @@ export const PACKAGES: PkgEntry[] = [
     { id: "flatpak",       pkgs: "flatpak" },
     { id: "appimage",      pkgs: { ...deb("libfuse2t64"), fedora: "fuse-libs" } },
     { id: "snapd",         pkgs: "snapd", when: (p) => p.snap },
+
+    // ── developer tooling (the "Developer" preset) — setup stage only: keeps
+    //    the seed small and routes deb names through the candidate-filtered
+    //    install, so a stale name on one release can't abort cloud-init's
+    //    whole package transaction. ──
+    { id: "dev-toolchain", stages: ["setup"], when: dev("toolchain"),
+                           pkgs: { ...deb(["build-essential", "clang", "cmake", "ninja-build", "meson",
+                                           "pkg-config", "ccache"]),
+                                   fedora: ["gcc", "gcc-c++", "clang", "cmake", "ninja-build", "meson",
+                                            "pkgconf-pkg-config", "ccache"] } },
+    { id: "dev-python",    stages: ["setup"], when: dev("python"),
+                           pkgs: { ...deb(["python3", "python3-pip", "python3-venv", "python3-dev"]),
+                                   fedora: ["python3", "python3-pip", "python3-devel"] } },
+    { id: "dev-node",      stages: ["setup"], when: dev("node"), pkgs: ["nodejs", "npm"] },
+    { id: "dev-rust",      stages: ["setup"], when: dev("rust"),
+                           pkgs: { ...deb(["rustc", "cargo", "rustfmt", "rust-clippy"]),
+                                   fedora: ["rust", "cargo", "rustfmt", "clippy"] } },
+    { id: "dev-go",        stages: ["setup"], when: dev("go"), pkgs: "golang" },
+    { id: "dev-containers", stages: ["setup"], when: dev("containers"),
+                           pkgs: ["podman", "buildah", "distrobox"] },
+    { id: "dev-linters",   stages: ["setup"], when: dev("linters"),
+                           pkgs: { ...deb(["shellcheck", "yamllint", "clang-format", "clang-tidy"]),
+                                   fedora: ["ShellCheck", "yamllint", "clang-tools-extra"] } },
+    { id: "dev-debug",     stages: ["setup"], when: dev("debug"),
+                           pkgs: { ubuntu: ["gdb", "strace", "ltrace", "valgrind", "linux-tools-generic"],
+                                   debian: ["gdb", "strace", "ltrace", "valgrind", "linux-perf"],
+                                   fedora: ["gdb", "strace", "ltrace", "valgrind", "perf"] } },
+    { id: "dev-shell",     stages: ["setup"], when: dev("shell"),
+                           pkgs: ["jq", "ripgrep", "fd-find", "fzf", "tmux", "tree", "btop"] },
 ];
 
 /** Flathub app ids for the browser dropdown — uniform across all distros. */

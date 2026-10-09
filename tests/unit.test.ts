@@ -6,7 +6,7 @@ import { diskPath, VMS_DIR } from "../libraries/vm-core/src/paths";
 import { join } from "node:path";
 import { JsonSocket } from "../libraries/vm-core/src/qmp/socket-json";
 import { guestLayoutFromHost } from "../libraries/provision/src/monitors";
-import { profileFromSpec, resolvePackages, resolveFlatpaks } from "../libraries/provision/src/packages";
+import { profileFromSpec, resolvePackages, resolveFlatpaks, DEVTOOLS } from "../libraries/provision/src/packages";
 import { guestSetupScript } from "../libraries/provision/src/guest-setup";
 import { pickImageFromIndex, supportsKrdp, defaultRelease } from "../libraries/provision/src/distros";
 import { freerdpArgs } from "../libraries/host-int/src/freerdp";
@@ -55,7 +55,7 @@ describe("VmSpec", () => {
 
 describe("packages", () => {
     const p = (o: Partial<ReturnType<typeof profileFromSpec>> = {}) =>
-        ({ family: "ubuntu", desktop: "gnome", browser: "none", snap: false, extraFonts: false, extraPackages: [], ...o }) as const;
+        ({ family: "ubuntu", desktop: "gnome", browser: "none", snap: false, extraFonts: false, devtools: [], extraPackages: [], ...o }) as const;
     test("core stack lands on every distro + stage", () => {
         (["ubuntu", "debian", "fedora"] as const).forEach((family) => {
             (["seed", "setup"] as const).forEach((stage) => {
@@ -97,6 +97,31 @@ describe("packages", () => {
         expect(resolveFlatpaks(p({}))).toEqual([]);
         expect(resolveFlatpaks(p({ browser: "firefox" }))).toEqual(["org.mozilla.firefox"]);
         expect(resolveFlatpaks(p({ browser: "brave" }))).toEqual(["com.brave.Browser"]);
+    });
+    test("devtools groups are opt-in and setup-stage only", () => {
+        expect(resolvePackages(p({}), "setup")).not.toContain("build-essential");
+        const dev = resolvePackages(p({ devtools: ["toolchain"] }), "setup");
+        expect(dev).toContain("build-essential");
+        expect(dev).toContain("cmake");
+        // devtools never land in the seed — a stale name can't abort cloud-init
+        expect(resolvePackages(p({ devtools: ["toolchain"] }), "seed")).not.toContain("build-essential");
+    });
+    test("devtools resolve per family", () => {
+        const deb = resolvePackages(p({ family: "debian", devtools: ["toolchain", "rust"] }), "setup");
+        expect(deb).toContain("build-essential");
+        expect(deb).toContain("rust-clippy");
+        const rpm = resolvePackages(p({ family: "fedora", devtools: ["toolchain", "rust", "linters"] }), "setup");
+        expect(rpm).toContain("gcc-c++");
+        expect(rpm).toContain("clippy");
+        expect(rpm).toContain("ShellCheck");
+        expect(rpm).not.toContain("build-essential");
+        // every DEVTOOLS id must have a manifest entry — a toggle that
+        // installs nothing is a silent bug
+        DEVTOOLS.forEach((t) => {
+            const withT = resolvePackages(p({ devtools: [t.id] }), "setup");
+            const without = resolvePackages(p({}), "setup");
+            expect(withT.length).toBeGreaterThan(without.length);
+        });
     });
 });
 

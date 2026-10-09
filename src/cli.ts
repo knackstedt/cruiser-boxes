@@ -37,7 +37,7 @@ usage: cruiser <area> <command> [args]
                    [--share PATH[:tag]] [--persist daemonize|owned]
                    [--distro ubuntu|debian|fedora] [--desktop gnome|kde]
                    [--browser none|firefox|chrome|chromium|vivaldi|brave]
-                   [--snap] [--xfonts]
+                   [--snap] [--xfonts] [--devtools toolchain,python,rust,…]
   vm start <name> [--mode <headmode>]   vm stop <name>    vm kill <name>
   vm status <name>                      vm args <name>   (print QEMU argv)
   vm snapshots <name>                   vm snapshot <name> <snapname>
@@ -110,6 +110,8 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const browser = flagVal("--browser"); if (browser) spec.os.browser = browser as VmSpec["os"]["browser"];
             if (has("--snap")) spec.os.snap = true;
             if (has("--xfonts")) spec.os.extraFonts = true;
+            const devtools = flagVal("--devtools");
+            if (devtools) spec.os.devtools = devtools.split(",").map((s) => s.trim()).filter(Boolean) as VmSpec["os"]["devtools"];
             for (let i = 0; i < argv.length; i++) {
                 if (argv[i] === "--share") {
                     const [p, tag] = (argv[i + 1] ?? "").split(":");

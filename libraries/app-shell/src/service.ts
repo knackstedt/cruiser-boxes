@@ -5,7 +5,7 @@
 
 import { VmRegistry } from "../../vm-core/src/lifecycle/registry";
 import { VmHandle } from "../../vm-core/src/lifecycle/vm";
-import { defaultSpec, VmSpec } from "../../vm-core/src/config/schema";
+import { defaultSpec, DevTool, VmSpec } from "../../vm-core/src/config/schema";
 import { CACHE_DIR, CLOUDIMG_DIR, CONFIG_DIR, DATA_DIR, ISO_DIR, VMS_DIR } from "../../vm-core/src/paths";
 import { detectAdapter, detectSession } from "../../host-int/src/detect";
 import { ViewerSession } from "../../host-int/src/session";
@@ -274,6 +274,8 @@ export class CruiserService {
             spec.os.browser = f.browser as VmSpec["os"]["browser"];
             spec.os.snap = f.snap;
             spec.os.extraFonts = f.extraFonts;
+            // filter through the enum — a stray chip id shouldn't sink create
+            spec.os.devtools = f.devtools.filter((d) => DevTool.safeParse(d).success) as VmSpec["os"]["devtools"];
             if (spec.os.desktop === "kde" && f.method === "cloudimg") {
                 const { supportsKrdp } = await import("../../provision/src/distros");
                 if (!supportsKrdp(spec.os.family, spec.os.release))
