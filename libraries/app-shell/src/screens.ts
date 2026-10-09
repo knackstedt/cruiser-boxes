@@ -20,7 +20,9 @@ body { background:#10141a; color:#e8ecf1; font-family:'Cruiser Sans',sans-serif;
 .nav { display:flex; gap:4px; }
 .nav .item { padding:8px 15px; border-radius:4px; font-size:13px; color:#8a94a3; cursor:default; }
 .nav .item.on { background:#2e4361; color:#7fd0ff; font-weight:bold; }
-.content { padding:20px; flex:1; overflow-y:scroll; }
+/* scrollbar-color styles the overlay thumb (blitz-paint "scrollbars"
+   feature) — transparent track, slate thumb; thumb fades in on scroll. */
+.content { padding:20px; flex:1; overflow-y:scroll; scrollbar-color:#5d6a80 transparent; }
 .h1 { font-size:20px; font-weight:bold; margin-bottom:14px; }
 .h2 { font-size:14px; font-weight:bold; margin:18px 0 8px; color:#8a94a3; }
 .vmlist { display:flex; flex-direction:column; gap:8px; }
@@ -50,6 +52,7 @@ body { background:#10141a; color:#e8ecf1; font-family:'Cruiser Sans',sans-serif;
          border:1px dashed #2a313c; border-radius:8px; }
 .btn { display:inline-block; padding:8px 15px; border-radius:4px; font-size:13px;
        background:#1d3547; color:#7fd0ff; border:1px solid #4fc2f7; margin-right:6px; }
+.btn.sm { padding:4px 10px; font-size:12px; margin-right:5px; }
 .btn:active { background:#2a4a63; }
 .btn.warn { background:#3a2530; color:#f08aa8; border-color:#a04868; }
 .btn.dim { background:#161b23; color:#8a94a3; border-color:#2a313c; }
@@ -153,20 +156,22 @@ function vmBtns(vm: VmSummary, confirm: string | null, detail = false): string {
     const paused = vm.state === "paused";
     const transitional = vm.state === "starting" || vm.state === "stopping";
     const stopped = !up && !paused && !transitional;
+    const b = (label: string, action: string, cls = "btn sm") => btn(label, action, attr("vm", vm.name), cls);
     const parts: string[] = [];
     // "app" head mode has no freerdp viewer — waypipe apps are launched via CLI.
-    if (up && vm.headMode !== "app") parts.push(btn("View", "vm-view", attr("vm", vm.name)));
-    if (paused) parts.push(btn("Resume", "vm-resume", attr("vm", vm.name)));
-    if (up || paused) parts.push(btn("Stop", "vm-stop", attr("vm", vm.name), "btn dim"));
-    if (stopped) parts.push(btn("Start", "vm-start", attr("vm", vm.name)));
+    if (up && vm.headMode !== "app") parts.push(b("View", "vm-view"));
+    if (paused) parts.push(b("Resume", "vm-resume"));
+    if (up || paused) parts.push(b("Stop", "vm-stop", "btn sm dim"));
+    if (stopped) parts.push(b("Start", "vm-start"));
+    if (!transitional) parts.push(b("Edit", "vm-edit", "btn sm dim"));
     if (up || paused || transitional)
         parts.push(confirm === `vm-kill:${vm.name}`
-            ? btn("Confirm kill", "vm-kill", attr("vm", vm.name), "btn warn")
-            : btn("Kill", "vm-kill", attr("vm", vm.name), "btn warn"));
+            ? b("Confirm kill", "vm-kill", "btn sm warn")
+            : b("Kill", "vm-kill", "btn sm warn"));
     if (detail && stopped)
         parts.push(confirm === `vm-rm:${vm.name}`
-            ? btn("Confirm delete", "vm-rm", attr("vm", vm.name), "btn warn")
-            : btn("Delete", "vm-rm", attr("vm", vm.name), "btn warn"));
+            ? b("Confirm delete", "vm-rm", "btn sm warn")
+            : b("Delete", "vm-rm", "btn sm warn"));
     return parts.join("");
 }
 
@@ -235,6 +240,8 @@ const PERSIST_HINT: Record<string, string> = {
 function create(s: CruiserState): string {
     const f = s.create;
     const r = s.hostRes;
+    const editing = s.editVm !== null;
+    const editTarget = editing ? s.vms.find((v) => v.name === s.editVm) : undefined;
     const hostsum = r
         ? `<div class="hostsum">host — <b>${r.cpus}</b> CPUs · <b>${r.memGiB}</b> GiB RAM · <b>${r.diskFreeGiB}</b> GiB free at ${esc(f.diskDir || "default location")}</div>`
         : "";
@@ -246,10 +253,10 @@ function create(s: CruiserState): string {
         ${r ? `<div class="meta">of ${r.memGiB} GiB</div>` : ""}</div>`;
     const diskRow = `<div class="row"><div class="lbl">Disk GiB</div>
         <input data-field="diskGiB" value="${f.diskGiB}" style="width:100px">
-        ${r ? `<div class="meta">of ${r.diskFreeGiB} GiB free</div>` : ""}</div>
-        <div class="row"><div class="lbl">Disk location</div>
+        ${editing ? `<div class="meta">grow-only</div>` : r ? `<div class="meta">of ${r.diskFreeGiB} GiB free</div>` : ""}</div>
+        ${editing ? "" : `<div class="row"><div class="lbl">Disk location</div>
         <div class="meta" style="width:280px">${esc(f.diskDir || `${VMS_DIR}/‹name›/`)}</div>
-        <div class="opt" data-action="pick-disk-dir">Choose…</div></div>`;
+        <div class="opt" data-action="pick-disk-dir">Choose…</div></div>`}`;
     const vdPicker = f.headMode === "virtual-desktop" && s.desktops.length
         ? `<div class="row"><div class="lbl">Desktop</div>
             <div class="opt${f.vd === 0 ? " on" : ""}" data-action="set-vd" data-vd="0">auto</div>
@@ -278,9 +285,11 @@ function create(s: CruiserState): string {
                 `<div class="opt${f.usb.includes(d.key) ? " on" : ""}${d.writable ? "" : " dim"}" data-action="usb-toggle" data-key="${esc(d.key)}">${esc(d.label)} <span class="meta">${d.vendorId}:${d.productId}${d.writable ? "" : " · no access"}</span></div>`).join("")}</div>
                <div class="hint" style="margin-left:0">selected devices are passed straight to the guest at boot — "no access" needs a udev rule or group fix</div>`
             : `<div class="meta">no USB devices found</div>`}`;
-    return `<div class="h1">New VM</div>
+    return `<div class="h1">${editing ? `Edit ${esc(s.editVm ?? "")}` : "New VM"}</div>
         ${hostsum}
-        ${field("Name", "name", f.name)}
+        ${editing
+            ? `<div class="row"><div class="lbl">Name</div><div class="meta" style="color:#e8ecf1">${esc(s.editVm ?? "")}</div></div>`
+            : field("Name", "name", f.name)}
         <div class="h2">Resources</div>
         ${field("vCPUs", "cpus", f.cpus, 80)}
         ${memRow}
@@ -291,7 +300,7 @@ function create(s: CruiserState): string {
         ${vdPicker}
         ${optRow("Persist", "persist", f.persist, [["daemonize", "survives app"], ["owned", "stops with app"], ["ephemeral", "deleted on exit"]])}
         <div class="hint">${PERSIST_HINT[f.persist] ?? ""}</div>
-        <div class="h2">Provisioning</div>
+        ${editing ? "" : `<div class="h2">Provisioning</div>
         ${optRow("Method", "method", f.method, [["none", "none"], ["cloudimg", "cloud image"], ["iso", "ISO autoinstall"], ["imported", "import existing"]])}
         ${provRows}
         ${f.method === "none" ? "" : `<div class="h2">Guest software</div>
@@ -306,12 +315,16 @@ function create(s: CruiserState): string {
             `<div class="opt${f.devtools.includes(t.id) ? " on" : ""}" data-action="devtools-toggle" data-key="${esc(t.id)}"
                  title="${esc(t.desc)}">${esc(t.label)} <span class="meta">${esc(t.desc)}</span></div>`).join("")}</div>
             <div class="hint">installs the selected tooling during guest setup — uncheck what you don't want. "Containers" includes distrobox, which shells into other distros' packages.</div>` : ""}
-        <div class="hint">The base bundle — desktop, RDP/audio/GPU stack, flatpak + software store, fonts — is always installed.</div>`}
+        <div class="hint">The base bundle — desktop, RDP/audio/GPU stack, flatpak + software store, fonts — is always installed.</div>`}`}
         ${usbSection}
-        <div class="h2">Credentials</div>
+        ${editing ? "" : `<div class="h2">Credentials</div>
         ${field("Username", "username", f.username)}
-        ${field("Password", "password", f.password)}
-        <div style="margin-top:18px">${btn("Create VM", "vm-create")}${btn("Cancel", "nav", attr("route", "home"), "btn dim")}</div>`;
+        ${field("Password", "password", f.password)}`}
+        ${editing && editTarget && editTarget.state !== "stopped"
+            ? `<div class="hint" style="margin-left:0">the VM is ${esc(editTarget.state)} — changes apply at the next boot</div>` : ""}
+        <div style="margin-top:18px">${editing
+            ? btn("Save", "vm-save") + btn("Cancel", "nav", attr("route", "vm") + attr("vm", s.editVm ?? ""), "btn dim")
+            : btn("Create VM", "vm-create") + btn("Cancel", "nav", attr("route", "home"), "btn dim")}</div>`;
 }
 
 // ── vm detail ──

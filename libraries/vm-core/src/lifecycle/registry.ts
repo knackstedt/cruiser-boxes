@@ -39,28 +39,28 @@ export interface RegistryEntry {
 export class VmRegistry extends EventTarget {
     private vms = new Map<string, VmHandle>();
 
-    /** Scan VMS_DIR; adopt live VMs. */
-    async scan(): Promise<RegistryEntry[]> {
+    /** Scan VMS_DIR; adopt live VMs. onHandle fires the moment a spec parses
+     *  (before probing) so callers can paint spec-derived rows immediately —
+     *  probes run in parallel since a wedged monitor socket (connect timeout)
+     *  must not delay every other VM's adoption. */
+    async scan(onHandle?: (h: VmHandle) => void): Promise<RegistryEntry[]> {
         this.vms.clear();
         let names: string[] = [];
         try { names = (await readdir(VMS_DIR)).filter((n) => existsSync(join(VMS_DIR, n, "vm.json"))); }
         catch { return []; }
-        const out: RegistryEntry[] = [];
-        const sorted = names.sort();
-        for (let ni = 0; ni < sorted.length; ni++) {
-            const name = sorted[ni]!;
+        const out = await Promise.all(names.sort().map(async (name) => {
             try {
                 const spec = parseVmSpec(JSON.parse(await readFile(join(VMS_DIR, name, "vm.json"), "utf-8")));
                 const h = await VmHandle.load(name);
+                this.vms.set(name, h);
+                onHandle?.(h);
                 // detach persisted sockets from a previous process
                 const state = await h.probe();
-                const entry = { name, state, spec, handle: h };
-                this.vms.set(name, h);
-                out.push(entry);
+                return { name, state, spec, handle: h } as RegistryEntry;
             } catch {
-                out.push({ name, state: "unknown", spec: null as unknown as VmSpec, handle: null as unknown as VmHandle });
+                return { name, state: "unknown", spec: null as unknown as VmSpec, handle: null as unknown as VmHandle } as RegistryEntry;
             }
-        }
+        }));
         this.dispatchEvent(new Event("change"));
         return out;
     }

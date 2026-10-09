@@ -46,10 +46,13 @@ export class CruiserShell {
     ) {
         this.W = width;
         this.H = height;
-        // In-process doc backend: cruiser is a desktop tool, not a game — the
-        // worker round-trip adds ~2 IPC hops to every input→paint cycle for no
-        // benefit (doc rasters are ~2ms). Local keeps input handling synchronous.
-        this.host = new HtmlUiHost(device, format, createLocalBackend());
+        // Doc backend: default resolution prefers a worker (raster off the
+        // main thread — a full VMs-page repaint is ~20ms of CPU, so in-process
+        // raster starves input during scroll/fade animations). Local remains
+        // as the automatic fallback and via CRUISER_UI_BACKEND=local.
+        this.host = new HtmlUiHost(device, format,
+            process.env.CRUISER_UI_BACKEND === "local" ? createLocalBackend() : undefined);
+        svc.uiBackend = this.host.backendKind === "worker" ? "worker" : "local (in-process)";
         mark("html-ui-host");
         this.host.bindInput(bus);
         // Before mount: the local backend applies resources in order, so the
@@ -66,6 +69,9 @@ export class CruiserShell {
             // pixels instead of a downsampled (soft) supersample.
             zoom: Number(process.env.CRUISER_UI_ZOOM ?? 1.25),
             scale: Number(process.env.CRUISER_UI_SCALE ?? 1),
+            // Wheel deltas ease out at frame cadence instead of instant
+            // ~80px jumps per detent. CRUISER_SMOOTH_WHEEL=0 disables.
+            smoothWheel: process.env.CRUISER_SMOOTH_WHEEL !== "0",
         });
         mark("panel-mount");
         this.lastRoute = `${store.getState().route}:${store.getState().selectedVm ?? ""}`;
@@ -114,13 +120,12 @@ export class CruiserShell {
             st().setRoute(route, d.vm ?? null);
             if (route === "create") {
                 void svc.refreshCreateExtras();
-                // Prefill a unique name — an untouched field used to silently
-                // create "my-vm" (and collide on the second one).
-                if (!st().create.name) {
-                    let n = 1;
-                    while (st().vms.some((v) => v.name === `vm-${n}`)) n++;
-                    st().setField("name", `vm-${n}`);
-                }
+                // Fresh wizard on each entry — also clears values an Edit
+                // loaded into the shared form. Then prefill a unique name.
+                st().resetCreate();
+                let n = 1;
+                while (st().vms.some((v) => v.name === `vm-${n}`)) n++;
+                st().setField("name", `vm-${n}`);
             }
             if (route === "settings") void svc.refreshSettings();
         });
@@ -159,6 +164,21 @@ export class CruiserShell {
         this.host.onAction("pick-disk-dir", () => { void svc.pickDiskDir(); });
         this.host.onAction("pick-import", () => { void svc.pickImportFile(); });
         this.host.onAction("vm-create", () => { svc.createVm(); });
+        this.host.onAction("vm-edit", (d) => {
+            const vm = d.vm ? st().vms.find((v) => v.name === d.vm) : null;
+            if (!vm) return;
+            // Load the summary into the shared form — provisioning-only fields
+            // (method/distro/credentials) stay at their defaults, unused.
+            Object.assign(st().create, {
+                name: vm.name, cpus: vm.cpus, memMiB: vm.memMiB, diskGiB: vm.diskGiB,
+                gpu: vm.gpuMode, headMode: vm.headMode, persist: vm.persist,
+                vd: vm.vd, usb: [...vm.usbKeys],
+            });
+            st().setRoute("create");
+            st().setEditVm(vm.name);
+            void svc.refreshCreateExtras();
+        });
+        this.host.onAction("vm-save", () => { svc.saveVm(); });
         this.host.onAction("vm-start", (d) => { if (d.vm) svc.start(d.vm); });
         this.host.onAction("vm-stop", (d) => { if (d.vm) svc.stop(d.vm); });
         this.host.onAction("vm-resume", (d) => { if (d.vm) svc.resume(d.vm); });
@@ -225,6 +245,16 @@ export class CruiserShell {
         if (!sameRoute || (x === 0 && y === 0)) {
             this.scrollX = 0;
             this.scrollY = 0;
+            // Flash the overlay scrollbar on route change so a scrollable
+            // page reads as scrollable — thumbs only paint during/after
+            // scroll activity (opacity fades out ~700ms after the last one).
+            // The 1px nudge is imperceptible; scrollTo clamps, so a page
+            // that fits emits no flash and no motion.
+            if (!sameRoute) {
+                const flash = () => { p.scrollTo(".content", 0, 1); p.scrollTo(".content", 0, 0); };
+                queueMicrotask(flash);
+                setTimeout(flash, 30);
+            }
             return;
         }
         // scrollTo clamps against the node's scroll range, which isn't laid

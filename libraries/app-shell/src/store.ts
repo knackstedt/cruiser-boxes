@@ -20,6 +20,8 @@ export interface VmSummary {
     provisioned?: string;          // method or undefined
     persist: string;
     snapshots: string[];
+    vd: number;                    // display.virtualDesktop (edit form)
+    usbKeys: string[];             // spec.usb.autoAttach as "vid:pid:serial" keys
     hostDiskBytes?: number;        // real size of the disk image on the host fs
     guestUsedBytes?: number;       // guest fs used (QGA root mount / sum)
     guestTotalBytes?: number;      // guest fs total (≈ diskGiB cap)
@@ -120,6 +122,8 @@ export interface CruiserState {
     /** Two-click confirm token for destructive actions ("vm-rm:<name>" etc.)
      *  — first click arms the button, second executes. */
     confirm: string | null;
+    /** Name of the VM being edited in the create wizard (edit mode), or null. */
+    editVm: string | null;
 }
 
 export interface CruiserActions {
@@ -138,6 +142,7 @@ export interface CruiserActions {
     toggleDevtool(id: string): void;
     setSysinfo(si: SysInfo | null): void;
     setConfirm(c: string | null): void;
+    setEditVm(name: string | null): void;
 }
 
 export type CruiserStore = CruiserState & CruiserActions;
@@ -169,7 +174,8 @@ export function createCruiserStore() {
         usbDevices: [],
         sysinfo: null,
         confirm: null,
-        setRoute: (route, vm = null) => set({ route, selectedVm: vm, confirm: null }),
+        editVm: null,
+        setRoute: (route, vm = null) => set({ route, selectedVm: vm, confirm: null, editVm: null }),
         setVms: (vms) => set({ vms }),
         setStatus: (status) => set({ status }),
         setBusy: (busy) => set({ busy }),
@@ -182,6 +188,7 @@ export function createCruiserStore() {
         setUsbDevices: (usbDevices) => set({ usbDevices }),
         setSysinfo: (sysinfo) => set({ sysinfo }),
         setConfirm: (confirm) => set({ confirm }),
+        setEditVm: (editVm) => set({ editVm }),
         toggleUsb: (key) => set((s) => ({
             create: {
                 ...s.create,

@@ -85,6 +85,17 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   and don't count.
 - Blitz quirks learned: `.content` blocks over-constrained with
   `position:absolute; top:X; bottom:Y` paint nothing — use flow + fixed height.
+- Scrollbars: Blitz overlay thumbs are gated behind the `scrollbars` cargo
+  feature (enabled on `blitz-paint` in `native-osr/Cargo.toml`); style with
+  CSS `scrollbar-color` (transparent track works). Thumbs only paint during/
+  after scroll activity and fade ~700ms after — `shell.ts` flashes the thumb
+  on route change via a clamped `scrollTo` nudge so scrollability reads.
+  `PanelSpec.smoothWheel` (html-ui) eases wheel deltas at frame cadence;
+  `CRUISER_SMOOTH_WHEEL=0` disables.
+- Doc backend: default resolution is the **worker** backend (raster off the
+  main thread) — a full-page vello repaint is ~20ms, so in-process raster
+  starves input during scroll/fade animations. `CRUISER_UI_BACKEND=local`
+  forces the in-process backend; the settings page shows the live kind.
 - Escape shortcuts require `-grab-keyboard` (host keeps combos) — the schema
   default `grabKeyboard:false` is load-bearing.
 - HMR (`draft dev`): `native-entry.ts` is a "blocking entry" — its

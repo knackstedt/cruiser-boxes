@@ -19,6 +19,8 @@ import { VmMetricsSampler } from "./metrics";
 import type { DoctorRow, HostInfo, Store, VmSummary } from "./store";
 
 export class CruiserService {
+    /** Doc-backend label shown in settings — the shell knows the real kind. */
+    uiBackend = "local (in-process)";
     private registry = new VmRegistry();
     private handles = new Map<string, VmHandle>();
     private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -31,7 +33,12 @@ export class CruiserService {
     constructor(private store: Store) {}
 
     async init(): Promise<void> {
-        await this.registry.scan();
+        // Each spec-derived row paints the instant its vm.json parses —
+        // probing and metrics fill it in over the next seconds.
+        await this.registry.scan((h) => {
+            this.handles.set(h.spec.name, h);
+            this.paintFast();
+        });
         mark("svc:scan");
         this.registry.list().forEach((h) => this.handles.set(h.spec.name, h));
         // refresh/host/extras/settings write disjoint store fields — run
@@ -131,11 +138,9 @@ export class CruiserService {
         }
     }
 
-    private async summarize(h: VmHandle): Promise<VmSummary> {
+    /** Spec-derived fields + provisional pidfile state — no socket I/O. */
+    private baseSummary(h: VmHandle, state: VmSummary["state"]): VmSummary {
         const s = h.spec;
-        let state: VmSummary["state"] = "stopped";
-        try { state = await h.probe(); } catch { state = "unknown"; }
-        const mt = await this.metrics.sample(h, state);
         return {
             name: s.name, state,
             gpuMode: s.gpu.mode, headMode: s.display.headMode,
@@ -143,11 +148,52 @@ export class CruiserService {
             diskGiB: s.disk.sizeGiB,
             sshPort: s.network.sshPort, rdpPort: s.network.rdpPort,
             provisioned: s.provisioned.method, persist: s.persist,
-            snapshots: await this.snapNames(h, state),
-            hostDiskBytes: mt.hostDiskBytes,
-            guestUsedBytes: mt.guestUsedBytes, guestTotalBytes: mt.guestTotalBytes,
-            cpu: mt.cpu, mem: mt.mem,
+            snapshots: [],
+            vd: s.display.virtualDesktop,
+            usbKeys: s.usb.autoAttach.map((u) => [u.vendorId, u.productId, u.serial].filter(Boolean).join(":")),
+            cpu: [], mem: [],
         };
+    }
+
+    /** Carry still-valid dynamic fields forward so progressive rows don't
+     *  flash empty while the slow pass re-samples. */
+    private carryPrev(s: VmSummary, prev?: VmSummary): VmSummary {
+        if (!prev) return s;
+        if (!s.cpu.length) s.cpu = prev.cpu;
+        if (!s.mem.length) s.mem = prev.mem;
+        s.hostDiskBytes ??= prev.hostDiskBytes;
+        s.guestUsedBytes ??= prev.guestUsedBytes;
+        s.guestTotalBytes ??= prev.guestTotalBytes;
+        if (!s.snapshots.length) s.snapshots = prev.snapshots;
+        return s;
+    }
+
+    /** Push spec+pidfile rows immediately — scan/refresh refine them in
+     *  place as the real probes land. */
+    private paintFast(): void {
+        const prev = new Map(this.store.getState().vms.map((v) => [v.name, v]));
+        const vms = [...this.handles.values()].map((h) =>
+            this.carryPrev(this.baseSummary(h, h.isRunning() ? "running" : "stopped"), prev.get(h.spec.name)));
+        vms.sort((a, b) => a.name.localeCompare(b.name));
+        this.store.getState().setVms(vms);
+    }
+
+    private async summarize(h: VmHandle, onEarly?: (s: VmSummary) => void): Promise<VmSummary> {
+        let state: VmSummary["state"] = "stopped";
+        try { state = await h.probe(); } catch { state = "unknown"; }
+        const base = this.baseSummary(h, state);
+        onEarly?.(base);   // real state before the slow metrics/snaps pass
+        const [mt, snaps] = await Promise.all([
+            this.metrics.sample(h, state),
+            this.snapNames(h, state),
+        ]);
+        base.snapshots = snaps;
+        base.hostDiskBytes = mt.hostDiskBytes;
+        base.guestUsedBytes = mt.guestUsedBytes;
+        base.guestTotalBytes = mt.guestTotalBytes;
+        base.cpu = mt.cpu;
+        base.mem = mt.mem;
+        return base;
     }
 
     /** Snapshot names for a stopped VM, cached 30s — `qemu-img info` is a
@@ -170,15 +216,24 @@ export class CruiserService {
             // Seed from the last summaries: rows update in place as each
             // summary lands instead of disappearing behind the slow ones.
             const acc = new Map(this.store.getState().vms.map((v) => [v.name, v]));
-            const flush = () => this.store.getState().setVms(
-                [...acc.values()].sort((a, b) => a.name.localeCompare(b.name)));
             const live = new Set(this.handles.keys());
             acc.forEach((_, k) => { if (!live.has(k)) acc.delete(k); });
-            await Promise.all([...this.handles.values()].map(async (h) => {
-                const s = await this.summarize(h).catch(() => null);
-                if (s) { acc.set(h.spec.name, s); flush(); }
-            }));
+            const flush = () => this.store.getState().setVms(
+                [...acc.values()].sort((a, b) => a.name.localeCompare(b.name)));
+            const put = (h: VmHandle, s: VmSummary) => {
+                acc.set(h.spec.name, this.carryPrev(s, acc.get(h.spec.name)));
+                flush();
+            };
+            // Instant pass — spec + pidfile rows before any socket I/O.
+            this.handles.forEach((h) => acc.set(h.spec.name,
+                this.carryPrev(this.baseSummary(h, h.isRunning() ? "running" : "stopped"), acc.get(h.spec.name))));
             flush();
+            // Progressive: probe lands the real state first, metrics/snaps
+            // fill in behind it (QGA can take ~2.5s on a dead agent).
+            await Promise.all([...this.handles.values()].map(async (h) => {
+                const s = await this.summarize(h, (early) => put(h, early)).catch(() => null);
+                if (s) put(h, s);
+            }));
         } finally {
             this.refreshing = false;
         }
@@ -210,7 +265,7 @@ export class CruiserService {
                 ? `bun ${process.versions.bun}`
                 : `${process.release?.name ?? "node"} ${process.version}`,
             displayEnv: `${process.env.XDG_SESSION_TYPE ?? "?"} · ${process.env.DISPLAY ?? process.env.WAYLAND_DISPLAY ?? "no display"}`,
-            uiBackend: "local (in-process)",
+            uiBackend: this.uiBackend,
         });
     }
 
@@ -361,6 +416,46 @@ export class CruiserService {
     async resume(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
         await this.run(`resume ${name}`, () => h.resume());
+    }
+
+    /** Save the edit form back onto the VM's spec. Only boot-time fields are
+     *  editable — provisioning/credentials are baked in at provision time. */
+    async saveVm(): Promise<void> {
+        const st = this.store.getState();
+        const name = st.editVm;
+        if (!name) return;
+        const h = this.handles.get(name);
+        if (!h) return;
+        const f = st.create;
+        if (f.cpus < 1 || f.cpus > 64) { st.setStatus("vCPUs must be between 1 and 64"); return; }
+        if (f.memMiB < 512) { st.setStatus("memory must be at least 512 MiB"); return; }
+        if (f.diskGiB < h.spec.disk.sizeGiB) { st.setStatus("disk can only grow"); return; }
+        if (f.diskGiB !== h.spec.disk.sizeGiB && h.isRunning()) {
+            st.setStatus("stop the VM before growing the disk");
+            return;
+        }
+        await this.run(`save ${name}`, async () => {
+            // Clone-then-validate: a schema rejection must not leave h.spec
+            // half-mutated while the VM keeps running.
+            const spec: VmSpec = JSON.parse(JSON.stringify(h.spec));
+            spec.resources.cpus = f.cpus;
+            spec.resources.memoryMiB = f.memMiB;
+            spec.disk.sizeGiB = f.diskGiB;
+            spec.gpu.mode = f.gpu as VmSpec["gpu"]["mode"];
+            spec.display.headMode = f.headMode as VmSpec["display"]["headMode"];
+            if (f.vd > 0) spec.display.virtualDesktop = f.vd;
+            spec.persist = f.persist as VmSpec["persist"];
+            spec.usb.autoAttach = f.usb.map((k) => {
+                const [vendorId = "", productId = "", serial = ""] = k.split(":");
+                return { vendorId, productId, ...(serial ? { serial } : {}), atBoot: true };
+            });
+            this.validateSpec(spec);
+            if (f.diskGiB !== h.spec.disk.sizeGiB) await h.resizeDisk(f.diskGiB);
+            h.spec = spec;
+            await h.saveSpec();
+            st.resetCreate();
+            st.setRoute("vm", name);
+        });
     }
 
     /** Open (or raise) the VM's viewer in the background — RDP may take tens
