@@ -23,6 +23,7 @@ export class CruiserService {
     private handles = new Map<string, VmHandle>();
     private pollTimer: ReturnType<typeof setInterval> | null = null;
     private viewers = new Map<string, ViewerSession>();
+    private viewerPending = new Map<string, Promise<void>>();
     private metrics = new VmMetricsSampler();
 
     constructor(private store: Store) {}
@@ -252,6 +253,10 @@ export class CruiserService {
     async start(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
         await this.run(`start ${name}`, () => h.start());
+        // Boot → autologin → gnome-remote-desktop takes a while; open()'s
+        // waitRdpPort polls for it in the background instead of holding
+        // `busy`. headMode "app" has no freerdp viewer (waypipe is explicit).
+        if (h.isRunning() && h.spec.display.headMode !== "app") void this.autoView(h);
     }
     async stop(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
@@ -281,12 +286,41 @@ export class CruiserService {
 
     async view(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
-        await this.run(`view ${name}`, async () => {
-            const s = new ViewerSession(h.spec);
-            await s.open();
-            this.viewers.set(name, s);
-            s.on("closed", () => this.viewers.delete(name));
-        });
+        await this.run(`view ${name}`, () => this.ensureViewer(h));
+    }
+
+    /** Open the VM's freerdp viewer; joins an open already in flight. */
+    private ensureViewer(h: VmHandle): Promise<void> {
+        const name = h.spec.name;
+        if (this.viewers.has(name)) return Promise.resolve();
+        const inflight = this.viewerPending.get(name);
+        if (inflight) return inflight;
+        const p = (async () => {
+            try {
+                const s = new ViewerSession(h.spec);
+                await s.open();
+                if (this.viewers.has(name)) { await s.close(); return; }
+                this.viewers.set(name, s);
+                s.on("closed", () => this.viewers.delete(name));
+            } finally {
+                this.viewerPending.delete(name);
+            }
+        })();
+        this.viewerPending.set(name, p);
+        return p;
+    }
+
+    /** Background viewer open after start — status line only, never blocks. */
+    private async autoView(h: VmHandle): Promise<void> {
+        const name = h.spec.name;
+        const st = this.store.getState();
+        st.setStatus(`waiting for ${name} guest login (rdp :${h.spec.network.rdpPort ?? "–"})…`);
+        try {
+            await this.ensureViewer(h);
+            if (this.viewers.has(name)) st.setStatus(`${name} viewer opened`);
+        } catch (e) {
+            st.setStatus(`viewer for ${name}: ${e instanceof Error ? e.message : e}`);
+        }
     }
 
     async snapshot(name: string): Promise<void> {

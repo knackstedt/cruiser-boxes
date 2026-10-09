@@ -27,8 +27,8 @@ export class VmHandle extends EventEmitter {
     private toolchain: Toolchain | null = null;
     private qemuChild: ChildProcess | null = null;   // owned-mode child handle
     private vfsChildren: ChildProcess[] = [];
-    private _qmp: QmpClient | null = null;
-    private _qga: QgaClient | null = null;
+    private qmpChain: Promise<unknown> = Promise.resolve();
+    private qgaChain: Promise<unknown> = Promise.resolve();
     private lastError: string | null = null;
 
     private constructor(spec: VmSpec, paths: VmPaths) {
@@ -72,8 +72,7 @@ export class VmHandle extends EventEmitter {
     async probe(): Promise<VmState> {
         if (!this.isRunning()) return "stopped";
         try {
-            const q = await this.qmp();
-            const st = await q.queryStatus();
+            const st = await this.withQmp((q) => q.queryStatus());
             if (st.status === "paused" || st.status === "prelaunch") return "paused";
             return st.running ? "running" : "stopped";
         } catch {
@@ -83,32 +82,33 @@ export class VmHandle extends EventEmitter {
         }
     }
 
-    // ── client accessors (auto-attach) ──
+    // ── client accessors ──
+    // QEMU's monitor/agent chardevs accept ONE pending client each — a cached
+    // socket starves every other client (the CLI while the UI holds a probe
+    // connection, and vice versa; the second connect() just sits in the
+    // listen backlog until the first client closes). Connections are
+    // therefore short-lived per op, serialized in-process so overlapping ops
+    // queue instead of racing on the backlog.
 
-    async qmp(): Promise<QmpClient> {
-        if (this._qmp) return this._qmp;
-        const q = await QmpClient.connect(this.paths.monitorSock);
-        q.on("event", (e) => {
-            if (e.event === "SHUTDOWN" || e.event === "RESET") this.emit("qmp-event", e);
-            if (e.event === "SHUTDOWN" && !e.data?.guest) this.markDead();
+    /** Run fn on a fresh QMP connection (closed afterwards). */
+    withQmp<T>(fn: (q: QmpClient) => Promise<T>, timeoutMs = 10_000): Promise<T> {
+        const p = this.qmpChain.then(async () => {
+            const q = await QmpClient.connect(this.paths.monitorSock, timeoutMs);
+            try { return await fn(q); } finally { q.close(); }
         });
-        q.on("close", () => { this._qmp = null; this.emit("qmp-close"); });
-        this._qmp = q;
-        return q;
+        this.qmpChain = p.catch(() => {});
+        return p;
     }
 
-    async qga(timeoutMs = 15_000): Promise<QgaClient> {
-        if (this._qga) return this._qga;
-        const g = await QgaClient.connect(this.paths.qgaSock, timeoutMs);
-        await g.ping(Math.min(timeoutMs, 3_000)).catch(() => {});   // agent may not be up yet even if socket is
-        g.on("close", () => { this._qga = null; });
-        this._qga = g;
-        return g;
-    }
-
-    private markDead(): void {
-        this._qmp = null; this._qga = null;
-        this.emit("dead");
+    /** Run fn on a fresh QGA connection (closed afterwards). */
+    withQga<T>(fn: (g: QgaClient) => Promise<T>, timeoutMs = 15_000): Promise<T> {
+        const p = this.qgaChain.then(async () => {
+            const g = await QgaClient.connect(this.paths.qgaSock, timeoutMs);
+            await g.ping(Math.min(timeoutMs, 3_000)).catch(() => {});   // agent may not be up yet even if socket is
+            try { return await fn(g); } finally { g.close(); }
+        });
+        this.qgaChain = p.catch(() => {});
+        return p;
     }
 
     // ── lifecycle ──
@@ -165,7 +165,7 @@ export class VmHandle extends EventEmitter {
         const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
         for (;;) {
             if (existsSync(this.paths.monitorSock)) {
-                try { await this.qmp(); return; } catch { /* not ready */ }
+                try { await this.withQmp((q) => q.queryStatus()); return; } catch { /* not ready */ }
             }
             if (Date.now() > deadline) {
                 const tail = existsSync(this.paths.log) ? readFileSync(this.paths.log, "utf-8").slice(-2000) : "";
@@ -185,7 +185,7 @@ export class VmHandle extends EventEmitter {
      */
     async stop(timeoutMs = 30_000, onWait?: (elapsedMs: number) => void): Promise<"stopped" | "timeout"> {
         if (!this.isRunning()) return "stopped";
-        try { (await this.qmp()).systemPowerdown(); } catch { /* fall through */ }
+        try { await this.withQmp((q) => q.systemPowerdown()); } catch { /* fall through */ }
         const deadline = Date.now() + timeoutMs;
         const started = Date.now();
         while (this.isRunning() && Date.now() < deadline) {
@@ -201,7 +201,7 @@ export class VmHandle extends EventEmitter {
         const pid = this.pid();
         if (pid) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
         // quit's reply races the socket teardown — swallow the rejection either way.
-        try { (await this.qmp()).quit().catch(() => {}); } catch { /* no monitor */ }
+        try { await this.withQmp((q) => q.quit().catch(() => {})); } catch { /* no monitor */ }
         this.qemuChild?.kill("SIGKILL");
         // SIGKILL delivery is not synchronous — a start() that runs while the
         // old pid is still dying would early-return on isRunning() and leave
@@ -219,12 +219,10 @@ export class VmHandle extends EventEmitter {
     private cleanupRunDir(): void {
         this.vfsChildren.forEach((c) => c.kill());
         this.vfsChildren = [];
-        this._qmp?.close(); this._qga?.close();
-        this._qmp = null; this._qga = null;
     }
 
-    async suspend(): Promise<void> { await (await this.qmp()).stop(); }
-    async resume(): Promise<void> { await (await this.qmp()).cont(); }
+    async suspend(): Promise<void> { await this.withQmp((q) => q.stop()); }
+    async resume(): Promise<void> { await this.withQmp((q) => q.cont()); }
 
     // ── disk ops ──
 
@@ -245,9 +243,10 @@ export class VmHandle extends EventEmitter {
     }
     async backup(destPath: string) {
         if (this.isRunning()) {
-            const q = await this.qmp();
-            const node = await disk.diskNodeName(q, this.diskPath());
-            return disk.backupLive(q, node, destPath);
+            return this.withQmp(async (q) => {
+                const node = await disk.diskNodeName(q, this.diskPath());
+                return disk.backupLive(q, node, destPath);
+            });
         }
         return disk.backupOffline(this.tc().qemuImg, this.diskPath(), destPath);
     }
@@ -259,18 +258,18 @@ export class VmHandle extends EventEmitter {
         const d = await usb.findUsb(vendorId, productId, serial);
         if (!d) throw new Error(`usb ${vendorId}:${productId} not present`);
         if (!d.writable) throw new Error(`no rw access to ${d.devNode} — run the udev setup (cruiser doctor)`);
-        return usb.usbAttach(await this.qmp(), d);
+        return this.withQmp((q) => usb.usbAttach(q, d));
     }
-    async usbDetach(id: string) { return usb.usbDetach(await this.qmp(), id); }
+    async usbDetach(id: string) { return this.withQmp((q) => usb.usbDetach(q, id)); }
 
     // ── guest ops ──
 
     /** Run a command in the guest via QGA. */
     async guestExec(path: string, args: string[] = [], timeoutMs = 60_000) {
-        return (await this.qga()).exec(path, args, { timeoutMs });
+        return this.withQga((g) => g.exec(path, args, { timeoutMs }));
     }
     async guestSh(script: string, timeoutMs = 60_000) {
-        return (await this.qga()).sh(script, { timeoutMs });
+        return this.withQga((g) => g.sh(script, { timeoutMs }));
     }
 
     /** Restart GDM in the guest (connector-probe race fix — the old fixdisplays). */

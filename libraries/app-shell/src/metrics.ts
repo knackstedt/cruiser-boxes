@@ -48,13 +48,13 @@ export class VmMetricsSampler {
 
         let cpuPct: number | null = null;
         let memPct: number | null = null;
-        const qga = await h.qga(2_500).catch(() => null);
-        if (qga) {
-            const [ps, mi, fs] = await Promise.all([
-                qga.readFile("/proc/stat", 256 * 1024, 4_000).catch(() => null),
-                qga.readFile("/proc/meminfo", 64 * 1024, 4_000).catch(() => null),
-                qga.getFsInfo(4_000).catch(() => null),
-            ]);
+        const guest = await h.withQga(async (qga) => Promise.all([
+            qga.readFile("/proc/stat", 256 * 1024, 4_000).catch(() => null),
+            qga.readFile("/proc/meminfo", 64 * 1024, 4_000).catch(() => null),
+            qga.getFsInfo(4_000).catch(() => null),
+        ]), 2_500).catch(() => null);
+        if (guest) {
+            const [ps, mi, fs] = guest;
             const ct = ps ? parseProcStat(ps.toString("utf-8")) : null;
             if (ct && pv.at) {
                 const dt = ct.total - pv.cpuTotal, di = ct.idle - pv.cpuIdle;

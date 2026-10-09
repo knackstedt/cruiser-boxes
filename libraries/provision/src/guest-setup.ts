@@ -14,15 +14,13 @@ import type { VmSpec } from "../../vm-core/src/config/schema";
 export async function waitForAgent(h: VmHandle, timeoutMs = 5 * 60_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-        let g;
         try {
-            g = await h.qga(5_000);
-            await g.ping(5_000);
+            // Each attempt uses a fresh socket (withQga closes on return) — a
+            // failed ping leaves unrecoverable wire state, and reconnect
+            // storms are what wedge qemu-ga in the first place.
+            await h.withQga((g) => g.ping(5_000), 5_000);
             return;
         } catch (e) {
-            // Drop the socket — a failed ping leaves unrecoverable wire state,
-            // and reconnect storms are what wedge qemu-ga in the first place.
-            try { g?.close(); } catch { /* already gone */ }
             if (Date.now() > deadline) throw new Error(`guest agent not up after ${timeoutMs}ms: ${e}`);
             await new Promise((r) => setTimeout(r, 3000));
         }

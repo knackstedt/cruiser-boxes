@@ -43,7 +43,6 @@ export class ViewerSession extends EventEmitter {
         child.on("exit", (c) => { this.child = null; this.emit("closed", c); this.cleanup(); });
 
         const d = this.spec.display;
-        if (d.headMode === "windowed") return; // no placement needed
 
         // Find OUR window by pid — title matching races with other viewers.
         this.window = await this.adapter.findWindow(
@@ -52,22 +51,34 @@ export class ViewerSession extends EventEmitter {
         ).catch(() => null);
 
         if (!this.window) {
-            // Wayland findWindow is limited — try wmclass-only once more, then give up gracefully.
-            this.window = await this.adapter.findWindow({ title: /FreeRDP/i }, 5_000).catch(() => null);
+            // Wayland findWindow is limited — retry on the viewer title
+            // ("cruiser:<vm>"), then give up gracefully.
+            this.window = await this.adapter.findWindow({ title: `cruiser:${this.spec.name}` }, 5_000).catch(() => null);
         }
 
         if (this.window && this.adapter.caps.placeWindows) {
-            if (d.headMode === "virtual-desktop")
-                await this.adapter.moveToDesktop(this.window, d.virtualDesktop).catch(() => {});
-            if (d.headMode === "fullscreen-monitor" && d.sticky)
-                await this.adapter.moveToDesktop(this.window, "all").catch(() => {});
-            if (d.headMode === "fullscreen-monitor" && d.monitors !== "all" && d.monitors[0])
-                await this.adapter.moveToMonitor(this.window, d.monitors[0]).catch(() => {});
-            await this.adapter.setFullscreen(this.window, true).catch(() => {});
+            if (d.headMode === "windowed") {
+                // A detached freerdp lands on whatever desktop the WM assigns —
+                // pull it onto the user's current desktop and raise it so it
+                // is actually visible.
+                const cur = (await this.adapter.desktops().catch(() => [])).find((x) => x.current)?.index;
+                if (cur !== undefined) await this.adapter.moveToDesktop(this.window, cur).catch(() => {});
+                await this.adapter.focus(this.window).catch(() => {});
+            } else {
+                if (d.headMode === "virtual-desktop")
+                    await this.adapter.moveToDesktop(this.window, d.virtualDesktop).catch(() => {});
+                if (d.headMode === "fullscreen-monitor" && d.sticky)
+                    await this.adapter.moveToDesktop(this.window, "all").catch(() => {});
+                if (d.headMode === "fullscreen-monitor" && d.monitors !== "all" && d.monitors[0])
+                    await this.adapter.moveToMonitor(this.window, d.monitors[0]).catch(() => {});
+                await this.adapter.setFullscreen(this.window, true).catch(() => {});
+            }
         }
 
         // Escape shortcuts need the host WM to see the keys (no keyboard grab).
-        if (this.adapter.caps.shortcuts && !d.grabKeyboard) {
+        // Windowed sessions get none — stealing e.g. ctrl+alt+delete from a
+        // normal app window is worse than losing the escape hatch.
+        if (d.headMode !== "windowed" && this.adapter.caps.shortcuts && !d.grabKeyboard) {
             for (let i = 0; i < d.escapeShortcuts.length; i++) {
                 const s = d.escapeShortcuts[i]!;
                 const action = parseEscapeAction(s.action);

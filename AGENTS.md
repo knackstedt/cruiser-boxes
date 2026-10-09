@@ -47,6 +47,13 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 - Use `/var/tmp`, not `/tmp`.
 - QEMU argv is structured arrays only — never assemble shell strings for qemu.
 - Passwords live in 0600 files under `<vm>/secrets/`; never in vm.json or logs.
+- QMP/QGA unix chardevs accept ONE pending client each — never cache a
+  connection. `VmHandle.withQmp/withQga` open a fresh socket per op and
+  serialize in-process; a held socket starves the CLI while the UI runs
+  (probe → "starting" forever) and vice versa.
+- `wmctrl -x` wmclass is "instance.class" (e.g. `xfreerdp.xfreerdp`) — match
+  per-part, case-insensitive. freerdp titles are `cruiser:<vm>` (not
+  "FreeRDP"), which is the pid-match fallback in `ViewerSession`.
 - DownDraft fixes go to `../downdraft-engine` and are committed there.
 - `downdraft.config.json` sets `"runtime": "node"` — the `draft dev` shell's
   Vite ModuleRunner is ~5× slower under Bun's node:vm (≈2.2s vs ≈11.8s to

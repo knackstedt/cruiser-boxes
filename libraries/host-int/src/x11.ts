@@ -47,7 +47,9 @@ export async function x11FindWindow(m: WindowMatcher, timeoutMs = 15_000): Promi
         for (let i = 0; i < wins.length; i++) {
             const w = wins[i]!;
             if (m.pid !== undefined && w.pid !== m.pid) continue;
-            if (m.wmClass && w.wmClass !== m.wmClass) continue;
+            // wmctrl -x gives "instance.class" (e.g. "xfreerdp.xfreerdp") —
+            // match against either part, case-insensitively.
+            if (m.wmClass && !w.wmClass?.toLowerCase().split(".").includes(m.wmClass.toLowerCase())) continue;
             if (m.title !== undefined) {
                 const t = typeof m.title === "string" ? w.title.includes(m.title) : m.title.test(w.title);
                 if (!t) continue;
