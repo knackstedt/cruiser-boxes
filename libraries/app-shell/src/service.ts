@@ -15,6 +15,7 @@ import { cpus, totalmem, homedir } from "node:os";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import { mark } from "./startup-profile";
+import { VmMetricsSampler } from "./metrics";
 import type { DoctorRow, HostInfo, Store, VmSummary } from "./store";
 
 export class CruiserService {
@@ -22,6 +23,7 @@ export class CruiserService {
     private handles = new Map<string, VmHandle>();
     private pollTimer: ReturnType<typeof setInterval> | null = null;
     private viewers = new Map<string, ViewerSession>();
+    private metrics = new VmMetricsSampler();
 
     constructor(private store: Store) {}
 
@@ -131,6 +133,7 @@ export class CruiserService {
         let state: VmSummary["state"] = "stopped";
         try { state = await h.probe(); } catch { state = "unknown"; }
         const snaps = state === "stopped" ? await h.snapshots().catch(() => []) : [];
+        const mt = await this.metrics.sample(h, state);
         return {
             name: s.name, state,
             gpuMode: s.gpu.mode, headMode: s.display.headMode,
@@ -139,13 +142,14 @@ export class CruiserService {
             sshPort: s.network.sshPort, rdpPort: s.network.rdpPort,
             provisioned: s.provisioned.method, persist: s.persist,
             snapshots: snaps.map((x) => x.name),
+            hostDiskBytes: mt.hostDiskBytes,
+            guestUsedBytes: mt.guestUsedBytes, guestTotalBytes: mt.guestTotalBytes,
+            cpu: mt.cpu, mem: mt.mem,
         };
     }
 
     async refresh(): Promise<void> {
-        const vms: VmSummary[] = [];
-        const hs = [...this.handles.values()];
-        for (let i = 0; i < hs.length; i++) vms.push(await this.summarize(hs[i]!));
+        const vms = await Promise.all([...this.handles.values()].map((h) => this.summarize(h)));
         vms.sort((a, b) => a.name.localeCompare(b.name));
         this.store.getState().setVms(vms);
     }
@@ -270,6 +274,7 @@ export class CruiserService {
         await this.run(`remove ${name}`, async () => {
             await this.registry.remove(name, { deleteDisk: true });
             this.handles.delete(name);
+            this.metrics.drop(name);
             this.store.getState().setRoute("home");
         });
     }

@@ -100,7 +100,7 @@ export class VmHandle extends EventEmitter {
     async qga(timeoutMs = 15_000): Promise<QgaClient> {
         if (this._qga) return this._qga;
         const g = await QgaClient.connect(this.paths.qgaSock, timeoutMs);
-        await g.ping().catch(() => {});   // agent may not be up yet even if socket is
+        await g.ping(Math.min(timeoutMs, 3_000)).catch(() => {});   // agent may not be up yet even if socket is
         g.on("close", () => { this._qga = null; });
         this._qga = g;
         return g;

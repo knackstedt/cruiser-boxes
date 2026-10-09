@@ -20,6 +20,11 @@ export interface VmSummary {
     provisioned?: string;          // method or undefined
     persist: string;
     snapshots: string[];
+    hostDiskBytes?: number;        // real size of the disk image on the host fs
+    guestUsedBytes?: number;       // guest fs used (QGA root mount / sum)
+    guestTotalBytes?: number;      // guest fs total (≈ diskGiB cap)
+    cpu: number[];                 // recent cpu% samples (0–100), newest last
+    mem: number[];                 // recent mem% samples
     error?: string;
 }
 

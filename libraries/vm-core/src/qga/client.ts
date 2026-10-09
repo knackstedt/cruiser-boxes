@@ -19,7 +19,7 @@ export class QgaClient extends JsonSocket {
         const sock = await JsonSocket.open(path, timeoutMs);
         Object.setPrototypeOf(sock, QgaClient.prototype);
         const q = sock as QgaClient;
-        await q.sync();
+        try { await q.sync(timeoutMs); } catch (e) { q.close(); throw e; }
         return q;
     }
 
@@ -66,20 +66,20 @@ export class QgaClient extends JsonSocket {
         return this.exec("/bin/sh", ["-c", script], opts);
     }
 
-    async readFile(path: string, maxBytes = 16 * 1024 * 1024): Promise<Buffer> {
-        const h = await this.send("guest-file-open", { path, mode: "r" });
+    async readFile(path: string, maxBytes = 16 * 1024 * 1024, timeoutMs?: number): Promise<Buffer> {
+        const h = await this.send("guest-file-open", { path, mode: "r" }, timeoutMs);
         const handle = h as number;
         try {
             const chunks: Buffer[] = [];
             for (;;) {
-                const r = await this.send("guest-file-read", { handle, count: Math.min(maxBytes, 1 << 20) });
+                const r = await this.send("guest-file-read", { handle, count: Math.min(maxBytes, 1 << 20) }, timeoutMs);
                 const b = Buffer.from(r["buf-b64"] ?? "", "base64");
                 chunks.push(b);
                 if (r.eof || b.length === 0) break;
             }
             return Buffer.concat(chunks);
         } finally {
-            await this.send("guest-file-close", { handle }).catch(() => {});
+            await this.send("guest-file-close", { handle }, timeoutMs).catch(() => {});
         }
     }
 
@@ -99,6 +99,7 @@ export class QgaClient extends JsonSocket {
     }
 
     networkInterfaces(): Promise<any[]> { return this.send("guest-network-get-interfaces"); }
+    getFsInfo(timeoutMs?: number): Promise<any[]> { return this.send("guest-get-fsinfo", undefined, timeoutMs); }
     getOsInfo(): Promise<any> { return this.send("guest-get-osinfo"); }
     getTime(): Promise<any> { return this.send("guest-get-time"); }
     shutdown(mode: "powerdown" | "reboot" | "halt" = "powerdown"): Promise<any> {
