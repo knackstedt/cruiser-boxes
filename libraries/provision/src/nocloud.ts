@@ -17,7 +17,14 @@ export interface SeedOpts {
     password?: string;
     sshAuthorizedKeys?: string[];
     timezone?: string;
-    extraPackages?: string[];
+    /** resolved package list — see packages.ts (resolvePackages(profile,"seed")) */
+    packages: string[];
+    /**
+     * Package manager for the seed's install step (cloudimg only; autoinstall
+     * is always apt). rpm seeds install via `runcmd dnf --skip-unavailable`
+     * because one unresolvable name aborts cloud-init's whole `packages:` txn.
+     */
+    pkgMgr?: "apt" | "dnf";
     /** cloudimg only: extra runcmd lines. */
     runcmd?: string[];
 }
@@ -25,12 +32,8 @@ export interface SeedOpts {
 // ── cloudimg user-data ──
 
 export function cloudimgUserData(o: SeedOpts): string {
-    const pkgs = [
-        "qemu-guest-agent", "spice-vdagent", "mesa-vulkan-drivers",
-        "gnome-remote-desktop", "pkexec", "polkitd", "xdotool", "openssh-server",
-        "gdm3", "gnome-shell", "gnome-session",
-        ...(o.extraPackages ?? []),
-    ];
+    const pkgs = o.packages;
+    const rpm = o.pkgMgr === "dnf";
     return `#cloud-config
 hostname: ${o.hostname}
 preserve_hostname: false
@@ -43,26 +46,19 @@ users:
     sudo: ALL=(ALL) NOPASSWD:ALL
     lock_passwd: false
 ${o.password ? `    passwd: ${o.passwordHash}` : ""}
+${o.sshAuthorizedKeys?.length ? `    ssh_authorized_keys:\n${o.sshAuthorizedKeys.map((k) => `      - ${k}`).join("\n")}` : ""}
 ssh_pwauth: true
-${o.sshAuthorizedKeys?.length ? `ssh_authorized_keys:\n${o.sshAuthorizedKeys.map((k) => `  - ${k}`).join("\n")}` : ""}
-package_update: true
-packages:
-${pkgs.map((p) => `  - ${p}`).join("\n")}
-runcmd:
+${rpm ? "" : `package_update: true\npackages:\n${pkgs.map((p) => `  - ${p}`).join("\n")}\n`}runcmd:
   - systemctl enable --now qemu-guest-agent
-  - systemctl enable --now ssh
-${(o.runcmd ?? []).map((c) => `  - ${c}`).join("\n")}
+  - systemctl enable --now ssh || systemctl enable --now sshd
+${rpm ? `  - dnf -y makecache\n  - dnf install -y --skip-unavailable ${pkgs.join(" ")}\n` : ""}${(o.runcmd ?? []).map((c) => `  - ${c}`).join("\n")}
 `;
 }
 
 // ── autoinstall user-data (ISO path, subiquity) ──
 
 export function autoinstallUserData(o: SeedOpts): string {
-    const pkgs = [
-        "qemu-guest-agent", "spice-vdagent", "mesa-utils", "mesa-vulkan-drivers",
-        "openssh-server", "git", "curl", "htop", "build-essential",
-        ...(o.extraPackages ?? []),
-    ];
+    const pkgs = ["build-essential", ...o.packages];
     return `#cloud-config
 autoinstall:
   version: 1

@@ -272,9 +272,9 @@ export class VmHandle extends EventEmitter {
         return this.withQga((g) => g.sh(script, { timeoutMs }));
     }
 
-    /** Restart GDM in the guest (connector-probe race fix — the old fixdisplays). */
+    /** Restart the display manager in the guest (connector-probe race fix — the old fixdisplays). */
     async fixDisplays() {
-        return this.guestExec("/bin/systemctl", ["restart", "gdm"], 10_000);
+        return this.guestSh("systemctl restart gdm 2>/dev/null || systemctl restart sddm 2>/dev/null || true", 15_000);
     }
 
     private tc(): Toolchain {

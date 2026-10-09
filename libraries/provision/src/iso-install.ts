@@ -12,6 +12,7 @@ import { run, which } from "../../sys/src/exec";
 import { ISO_DIR, vmPaths, diskPath } from "../../vm-core/src/paths";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { buildSeedIso, autoinstallUserData, metaData, passwordHash, type SeedOpts } from "./nocloud";
+import { profileFromSpec, resolvePackages } from "./packages";
 import { resolveToolchain } from "../../vm-core/src/qemu/resolve";
 import { createDisk } from "../../vm-core/src/disk/ops";
 
@@ -91,6 +92,7 @@ export async function runIsoInstall(
     const seedOpts: SeedOpts = {
         hostname: spec.name, username: o.username, passwordHash: hash,
         sshAuthorizedKeys: o.sshKeys, timezone: o.timezone,
+        packages: resolvePackages(profileFromSpec(spec), "seed"),
     };
     const seedIso = await buildSeedIso(join(paths.dir, "seed"), autoinstallUserData(seedOpts), metaData(seedOpts));
     const casper = await extractCasper(o.iso, join(paths.dir, "casper"));

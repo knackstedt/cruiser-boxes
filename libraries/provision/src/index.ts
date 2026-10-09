@@ -4,3 +4,5 @@ export * from "./iso-install";
 export * from "./monitors";
 export * from "./guest-setup";
 export * from "./provision";
+export * from "./distros";
+export * from "./packages";

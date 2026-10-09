@@ -55,7 +55,11 @@ export function hostHasWayland(): boolean {
  * Idempotent. Guest `waypipe server` connects GUEST_SOCK → host CID:9922.
  */
 export async function ensureGuestServer(h: VmHandle): Promise<void> {
-    await h.guestSh(`command -v waypipe >/dev/null || apt-get install -y waypipe socat`, 120_000).catch(() => {});
+    await h.guestSh(`command -v waypipe >/dev/null || {
+        if command -v apt-get >/dev/null; then apt-get install -y waypipe socat;
+        elif command -v dnf >/dev/null; then dnf install -y waypipe socat;
+        elif command -v zypper >/dev/null; then zypper --non-interactive install waypipe socat; fi
+    }`, 120_000).catch(() => {});
     const probe = await h.guestSh(`pgrep -f 'socat UNIX-LISTEN:${GUEST_SOCK}' || true`);
     if (String(probe.stdout).trim()) return; // bridge already up
     await h.guestSh(`

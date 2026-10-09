@@ -14,7 +14,7 @@ import { writePasswordFile } from "./nocloud";
 import { randomBytes } from "node:crypto";
 
 export interface ProvisionOpts {
-    release?: string;              // cloudimg: ubuntu release ("26.04")
+    release?: string;              // cloudimg: distro release override (default: spec.os.release or curated)
     iso?: string;                  // iso path or URL
     username?: string;
     password?: string;             // generated if omitted
@@ -50,10 +50,10 @@ export async function provisionVmCloudimg(h: VmHandle, o: ProvisionOpts): Promis
     const pw = await ensurePassword(spec, o);
     const { pubText } = await (await import("../../vm-core/src/sshkey")).ensureKeypair();
     const sshKeys = [...(o.sshKeys ?? []), pubText];
-    log(o, `fetching cloud image (ubuntu ${o.release})…`);
+    log(o, `fetching cloud image (${spec.os.family} ${o.release ?? (spec.os.release || "default")})…`);
     const tc = await (await import("../../vm-core/src/qemu/resolve")).resolveToolchain();
     const { seedIso } = await provisionCloudimg(spec, tc.qemuImg, {
-        release: o.release!, username: spec.credentials.username, password: pw,
+        release: o.release, username: spec.credentials.username, password: pw,
         sshKeys, timezone: o.timezone,
     });
     await h.saveSpec();
@@ -61,12 +61,12 @@ export async function provisionVmCloudimg(h: VmHandle, o: ProvisionOpts): Promis
     log(o, "first boot with NoCloud seed (cloud-init provisioning)…");
     await h.start({ mode: "install", install: { seedIso } });
 
-    log(o, "waiting for guest agent…");
-    await waitForAgent(h, 8 * 60_000);
+    log(o, "waiting for guest agent (cloud-init is installing the desktop stack — first boot is slow)…");
+    await waitForAgent(h, 25 * 60_000);
 
-    log(o, "running guest setup (grd, autologin, monitors)…");
+    log(o, "running guest setup (rdp, autologin, monitors)…");
     const xml = await monitorsXml(spec, o);
-    await runGuestSetup(h, { rdpPassword: pw, monitorsXml: xml });
+    await runGuestSetup(h, { rdpPassword: pw, monitorsXml: xml, timeoutMs: 20 * 60_000 });
 
     spec.provisioned.completedAt = new Date().toISOString();
     await h.saveSpec();

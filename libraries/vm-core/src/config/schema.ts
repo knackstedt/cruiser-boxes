@@ -11,6 +11,15 @@ export type HeadMode = z.infer<typeof HeadMode>;
 export const GpuMode = z.enum(["venus", "virgl", "software"]);
 export type GpuMode = z.infer<typeof GpuMode>;
 
+export const DistroFamily = z.enum(["ubuntu", "debian", "fedora"]);
+export type DistroFamily = z.infer<typeof DistroFamily>;
+
+export const GuestDesktop = z.enum(["gnome", "kde"]);
+export type GuestDesktop = z.infer<typeof GuestDesktop>;
+
+export const GuestBrowser = z.enum(["none", "firefox", "chrome", "chromium", "vivaldi", "brave"]);
+export type GuestBrowser = z.infer<typeof GuestBrowser>;
+
 export const EscapeAction = z.enum([
     "host-desktop",        // host-desktop:<n> — jump host to desktop n
     "desktop-cycle-left",
@@ -94,6 +103,26 @@ export const VmSpec = z.object({
     usb: z.object({ autoAttach: z.array(UsbDeviceRef).default([]) }).prefault({}),
 
     shares: z.array(ShareSpec).default([]),
+
+    /**
+     * Guest OS profile — drives image selection (cloudimg) and the in-guest
+     * package/desktop setup. release "" = curated default for the family.
+     * For imported disks the family may be wrong — the setup script re-detects
+     * the real distro from /etc/os-release and picks the matching pkg names.
+     */
+    os: z.object({
+        family: DistroFamily.default("ubuntu"),
+        release: z.string().default(""),
+        desktop: GuestDesktop.default("gnome"),
+        /** flatpak app to preinstall; "none" = no browser. */
+        browser: GuestBrowser.default("none"),
+        /** install snapd — off means flatpak is the only app channel. */
+        snap: z.boolean().default(false),
+        /** extended font sets (CJK + MS core fonts) beyond the base bundle. */
+        extraFonts: z.boolean().default(false),
+        /** escape hatch: extra distro packages, installed at setup. */
+        extraPackages: z.array(z.string()).default([]),
+    }).prefault({}),
 
     network: z.object({
         hostfwd: z.array(HostFwd).default([]),

@@ -37,7 +37,12 @@ export interface CreateForm {
     headMode: string;              // fullscreen-monitor|windowed|virtual-desktop|app
     persist: string;               // daemonize|owned|ephemeral
     method: string;                // none|cloudimg|iso|imported
+    distro: string;                // ubuntu|debian|fedora
     release: string;               // cloudimg release
+    desktop: string;               // gnome|kde
+    browser: string;               // none|firefox|chrome|chromium|vivaldi|brave
+    snap: boolean;                 // install snapd (off → flatpak only)
+    extraFonts: boolean;           // CJK + MS core fonts beyond the base bundle
     iso: string;                   // iso path/url
     importPath: string;            // imported: existing disk image (absolute)
     diskDir: string;               // "" = default (vms dir); else disk file's dir
@@ -133,7 +138,9 @@ export type CruiserStore = CruiserState & CruiserActions;
 const defaultCreate = (): CreateForm => ({
     name: "", cpus: 4, memMiB: 8192, diskGiB: 100,
     gpu: "venus", headMode: "virtual-desktop", persist: "daemonize",
-    method: "cloudimg", release: "26.04", iso: "", importPath: "", diskDir: "",
+    method: "cloudimg", distro: "ubuntu", release: "26.04", desktop: "gnome",
+    browser: "none", snap: false, extraFonts: false,
+    iso: "", importPath: "", diskDir: "",
     username: "cruiser", password: "",
     memUnit: "GiB", vd: 0, usb: [],
 });

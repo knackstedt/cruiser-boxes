@@ -214,6 +214,19 @@ export class CruiserService {
             spec.display.headMode = f.headMode as VmSpec["display"]["headMode"];
             spec.persist = f.persist as VmSpec["persist"];
             spec.credentials.username = f.username;
+            // the ISO autoinstall path is subiquity — ubuntu-only for now;
+            // in-guest os-release detection rescues a stale family anyway
+            spec.os.family = (f.method === "iso" ? "ubuntu" : f.distro) as VmSpec["os"]["family"];
+            spec.os.release = f.method === "cloudimg" ? f.release : "";
+            spec.os.desktop = f.desktop as VmSpec["os"]["desktop"];
+            spec.os.browser = f.browser as VmSpec["os"]["browser"];
+            spec.os.snap = f.snap;
+            spec.os.extraFonts = f.extraFonts;
+            if (spec.os.desktop === "kde" && f.method === "cloudimg") {
+                const { supportsKrdp } = await import("../../provision/src/distros");
+                if (!supportsKrdp(spec.os.family, spec.os.release))
+                    throw new Error(`KDE needs a guest release that ships krdp — ${spec.os.family} ${spec.os.release} doesn't have one`);
+            }
             if (f.vd > 0) spec.display.virtualDesktop = f.vd;
             spec.usb.autoAttach = f.usb.map((k) => {
                 const [vendorId = "", productId = "", serial = ""] = k.split(":");

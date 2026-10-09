@@ -6,6 +6,9 @@ import { diskPath, VMS_DIR } from "../libraries/vm-core/src/paths";
 import { join } from "node:path";
 import { JsonSocket } from "../libraries/vm-core/src/qmp/socket-json";
 import { guestLayoutFromHost } from "../libraries/provision/src/monitors";
+import { profileFromSpec, resolvePackages, resolveFlatpaks } from "../libraries/provision/src/packages";
+import { guestSetupScript } from "../libraries/provision/src/guest-setup";
+import { pickImageFromIndex, supportsKrdp, defaultRelease } from "../libraries/provision/src/distros";
 import { freerdpArgs } from "../libraries/host-int/src/freerdp";
 import { parseEscapeAction } from "../libraries/host-int/src/session";
 import { kdeKeys } from "../libraries/host-int/src/kde";
@@ -37,6 +40,116 @@ describe("VmSpec", () => {
     test("absolute disk.file survives parsing", () => {
         const s = parseVmSpec({ name: "ok", disk: { file: "/mnt/fast/vm.qcow2" } });
         expect(s.disk.file).toBe("/mnt/fast/vm.qcow2");
+    });
+    test("os block prefaults to ubuntu/gnome", () => {
+        const s = defaultSpec("abc");
+        expect(s.os.family).toBe("ubuntu");
+        expect(s.os.desktop).toBe("gnome");
+        expect(s.os.browser).toBe("none");
+        expect(s.os.snap).toBe(false);
+        expect(parseVmSpec({ name: "ok", os: { desktop: "kde", snap: true } }).os.desktop).toBe("kde");
+    });
+});
+
+// ── guest package manifest ──
+
+describe("packages", () => {
+    const p = (o: Partial<ReturnType<typeof profileFromSpec>> = {}) =>
+        ({ family: "ubuntu", desktop: "gnome", browser: "none", snap: false, extraFonts: false, extraPackages: [], ...o }) as const;
+    test("core stack lands on every distro + stage", () => {
+        (["ubuntu", "debian", "fedora"] as const).forEach((family) => {
+            (["seed", "setup"] as const).forEach((stage) => {
+                const pkgs = resolvePackages(p({ family }), stage);
+                expect(pkgs).toContain("qemu-guest-agent");
+                expect(pkgs).toContain("openssh-server");
+                expect(pkgs).toContain("pipewire");
+                expect(pkgs).toContain("waypipe");
+                expect(pkgs).toContain("flatpak");
+            });
+        });
+    });
+    test("per-family package names resolve", () => {
+        expect(resolvePackages(p({ family: "debian" }), "setup")).toContain("cloud-guest-utils");
+        expect(resolvePackages(p({ family: "fedora" }), "setup")).toContain("cloud-utils-growpart");
+        expect(resolvePackages(p({ family: "fedora" }), "setup")).toContain("pipewire-pulseaudio");
+        expect(resolvePackages(p({ family: "ubuntu" }), "setup")).not.toContain("pipewire-pulseaudio");
+    });
+    test("desktop scoping swaps the DE stack", () => {
+        const gnome = resolvePackages(p({}), "setup");
+        expect(gnome).toContain("gnome-remote-desktop");
+        expect(gnome).not.toContain("krdp");
+        const kde = resolvePackages(p({ desktop: "kde" }), "setup");
+        expect(kde).toContain("krdp");
+        expect(kde).toContain("plasma-discover");
+        expect(kde).not.toContain("gnome-remote-desktop");
+    });
+    test("snap + extraFonts + extraPackages are conditional", () => {
+        expect(resolvePackages(p({}), "setup")).not.toContain("snapd");
+        expect(resolvePackages(p({ snap: true }), "setup")).toContain("snapd");
+        expect(resolvePackages(p({}), "setup")).not.toContain("fonts-noto-cjk");
+        expect(resolvePackages(p({ extraFonts: true }), "setup")).toContain("fonts-noto-cjk");
+        // MS core fonts are setup-only (debconf EULA preseed)
+        expect(resolvePackages(p({ extraFonts: true }), "seed")).not.toContain("ttf-mscorefonts-installer");
+        expect(resolvePackages(p({ extraFonts: true }), "setup")).toContain("ttf-mscorefonts-installer");
+        expect(resolvePackages(p({ extraPackages: ["emacs"] }), "setup")).toContain("emacs");
+    });
+    test("browser resolves to a flathub id", () => {
+        expect(resolveFlatpaks(p({}))).toEqual([]);
+        expect(resolveFlatpaks(p({ browser: "firefox" }))).toEqual(["org.mozilla.firefox"]);
+        expect(resolveFlatpaks(p({ browser: "brave" }))).toEqual(["com.brave.Browser"]);
+    });
+});
+
+// ── guest-setup script ──
+
+describe("guestSetupScript", () => {
+    const spec = (mut: (s: ReturnType<typeof defaultSpec>) => void = () => {}) => {
+        const s = defaultSpec("t1"); s.credentials.username = "u"; mut(s); return s;
+    };
+    test("gnome emits the grd system-daemon path", () => {
+        const sh = guestSetupScript(spec(), { rdpPassword: "pw" });
+        expect(sh).toContain("gnome-remote-desktop");
+        expect(sh).toContain("grdctl --system rdp enable");
+        expect(sh).toContain("apt-get install -y $WANTED");
+        expect(sh).toContain("dnf install -y --skip-unavailable $WANTED"); // imported-disk detect
+        expect(sh).not.toContain("krdpserverrc");
+        expect(sh).toContain("CRUISER_GUEST_SETUP_OK");
+    });
+    test("kde emits krdp + sddm autologin instead", () => {
+        const sh = guestSetupScript(spec((s) => { s.os.desktop = "kde"; }), { rdpPassword: "pw" });
+        expect(sh).toContain("krdpserverrc");
+        expect(sh).toContain("SystemUserEnabled true");
+        expect(sh).toContain("sddm.conf.d");
+        expect(sh).not.toContain("gnome-remote-desktop.service");
+    });
+    test("browser + snap get their own sections", () => {
+        const sh = guestSetupScript(spec((s) => { s.os.browser = "vivaldi"; s.os.snap = true; }), { rdpPassword: "pw" });
+        expect(sh).toContain("com.vivaldi.Vivaldi");
+        expect(sh).toContain("flathub.flatpakrepo");
+        expect(sh).toContain("snapd.socket");
+    });
+});
+
+// ── distro matrix ──
+
+describe("distros", () => {
+    test("krdp support is release-gated", () => {
+        expect(supportsKrdp("ubuntu", "26.04")).toBe(true);
+        expect(supportsKrdp("ubuntu", "24.04")).toBe(false);
+        expect(supportsKrdp("fedora", "44")).toBe(true);
+        expect(defaultRelease("ubuntu")).toBe("26.04");
+    });
+    test("pickImageFromIndex grabs the newest match", () => {
+        const idx = `<a href="Fedora-Cloud-Base-Generic-43-1.2.x86_64.qcow2">x</a>
+                     <a href="Fedora-Cloud-Base-Generic-43-1.10.x86_64.qcow2">y</a>
+                     <a href="../">up</a>`;
+        expect(pickImageFromIndex(idx, /^Fedora-Cloud-Base-Generic-\d+-[\d.]+\.x86_64\.qcow2$/))
+            .toBe("Fedora-Cloud-Base-Generic-43-1.10.x86_64.qcow2");
+        const dIdx = `<a href="debian-13-genericcloud-amd64.qcow2">x</a>
+                      <a href="debian-13-nocloud-amd64.qcow2">y</a>`;
+        expect(pickImageFromIndex(dIdx, /^debian-\d+-genericcloud-amd64\.qcow2$/))
+            .toBe("debian-13-genericcloud-amd64.qcow2");
+        expect(pickImageFromIndex("<a href=\"nothing\">", /^debian/)).toBeNull();
     });
 });
 

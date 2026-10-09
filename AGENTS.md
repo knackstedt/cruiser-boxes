@@ -32,7 +32,10 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 - `libraries/host-int` — WmAdapter impls (kde-x11 full; kde-wayland partial;
   gnome-x11; gnome-wayland stub), xfreerdp viewer + ViewerSession.
 - `libraries/provision` — cloudimg+NoCloud, ISO autoinstall, guest-setup driver
-  (QGA), monitors.xml generation.
+  (QGA), monitors.xml generation. `packages.ts` is the single scoped package
+  manifest (entries carry `stages: seed|setup`, `desktops`, `distros`, `when`);
+  `distros.ts` holds the curated release matrix + cloud-image URL resolvers
+  (Debian/Fedora resolve filenames by scraping mirror indexes).
 - `libraries/app-mode` — waypipe over vsock (socat bridge) / ssh fallback.
 - `libraries/app-shell` — UI: zustand store, CruiserService, screens markup.
 - `libraries/sys` — exec helpers (node:child_process — runs under bun AND node).
@@ -47,6 +50,20 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 - Use `/var/tmp`, not `/tmp`.
 - QEMU argv is structured arrays only — never assemble shell strings for qemu.
 - Passwords live in 0600 files under `<vm>/secrets/`; never in vm.json or logs.
+- Guest OS profile lives in `VmSpec.os` (family/release/desktop/browser/snap/
+  extraFonts). KDE guests use krdpserver (user-session, plasma-workspace.target)
+  — Ubuntu 24.04 has no krdp; `supportsKrdp()` gates the UI. guest-setup
+  re-detects the distro via /etc/os-release, so imported disks self-correct.
+  KRDP offers TLS/RDP security but NOT NLA — don't pass `/sec:nla` to freerdp.
+- Fedora confines qemu-ga under SELinux (`virt_qemu_ga_t`): guest-exec is
+  uid-0 but can't usermod/write /var/lib/daemon-reload — even reading
+  ~user/.ssh fails. `runGuestSetup` probes /proc/self/attr/current and falls
+  back to ssh+sudo (NOPASSWD from seed). Anything else needing real root
+  inside a Fedora guest needs the ssh path too.
+- cloud-init `ssh_authorized_keys` must sit INSIDE the users: entry —
+  top-level applies to the distro default user (fedora/ubuntu), not ours.
+  rpm seeds install via `runcmd dnf --skip-unavailable`, not `packages:`
+  (one unresolvable name aborts cloud-init's whole dnf transaction).
 - QMP/QGA unix chardevs accept ONE pending client each — never cache a
   connection. `VmHandle.withQmp/withQga` open a fresh socket per op and
   serialize in-process; a held socket starves the CLI while the UI runs

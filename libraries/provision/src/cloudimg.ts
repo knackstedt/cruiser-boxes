@@ -1,5 +1,7 @@
 // ============================================================================
-// cloudimg.ts — fast path: Ubuntu cloud image + NoCloud seed → bootable VM.
+// cloudimg.ts — fast path: distro cloud image + NoCloud seed → bootable VM.
+// Ubuntu/Debian/Fedora all publish NoCloud-compatible generic images; see
+// distros.ts for the release matrix and URL resolution.
 // ============================================================================
 
 import { existsSync } from "node:fs";
@@ -9,11 +11,8 @@ import { run } from "../../sys/src/exec";
 import { CLOUDIMG_DIR, vmPaths, diskPath } from "../../vm-core/src/paths";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { buildSeedIso, cloudimgUserData, metaData, passwordHash, type SeedOpts } from "./nocloud";
-
-/** Ubuntu cloudimg base (release → download url template). */
-export function cloudimgUrl(release: string): string {
-    return `https://cloud-images.ubuntu.com/releases/${release}/release/ubuntu-${release}-server-cloudimg-amd64.img`;
-}
+import { cloudImageFor, defaultRelease } from "./distros";
+import { profileFromSpec, resolvePackages } from "./packages";
 
 async function fetchImg(url: string, dst: string): Promise<void> {
     if (existsSync(dst)) return;
@@ -29,16 +28,19 @@ async function fetchImg(url: string, dst: string): Promise<void> {
  *   1. fetch base img into ~/.cache/cruiser/cloudimg (shared across VMs)
  *   2. create per-VM qcow2 backing-file disk
  *   3. build seed.iso with cloudimg user-data
- * Mutates spec: provisioned, credentials.passwordFile.
+ * Mutates spec: os.release (if resolved from the curated default),
+ * provisioned, credentials.passwordFile.
  */
 export async function provisionCloudimg(
     spec: VmSpec,
     qemuImg: string,
-    o: { release: string; username: string; password: string; sshKeys?: string[]; timezone?: string },
+    o: { release?: string; username: string; password: string; sshKeys?: string[]; timezone?: string },
 ): Promise<{ disk: string; seedIso: string }> {
     const paths = vmPaths(spec.name);
-    const base = join(CLOUDIMG_DIR, `ubuntu-${o.release}-server-cloudimg-amd64.img`);
-    await fetchImg(cloudimgUrl(o.release), base);
+    const release = o.release ?? (spec.os.release || defaultRelease(spec.os.family));
+    const { url, file } = await cloudImageFor(spec.os.family, release);
+    const base = join(CLOUDIMG_DIR, file);
+    await fetchImg(url, base);
 
     // qcow2 overlay sized to spec — at spec.disk.file, which may live outside
     // the vm dir (custom disk location).
@@ -52,10 +54,13 @@ export async function provisionCloudimg(
     const opts: SeedOpts = {
         hostname: spec.name, username: o.username, password: o.password,
         passwordHash: hash, sshAuthorizedKeys: o.sshKeys, timezone: o.timezone,
+        packages: resolvePackages(profileFromSpec(spec), "seed"),
+        pkgMgr: profileFromSpec(spec).family === "fedora" ? "dnf" : "apt",
     };
     const seedIso = await buildSeedIso(join(paths.dir, "seed"), cloudimgUserData(opts), metaData(opts));
 
     spec.credentials.username = o.username;
+    spec.os.release = release;
     spec.provisioned = { method: "cloudimg", source: base };
     return { disk, seedIso };
 }

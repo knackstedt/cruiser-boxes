@@ -4,6 +4,7 @@
 // ============================================================================
 
 import { VMS_DIR } from "../../vm-core/src/paths";
+import { DISTROS, supportsKrdp } from "../../provision/src/distros";
 import { fontFaceCss } from "./fonts";
 import type { CruiserState, VmSummary } from "./store";
 
@@ -187,11 +188,17 @@ function field(label: string, key: string, val: string | number, w = 220): strin
         <input data-field="${esc(key)}" value="${esc(String(val))}" style="width:${w}px"></div>`;
 }
 
-function optRow(label: string, key: string, cur: string, choices: [string, string][]): string {
+function optRow(label: string, key: string, cur: string, choices: [string, string][], action = "set-field"): string {
     return `<div class="row"><div class="lbl">${esc(label)}</div><div class="opts">${
         choices.map(([v, l]) =>
-            `<div class="opt${cur === v ? " on" : ""}" data-action="set-field" data-field="${esc(key)}" data-value="${esc(v)}">${esc(l)}</div>`).join("")
+            `<div class="opt${cur === v ? " on" : ""}" data-action="${action}" data-field="${esc(key)}" data-value="${esc(v)}">${esc(l)}</div>`).join("")
     }</div></div>`;
+}
+
+function checkRow(label: string, key: string, cur: boolean, hint = ""): string {
+    return `<div class="row"><div class="lbl">${esc(label)}</div>
+        <div class="opt${cur ? " on" : ""}" data-action="set-field" data-field="${esc(key)}" data-value="${!cur}">${cur ? "on" : "off"}</div>
+        ${hint ? `<div class="meta">${esc(hint)}</div>` : ""}</div>`;
 }
 
 const PERSIST_HINT: Record<string, string> = {
@@ -227,12 +234,14 @@ function create(s: CruiserState): string {
             </div></div>
             <div class="hint">the viewer window lands on this desktop (${s.vdRows > 1 ? `${s.vdRows}×${Math.ceil(s.desktops.length / s.vdRows)} grid` : "row"} layout) — • is where you are now</div>`
         : "";
+    const kdeOk = f.distro in DISTROS && supportsKrdp(f.distro as keyof typeof DISTROS, f.release);
     const provRows =
         f.method === "cloudimg" ? `
-            <div class="hint">A <b>cloud image</b> is a prebuilt Ubuntu disk published by Canonical — cruiser downloads it once, resizes it to your disk size, and injects a cloud-init seed that creates your user, sets the password, and enables SSH/RDP. Fastest path to a working VM — no installer.</div>
-            ${field("Ubuntu release", "release", f.release)}` :
+            <div class="hint">A <b>cloud image</b> is a prebuilt disk published by the distro — cruiser downloads it once, resizes it to your disk size, and injects a cloud-init seed that creates your user, sets the password, and enables SSH/RDP. Fastest path to a working VM — no installer.</div>
+            ${optRow("Guest OS", "distro", f.distro, [["ubuntu", "Ubuntu"], ["debian", "Debian"], ["fedora", "Fedora"]], "set-distro")}
+            ${optRow("Release", "release", f.release, (DISTROS[f.distro as keyof typeof DISTROS]?.releases ?? []).map((r) => [r.id, r.label] as [string, string]))}` :
         f.method === "iso" ? `${field("ISO path or URL", "iso", f.iso, 340)}
-            <div class="hint">Boots the ISO with a NoCloud autoinstall seed — slower (~20 min) but runs the real Ubuntu installer unattended.</div>` :
+            <div class="hint">Boots the ISO with a NoCloud autoinstall seed — slower (~20 min) but runs the real installer unattended. Ubuntu ISOs only for now.</div>` :
         f.method === "imported" ? `
             <div class="row"><div class="lbl">Image file</div>
                 <input data-field="importPath" value="${esc(f.importPath)}" style="width:340px">
@@ -260,6 +269,14 @@ function create(s: CruiserState): string {
         <div class="h2">Provisioning</div>
         ${optRow("Method", "method", f.method, [["none", "none"], ["cloudimg", "cloud image"], ["iso", "ISO autoinstall"], ["imported", "import existing"]])}
         ${provRows}
+        ${f.method === "none" ? "" : `<div class="h2">Guest software</div>
+        ${optRow("Desktop", "desktop", f.desktop, [["gnome", "GNOME"], ["kde", "KDE Plasma"]])}
+        ${f.desktop === "kde" && !kdeOk ? `<div class="hint">KDE needs a guest release that ships krdp — ${esc(f.distro)} ${esc(f.release)} doesn't have one; pick a newer release.</div>` : ""}
+        ${optRow("Browser", "browser", f.browser, [["none", "none"], ["firefox", "Firefox"], ["chrome", "Chrome"], ["chromium", "Chromium"], ["vivaldi", "Vivaldi"], ["brave", "Brave"]])}
+        <div class="hint">installed via Flathub</div>
+        ${checkRow("Snap support", "snap", f.snap, "off → flatpak is the only app channel")}
+        ${checkRow("Extra fonts", "extraFonts", f.extraFonts, "CJK + MS core fonts on top of the base bundle")}
+        <div class="hint">The base bundle — desktop, RDP/audio/GPU stack, flatpak + software store, fonts — is always installed.</div>`}
         ${usbSection}
         <div class="h2">Credentials</div>
         ${field("Username", "username", f.username)}

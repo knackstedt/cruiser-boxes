@@ -35,6 +35,9 @@ usage: cruiser <area> <command> [args]
   vm create <name> [--cpus N] [--mem MiB] [--disk GiB] [--gpu venus|virgl|software]
                    [--head-mode fullscreen-monitor|windowed|virtual-desktop|app]
                    [--share PATH[:tag]] [--persist daemonize|owned]
+                   [--distro ubuntu|debian|fedora] [--desktop gnome|kde]
+                   [--browser none|firefox|chrome|chromium|vivaldi|brave]
+                   [--snap] [--xfonts]
   vm start <name> [--mode <headmode>]   vm stop <name>    vm kill <name>
   vm status <name>                      vm args <name>   (print QEMU argv)
   vm snapshots <name>                   vm snapshot <name> <snapname>
@@ -49,7 +52,7 @@ usage: cruiser <area> <command> [args]
   vm umount <name> [mp]                 unmount (default ~/.local/share/cruiser/mounts/<vm>)
   app list <vm>                         guest .desktop app catalog (via QGA)
   app run <vm> <command...>             launch a guest app via waypipe (vsock→ssh)
-  provision cloudimg <vm> <release> [--user u] [--password p]
+  provision cloudimg <vm> [release]   [--user u] [--password p]  (release defaults to the VM's distro default)
   provision iso <vm> <iso-or-url> [--user u] [--password p]
   provision guest-setup <vm>           re-run in-guest setup on a provisioned VM
   toolchain check|build|adopt-src [dir]
@@ -102,6 +105,11 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const gpu = flagVal("--gpu"); if (gpu) spec.gpu.mode = gpu as VmSpec["gpu"]["mode"];
             const hm = flagVal("--head-mode"); if (hm) spec.display.headMode = hm as VmSpec["display"]["headMode"];
             const persist = flagVal("--persist"); if (persist) spec.persist = persist as VmSpec["persist"];
+            const distro = flagVal("--distro"); if (distro) spec.os.family = distro as VmSpec["os"]["family"];
+            const desktop = flagVal("--desktop"); if (desktop) spec.os.desktop = desktop as VmSpec["os"]["desktop"];
+            const browser = flagVal("--browser"); if (browser) spec.os.browser = browser as VmSpec["os"]["browser"];
+            if (has("--snap")) spec.os.snap = true;
+            if (has("--xfonts")) spec.os.extraFonts = true;
             for (let i = 0; i < argv.length; i++) {
                 if (argv[i] === "--share") {
                     const [p, tag] = (argv[i + 1] ?? "").split(":");
@@ -246,7 +254,7 @@ switch (area) {
             onLog: (m: string) => console.log(m),
         };
         const { provisionVmCloudimg, provisionVmIso, reprovisionGuest } = await import("../libraries/provision/src/provision");
-        if (sub === "cloudimg") { if (!rest[1]) usage(); await provisionVmCloudimg(h, { ...o, release: rest[1] }); }
+        if (sub === "cloudimg") await provisionVmCloudimg(h, { ...o, release: rest[1] });
         else if (sub === "iso") { if (!rest[1]) usage(); await provisionVmIso(h, { ...o, iso: rest[1] }); }
         else if (sub === "guest-setup") await reprovisionGuest(h, o);
         else usage();

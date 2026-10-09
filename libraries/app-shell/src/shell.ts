@@ -9,6 +9,7 @@ import type { InputBus } from "./input-bus";
 import type { CruiserService } from "./service";
 import type { Store, CreateForm } from "./store";
 import { renderRoute } from "./screens";
+import { DISTROS } from "../../provision/src/distros";
 import { registerUiFonts } from "./fonts";
 import { RenderGate } from "./render-gate";
 import { mark } from "./startup-profile";
@@ -16,6 +17,7 @@ import { mark } from "./startup-profile";
 const log = createLogger("info");
 
 const NUM_FIELDS: Set<string> = new Set(["cpus", "memMiB", "diskGiB"]);
+const BOOL_FIELDS: Set<string> = new Set(["snap", "extraFonts"]);
 
 const SPIN = ["◐", "◓", "◑", "◒"];
 
@@ -101,8 +103,17 @@ export class CruiserShell {
         this.host.onAction("set-field", (d) => {
             const k = d.field as keyof CreateForm;
             if (!k) return;
-            const v = NUM_FIELDS.has(k) ? Number(d.value ?? 0) : (d.value ?? "");
+            const v = NUM_FIELDS.has(k) ? Number(d.value ?? 0)
+                : BOOL_FIELDS.has(k) ? d.value === "true"
+                : (d.value ?? "");
             st().setField(k, v as never);
+        });
+        this.host.onAction("set-distro", (d) => {
+            const fam = d.value as keyof typeof DISTROS;
+            if (!DISTROS[fam]) return;
+            st().setField("distro", fam);
+            // each family has its own release namespace — jump to its default
+            st().setField("release", DISTROS[fam].releases[0]!.id);
         });
         this.host.onAction("set-vd", (d) => st().setField("vd", Number(d.vd) || 0));
         this.host.onAction("usb-toggle", (d) => { if (d.key) st().toggleUsb(d.key); });
