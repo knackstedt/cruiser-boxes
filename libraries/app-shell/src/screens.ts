@@ -23,10 +23,15 @@ body { background:#10141a; color:#e8ecf1; font-family:'Cruiser Sans',sans-serif;
 .h1 { font-size:20px; font-weight:bold; margin-bottom:14px; }
 .h2 { font-size:14px; font-weight:bold; margin:18px 0 8px; color:#8a94a3; }
 .vmlist { display:flex; flex-direction:column; gap:8px; }
-.vmrow { display:flex; align-items:center; gap:14px; padding:13px 16px;
+.vmlist-head { display:flex; align-items:center; justify-content:space-between;
+               margin-bottom:14px; }
+.vmlist-head .h1 { margin-bottom:0; }
+.vmrow { display:flex; align-items:center; gap:14px; padding:11px 16px;
          background:#161b23; border:1px solid #2a313c; border-radius:6px; }
-.vmrow .grow { flex:1; }
-.vmname { font-size:15px; font-weight:bold; min-width:140px; }
+.vmrow .grow { flex:1; min-width:0; }
+.vmname { font-size:15px; font-weight:bold; }
+.vmspecs { font-size:12px; color:#8a94a3; margin-top:3px; }
+.vmmode { font-size:12px; color:#5d6775; margin-top:2px; }
 .pill { padding:4px 11px; border-radius:11px; font-size:12px; white-space:nowrap; }
 .pill.running { background:#1d3a24; color:#9fd89f; }
 .pill.stopped { background:#212933; color:#8a94a3; }
@@ -86,12 +91,32 @@ const btn = (label: string, action: string, extra = "", cls = "btn") =>
     `<div class="${cls}" data-action="${esc(action)}"${extra}>${esc(label)}</div>`;
 const attr = (k: string, v: string) => ` data-${k}="${esc(v)}"`;
 
+const GPU_LABEL: Record<string, string> = {
+    venus: "Venus (Vulkan)", virgl: "virgl (OpenGL)", software: "software",
+};
+const HEAD_LABEL: Record<string, string> = {
+    "virtual-desktop": "virtual desktop",
+    "fullscreen-monitor": "fullscreen monitor",
+    windowed: "windowed",
+    app: "app-only",
+};
+
 function vmRow(vm: VmSummary): string {
     const up = vm.state === "running";
+    const specs = `${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB RAM · ${vm.diskGiB} GiB disk`;
+    const ports = up
+        ? [vm.sshPort && `ssh :${vm.sshPort}`, vm.rdpPort && `rdp :${vm.rdpPort}`]
+            .filter(Boolean).join(" · ")
+        : "";
+    const mode = [GPU_LABEL[vm.gpuMode] ?? vm.gpuMode, HEAD_LABEL[vm.headMode] ?? vm.headMode, ports]
+        .filter(Boolean).join(" · ");
     return `<div class="vmrow">
-        <div class="vmname" data-action="nav" data-route="vm" data-vm="${esc(vm.name)}">${esc(vm.name)}</div>
+        <div class="grow" data-action="nav" data-route="vm" data-vm="${esc(vm.name)}">
+            <div class="vmname">${esc(vm.name)}</div>
+            <div class="vmspecs">${esc(specs)}</div>
+            <div class="vmmode">${esc(mode)}${vm.provisioned ? "" : ` · <span style="color:#f0c98a">not provisioned</span>`}</div>
+        </div>
         <div class="pill ${pillClass(vm.state)}">${esc(vm.state)}</div>
-        <div class="meta grow">${esc(vm.gpuMode)} · ${esc(vm.headMode)} · ${vm.cpus}c/${Math.round(vm.memMiB / 1024)}G · ssh:${vm.sshPort ?? "-"} rdp:${vm.rdpPort ?? "-"}${vm.provisioned ? ` · ${esc(vm.provisioned)}` : " · unprovisioned"}</div>
         ${up
             ? btn("View", "vm-view", attr("vm", vm.name)) + btn("Stop", "vm-stop", attr("vm", vm.name), "btn dim")
             : btn("Start", "vm-start", attr("vm", vm.name))}
@@ -101,8 +126,10 @@ function vmRow(vm: VmSummary): string {
 function home(s: CruiserState): string {
     const list = s.vms.length
         ? `<div class="vmlist">${s.vms.map(vmRow).join("")}</div>`
-        : `<div class="empty">No VMs yet — use <b>New VM</b> above.</div>`;
-    return `<div class="h1">Virtual Machines</div>${list}`;
+        : `<div class="empty">No VMs yet.</div>`;
+    return `<div class="vmlist-head"><div class="h1">Virtual Machines</div>
+        ${btn("+ New VM", "nav", attr("route", "create"))}</div>
+        ${list}`;
 }
 
 // ── create wizard ──
@@ -286,7 +313,7 @@ export function renderRoute(s: CruiserState): string {
         s.route === "vm" ? vmDetail(s) : settings(s);
     return `<html><head><style>${CSS}</style></head><body>
         <div class="topbar"><div class="brand">cruiser</div>
-            <div class="nav">${nav("home", "VMs")}${nav("create", "New VM")}${nav("settings", "Settings")}</div>
+            <div class="nav">${nav("home", "VMs")}${nav("settings", "Settings")}</div>
             <div style="flex:1"></div>
             ${s.busy ? `<div class="meta">working…</div>` : ""}
         </div>
