@@ -84,6 +84,7 @@ input:focus { border-color:#4fc2f7; outline:none; }
 .docrow .fix { color:#5d6775; font-size:12px; }
 .snap { display:inline-block; padding:5px 11px; margin:0 6px 6px 0; font-size:12px;
         background:#212933; border-radius:11px; color:#8a94a3; }
+.snap.armed { background:#3a2e1d; color:#f0c98a; }
 .footer { height:28px; flex-shrink:0;
           display:flex; align-items:center; padding:0 18px;
           background:#161b23; border-top:1px solid #2a313c;
@@ -144,7 +145,31 @@ function spark(kind: "cpu" | "mem", samples: number[]): string {
         <div class="splbl">${kind} ${cur === null ? "–" : `${cur}%`}</div></div>`;
 }
 
-function vmRow(vm: VmSummary): string {
+/** Action buttons for a VM state — shared between the list row and the
+ *  detail screen. Destructive ops render their armed label. */
+function vmBtns(vm: VmSummary, confirm: string | null, detail = false): string {
+    const up = vm.state === "running";
+    const paused = vm.state === "paused";
+    const transitional = vm.state === "starting" || vm.state === "stopping";
+    const stopped = !up && !paused && !transitional;
+    const parts: string[] = [];
+    // "app" head mode has no freerdp viewer — waypipe apps are launched via CLI.
+    if (up && vm.headMode !== "app") parts.push(btn("View", "vm-view", attr("vm", vm.name)));
+    if (paused) parts.push(btn("Resume", "vm-resume", attr("vm", vm.name)));
+    if (up || paused) parts.push(btn("Stop", "vm-stop", attr("vm", vm.name), "btn dim"));
+    if (stopped) parts.push(btn("Start", "vm-start", attr("vm", vm.name)));
+    if (up || paused || transitional)
+        parts.push(confirm === `vm-kill:${vm.name}`
+            ? btn("Confirm kill", "vm-kill", attr("vm", vm.name), "btn warn")
+            : btn("Kill", "vm-kill", attr("vm", vm.name), "btn warn"));
+    if (detail && stopped)
+        parts.push(confirm === `vm-rm:${vm.name}`
+            ? btn("Confirm delete", "vm-rm", attr("vm", vm.name), "btn warn")
+            : btn("Delete", "vm-rm", attr("vm", vm.name), "btn warn"));
+    return parts.join("");
+}
+
+function vmRow(vm: VmSummary, confirm: string | null): string {
     const up = vm.state === "running";
     const specs = `${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB RAM · ${vm.diskGiB} GiB cap`;
     const diskParts = [
@@ -164,18 +189,17 @@ function vmRow(vm: VmSummary): string {
             <div class="vmmode">${esc(mode)}${vm.provisioned ? "" : ` · <span style="color:#f0c98a">not provisioned</span>`}</div>
             ${diskParts ? `<div class="vmdisk">${esc(diskParts)}</div>` : ""}
         </div>
-        <div class="sparks">${spark("cpu", vm.cpu)}${spark("mem", vm.mem)}</div>
+        ${up ? `<div class="sparks">${spark("cpu", vm.cpu)}${spark("mem", vm.mem)}</div>` : ""}
         <div class="pill ${pillClass(vm.state)}">${esc(vm.state)}</div>
-        ${up
-            ? btn("View", "vm-view", attr("vm", vm.name)) + btn("Stop", "vm-stop", attr("vm", vm.name), "btn dim")
-            : btn("Start", "vm-start", attr("vm", vm.name))}
+        ${vmBtns(vm, confirm)}
     </div>`;
 }
 
 function home(s: CruiserState): string {
     const list = s.vms.length
-        ? `<div class="vmlist">${s.vms.map(vmRow).join("")}</div>`
-        : `<div class="empty">No VMs yet.</div>`;
+        ? `<div class="vmlist">${s.vms.map((vm) => vmRow(vm, s.confirm)).join("")}</div>`
+        : `<div class="empty">No VMs yet.
+            <div style="margin-top:14px">${btn("+ New VM", "nav", attr("route", "create"))}</div></div>`;
     return `<div class="vmlist-head"><div class="h1">Virtual Machines</div>
         ${btn("+ New VM", "nav", attr("route", "create"))}</div>
         ${list}`;
@@ -255,7 +279,7 @@ function create(s: CruiserState): string {
             : `<div class="meta">no USB devices found</div>`}`;
     return `<div class="h1">New VM</div>
         ${hostsum}
-        ${field("Name", "name", f.name || "my-vm")}
+        ${field("Name", "name", f.name)}
         <div class="h2">Resources</div>
         ${field("vCPUs", "cpus", f.cpus, 80)}
         ${memRow}
@@ -271,7 +295,7 @@ function create(s: CruiserState): string {
         ${provRows}
         ${f.method === "none" ? "" : `<div class="h2">Guest software</div>
         ${optRow("Desktop", "desktop", f.desktop, [["gnome", "GNOME"], ["kde", "KDE Plasma"]])}
-        ${f.desktop === "kde" && !kdeOk ? `<div class="hint">KDE needs a guest release that ships krdp — ${esc(f.distro)} ${esc(f.release)} doesn't have one; pick a newer release.</div>` : ""}
+        ${f.method === "cloudimg" && f.desktop === "kde" && !kdeOk ? `<div class="hint">KDE needs a guest release that ships krdp — ${esc(f.distro)} ${esc(f.release)} doesn't have one; pick a newer release.</div>` : ""}
         ${optRow("Browser", "browser", f.browser, [["none", "none"], ["firefox", "Firefox"], ["chrome", "Chrome"], ["chromium", "Chromium"], ["vivaldi", "Vivaldi"], ["brave", "Brave"]])}
         <div class="hint">installed via Flathub</div>
         ${checkRow("Snap support", "snap", f.snap, "off → flatpak is the only app channel")}
@@ -291,8 +315,17 @@ function vmDetail(s: CruiserState): string {
     if (!vm) return `<div class="h1">${esc(s.selectedVm ?? "?")}</div><div class="empty">not found</div>`;
     const up = vm.state === "running";
     const snaps = vm.snapshots.length
-        ? vm.snapshots.map((sn) => `<span class="snap" data-action="vm-restore" data-vm="${esc(vm.name)}" data-snap="${esc(sn)}">${esc(sn)}</span>`).join("")
+        ? vm.snapshots.map((sn) => {
+            const tok = `vm-restore:${vm.name}:${sn}`;
+            const armed = s.confirm === tok;
+            return `<span class="snap${armed ? " armed" : ""}" data-action="vm-restore" data-vm="${esc(vm.name)}" data-snap="${esc(sn)}">${armed ? `restore ${esc(sn)}?` : esc(sn)}</span>`;
+        }).join("")
         : `<span class="meta">none</span>`;
+    const snapSection = up || vm.state === "starting" || vm.state === "stopping"
+        ? `<div class="meta">snapshot list + restore appear when the VM is stopped</div>`
+        : `<div>${snaps}</div>
+           ${vm.snapshots.length ? `<div class="hint" style="margin-left:0">click a snapshot to restore — restoring overwrites the current disk state</div>` : ""}
+           <div style="margin-top:8px">${btn("Take snapshot", "vm-snap", attr("vm", vm.name))}</div>`;
     const diskDetail = [
         vm.hostDiskBytes !== undefined ? `${fmtBytes(vm.hostDiskBytes)} file` : "",
         guestDiskStr(vm) ?? "",
@@ -301,18 +334,18 @@ function vmDetail(s: CruiserState): string {
         <div class="kv">
             <div class="k">resources</div><div>${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB · ${vm.diskGiB} GiB disk</div>
             ${diskDetail ? `<div class="k">disk usage</div><div>${esc(diskDetail)}</div>` : ""}
+            ${up ? `<div class="k">usage</div><div class="sparks">${spark("cpu", vm.cpu)}${spark("mem", vm.mem)}</div>` : ""}
             <div class="k">gpu / head</div><div>${esc(vm.gpuMode)} / ${esc(vm.headMode)}</div>
             <div class="k">ports</div><div>ssh 127.0.0.1:${vm.sshPort ?? "–"} · rdp 127.0.0.1:${vm.rdpPort ?? "–"}</div>
-            <div class="k">provisioned</div><div>${esc(vm.provisioned ?? "no")}</div>
+            <div class="k">provisioned</div><div>${esc(vm.provisioned ?? "—")}</div>
             <div class="k">persist</div><div>${esc(vm.persist)}</div>
         </div>
         <div style="margin:10px 0 18px">
-            ${up ? btn("View", "vm-view", attr("vm", vm.name)) + btn("Stop", "vm-stop", attr("vm", vm.name), "btn dim") + btn("Kill", "vm-kill", attr("vm", vm.name), "btn warn")
-                 : btn("Start", "vm-start", attr("vm", vm.name)) + btn("Delete", "vm-rm", attr("vm", vm.name), "btn warn")}
+            ${vmBtns(vm, s.confirm, true)}
         </div>
         <div class="h2">Snapshots</div>
-        <div>${snaps}</div>
-        <div style="margin-top:8px">${btn("Take snapshot", "vm-snap", attr("vm", vm.name))}</div>`;
+        ${snapSection}
+        <div style="margin-top:24px">${btn("‹ VMs", "nav", attr("route", "home"), "btn dim")}</div>`;
 }
 
 // ── settings / doctor ──

@@ -115,6 +115,9 @@ export interface CruiserState {
     vdRows: number;                // best-effort grid rows for the VD picker
     usbDevices: UsbChoice[];
     sysinfo: SysInfo | null;
+    /** Two-click confirm token for destructive actions ("vm-rm:<name>" etc.)
+     *  — first click arms the button, second executes. */
+    confirm: string | null;
 }
 
 export interface CruiserActions {
@@ -131,6 +134,7 @@ export interface CruiserActions {
     setUsbDevices(ds: UsbChoice[]): void;
     toggleUsb(key: string): void;
     setSysinfo(si: SysInfo | null): void;
+    setConfirm(c: string | null): void;
 }
 
 export type CruiserStore = CruiserState & CruiserActions;
@@ -160,7 +164,8 @@ export function createCruiserStore() {
         vdRows: 1,
         usbDevices: [],
         sysinfo: null,
-        setRoute: (route, vm = null) => set({ route, selectedVm: vm }),
+        confirm: null,
+        setRoute: (route, vm = null) => set({ route, selectedVm: vm, confirm: null }),
         setVms: (vms) => set({ vms }),
         setStatus: (status) => set({ status }),
         setBusy: (busy) => set({ busy }),
@@ -172,6 +177,7 @@ export function createCruiserStore() {
         setDesktops: (desktops, vdRows) => set({ desktops, vdRows }),
         setUsbDevices: (usbDevices) => set({ usbDevices }),
         setSysinfo: (sysinfo) => set({ sysinfo }),
+        setConfirm: (confirm) => set({ confirm }),
         toggleUsb: (key) => set((s) => ({
             create: {
                 ...s.create,

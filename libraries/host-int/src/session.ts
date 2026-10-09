@@ -90,6 +90,12 @@ export class ViewerSession extends EventEmitter {
         }
     }
 
+    /** Bring the existing viewer window forward (no-op if it couldn't be
+     *  located or the adapter can't focus windows). */
+    async focus(): Promise<void> {
+        if (this.window) await this.adapter.focus(this.window).catch(() => {});
+    }
+
     async close(): Promise<void> {
         this.child?.kill("SIGTERM");
         await this.cleanup();

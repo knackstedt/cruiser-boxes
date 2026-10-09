@@ -230,16 +230,19 @@ export class VmHandle extends EventEmitter {
         return resolveDiskPath(this.spec, this.paths.dir);
     }
 
-    async snapshots() { return disk.snapshotList(this.tc().qemuImg, this.diskPath()); }
-    async snapshot(name: string) { return disk.snapshotCreate(this.tc().qemuImg, this.diskPath(), name); }
+    async snapshots() { return disk.snapshotList((await this.tc()).qemuImg, this.diskPath()); }
+    async snapshot(name: string) {
+        if (this.isRunning()) throw new Error("stop the VM before taking a snapshot (qemu-img needs the disk offline)");
+        return disk.snapshotCreate((await this.tc()).qemuImg, this.diskPath(), name);
+    }
     async restoreSnapshot(name: string) {
         if (this.isRunning()) throw new Error("stop the VM before restoring a snapshot");
-        return disk.snapshotApply(this.tc().qemuImg, this.diskPath(), name);
+        return disk.snapshotApply((await this.tc()).qemuImg, this.diskPath(), name);
     }
-    async deleteSnapshot(name: string) { return disk.snapshotDelete(this.tc().qemuImg, this.diskPath(), name); }
+    async deleteSnapshot(name: string) { return disk.snapshotDelete((await this.tc()).qemuImg, this.diskPath(), name); }
     async resizeDisk(newSizeGiB: number) {
         if (this.isRunning()) throw new Error("stop the VM before resizing the disk (guest growfs happens next boot)");
-        return disk.resizeDisk(this.tc().qemuImg, this.diskPath(), newSizeGiB);
+        return disk.resizeDisk((await this.tc()).qemuImg, this.diskPath(), newSizeGiB);
     }
     async backup(destPath: string) {
         if (this.isRunning()) {
@@ -248,7 +251,7 @@ export class VmHandle extends EventEmitter {
                 return disk.backupLive(q, node, destPath);
             });
         }
-        return disk.backupOffline(this.tc().qemuImg, this.diskPath(), destPath);
+        return disk.backupOffline((await this.tc()).qemuImg, this.diskPath(), destPath);
     }
 
     // ── usb ──
@@ -277,8 +280,9 @@ export class VmHandle extends EventEmitter {
         return this.guestSh("systemctl restart gdm 2>/dev/null || systemctl restart sddm 2>/dev/null || true", 15_000);
     }
 
-    private tc(): Toolchain {
-        if (!this.toolchain) throw new Error("toolchain unresolved — call start()/buildArgv() first");
-        return this.toolchain;
+    /** qemu/qemu-img binaries — lazily resolved so post-load handles (which
+     *  never ran buildArgv) can still do offline disk ops. */
+    private async tc(): Promise<Toolchain> {
+        return this.toolchain ??= await resolveToolchain();
     }
 }

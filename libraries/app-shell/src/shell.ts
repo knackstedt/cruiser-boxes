@@ -90,6 +90,20 @@ export class CruiserShell {
         log.info("shell", "mounted");
     }
 
+    /** Two-click guard for destructive actions: first click arms `token`
+     *  (button re-renders as "Confirm…"), a second within 5s executes. */
+    private confirmTimer: ReturnType<typeof setTimeout> | null = null;
+    private armed(token: string): boolean {
+        const st = this.store.getState();
+        if (st.confirm === token) { st.setConfirm(null); return true; }
+        st.setConfirm(token);
+        if (this.confirmTimer) clearTimeout(this.confirmTimer);
+        this.confirmTimer = setTimeout(() => {
+            if (this.store.getState().confirm === token) this.store.getState().setConfirm(null);
+        }, 5_000);
+        return false;
+    }
+
     private wireActions(): void {
         const st = () => this.store.getState();
         const svc = this.svc;
@@ -97,7 +111,16 @@ export class CruiserShell {
             const route = d.route as "home" | "create" | "settings" | "vm" | undefined;
             if (!route) return;
             st().setRoute(route, d.vm ?? null);
-            if (route === "create") void svc.refreshCreateExtras();
+            if (route === "create") {
+                void svc.refreshCreateExtras();
+                // Prefill a unique name — an untouched field used to silently
+                // create "my-vm" (and collide on the second one).
+                if (!st().create.name) {
+                    let n = 1;
+                    while (st().vms.some((v) => v.name === `vm-${n}`)) n++;
+                    st().setField("name", `vm-${n}`);
+                }
+            }
             if (route === "settings") void svc.refreshSettings();
         });
         this.host.onAction("set-field", (d) => {
@@ -116,17 +139,28 @@ export class CruiserShell {
             st().setField("release", DISTROS[fam].releases[0]!.id);
         });
         this.host.onAction("set-vd", (d) => st().setField("vd", Number(d.vd) || 0));
-        this.host.onAction("usb-toggle", (d) => { if (d.key) st().toggleUsb(d.key); });
+        this.host.onAction("usb-toggle", (d) => {
+            if (!d.key) return;
+            const dev = st().usbDevices.find((u) => u.key === d.key);
+            if (dev && !dev.writable) {
+                st().setStatus(`${dev.label}: no host access — run doctor for the udev fix`);
+                return;
+            }
+            st().toggleUsb(d.key);
+        });
         this.host.onAction("pick-disk-dir", () => { void svc.pickDiskDir(); });
         this.host.onAction("pick-import", () => { void svc.pickImportFile(); });
         this.host.onAction("vm-create", () => { svc.createVm(); });
         this.host.onAction("vm-start", (d) => { if (d.vm) svc.start(d.vm); });
         this.host.onAction("vm-stop", (d) => { if (d.vm) svc.stop(d.vm); });
-        this.host.onAction("vm-kill", (d) => { if (d.vm) svc.kill(d.vm); });
-        this.host.onAction("vm-rm", (d) => { if (d.vm) svc.remove(d.vm); });
+        this.host.onAction("vm-resume", (d) => { if (d.vm) svc.resume(d.vm); });
+        this.host.onAction("vm-kill", (d) => { if (d.vm && this.armed(`vm-kill:${d.vm}`)) svc.kill(d.vm); });
+        this.host.onAction("vm-rm", (d) => { if (d.vm && this.armed(`vm-rm:${d.vm}`)) svc.remove(d.vm); });
         this.host.onAction("vm-view", (d) => { if (d.vm) svc.view(d.vm); });
         this.host.onAction("vm-snap", (d) => { if (d.vm) svc.snapshot(d.vm); });
-        this.host.onAction("vm-restore", (d) => { if (d.vm && d.snap) svc.restoreSnapshot(d.vm, d.snap); });
+        this.host.onAction("vm-restore", (d) => {
+            if (d.vm && d.snap && this.armed(`vm-restore:${d.vm}:${d.snap}`)) svc.restoreSnapshot(d.vm, d.snap);
+        });
         this.host.onAction("doctor", () => { svc.runDoctor(); });
     }
 
@@ -204,6 +238,7 @@ export class CruiserShell {
 
     dispose(): void {
         clearInterval(this.spinTimer);
+        if (this.confirmTimer) clearTimeout(this.confirmTimer);
         this.unsub();
         this.host.dispose();
         this.panel = null;

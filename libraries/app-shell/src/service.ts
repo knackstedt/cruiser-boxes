@@ -25,6 +25,8 @@ export class CruiserService {
     private viewers = new Map<string, ViewerSession>();
     private viewerPending = new Map<string, Promise<void>>();
     private metrics = new VmMetricsSampler();
+    private refreshing = false;
+    private snapCache = new Map<string, { names: string[]; at: number }>();
 
     constructor(private store: Store) {}
 
@@ -133,7 +135,6 @@ export class CruiserService {
         const s = h.spec;
         let state: VmSummary["state"] = "stopped";
         try { state = await h.probe(); } catch { state = "unknown"; }
-        const snaps = state === "stopped" ? await h.snapshots().catch(() => []) : [];
         const mt = await this.metrics.sample(h, state);
         return {
             name: s.name, state,
@@ -142,23 +143,45 @@ export class CruiserService {
             diskGiB: s.disk.sizeGiB,
             sshPort: s.network.sshPort, rdpPort: s.network.rdpPort,
             provisioned: s.provisioned.method, persist: s.persist,
-            snapshots: snaps.map((x) => x.name),
+            snapshots: await this.snapNames(h, state),
             hostDiskBytes: mt.hostDiskBytes,
             guestUsedBytes: mt.guestUsedBytes, guestTotalBytes: mt.guestTotalBytes,
             cpu: mt.cpu, mem: mt.mem,
         };
     }
 
+    /** Snapshot names for a stopped VM, cached 30s — `qemu-img info` is a
+     *  subprocess spawn and shouldn't run per-VM per-poll. */
+    private async snapNames(h: VmHandle, state: VmSummary["state"]): Promise<string[]> {
+        if (state !== "stopped") return [];
+        const c = this.snapCache.get(h.spec.name);
+        if (c && Date.now() - c.at < 30_000) return c.names;
+        const names = (await h.snapshots().catch(() => [])).map((x) => x.name);
+        this.snapCache.set(h.spec.name, { names, at: Date.now() });
+        return names;
+    }
+
+    private invalidateSnaps(name: string): void { this.snapCache.delete(name); }
+
     async refresh(): Promise<void> {
-        // Flush incrementally: a running VM with a slow/wedged QGA sample
-        // (~2.5s) must not hide every other row behind "No VMs yet".
-        const acc = new Map<string, VmSummary>();
-        const flush = () => this.store.getState().setVms(
-            [...acc.values()].sort((a, b) => a.name.localeCompare(b.name)));
-        await Promise.all([...this.handles.values()].map(async (h) => {
-            const s = await this.summarize(h).catch(() => null);
-            if (s) { acc.set(h.spec.name, s); flush(); }
-        }));
+        if (this.refreshing) return;
+        this.refreshing = true;
+        try {
+            // Seed from the last summaries: rows update in place as each
+            // summary lands instead of disappearing behind the slow ones.
+            const acc = new Map(this.store.getState().vms.map((v) => [v.name, v]));
+            const flush = () => this.store.getState().setVms(
+                [...acc.values()].sort((a, b) => a.name.localeCompare(b.name)));
+            const live = new Set(this.handles.keys());
+            acc.forEach((_, k) => { if (!live.has(k)) acc.delete(k); });
+            await Promise.all([...this.handles.values()].map(async (h) => {
+                const s = await this.summarize(h).catch(() => null);
+                if (s) { acc.set(h.spec.name, s); flush(); }
+            }));
+            flush();
+        } finally {
+            this.refreshing = false;
+        }
     }
 
     private usbToStore(usb: Awaited<ReturnType<typeof listUsbDevices>>): void {
@@ -209,8 +232,31 @@ export class CruiserService {
 
     // ── actions ──
 
+    /** First zod issue as "field: message" — friendlier than the raw dump. */
+    private validateSpec(spec: VmSpec): void {
+        const r = VmSpec.safeParse(spec);
+        if (r.success) return;
+        const i = r.error.issues[0];
+        throw new Error(`${i?.path.join(".") || "spec"}: ${i?.message ?? "invalid"}`);
+    }
+
     async createVm(): Promise<void> {
         const f = { ...this.store.getState().create };
+        const st = this.store.getState();
+        // Pre-flight with friendly messages — a schema rejection this late
+        // either leaves a half-provisioned dir or writes an unloadable vm.json.
+        if (!/^[a-z0-9][a-z0-9-]*$/.test(f.name)) {
+            st.setStatus("name must be lowercase letters/digits/dashes (e.g. 'dev-box')");
+            return;
+        }
+        if (this.handles.has(f.name)) { st.setStatus(`a VM named '${f.name}' already exists`); return; }
+        if (f.cpus < 1 || f.cpus > 64) { st.setStatus("vCPUs must be between 1 and 64"); return; }
+        if (f.memMiB < 512) { st.setStatus("memory must be at least 512 MiB"); return; }
+        if (f.diskGiB < 4) { st.setStatus("disk must be at least 4 GiB"); return; }
+        if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(f.username)) {
+            st.setStatus("username must start with a letter/underscore, lowercase + digits + - _ only");
+            return;
+        }
         await this.run(`create ${f.name}`, async () => {
             const spec = defaultSpec(f.name);
             spec.resources.cpus = f.cpus;
@@ -245,6 +291,7 @@ export class CruiserService {
             } else if (f.diskDir) {
                 spec.disk.file = join(f.diskDir, `${f.name}.qcow2`);
             }
+            this.validateSpec(spec);
             const h = await this.registry.create(spec);
             this.handles.set(spec.name, h);
 
@@ -295,17 +342,35 @@ export class CruiserService {
         await this.run(`kill ${name}`, () => h.kill());
     }
     async remove(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        if (h.isRunning()) {
+            this.store.getState().setStatus(`stop ${name} before deleting it`);
+            return;
+        }
         await this.run(`remove ${name}`, async () => {
             await this.registry.remove(name, { deleteDisk: true });
             this.handles.delete(name);
             this.metrics.drop(name);
+            this.snapCache.delete(name);
             this.store.getState().setRoute("home");
         });
     }
 
+    async resume(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        await this.run(`resume ${name}`, () => h.resume());
+    }
+
+    /** Open (or raise) the VM's viewer in the background — RDP may take tens
+     *  of seconds to appear and must not hold the UI's busy lock. */
     async view(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
-        await this.run(`view ${name}`, () => this.ensureViewer(h));
+        if (this.viewers.has(name)) {
+            void this.viewers.get(name)!.focus();
+            this.store.getState().setStatus(`${name} viewer raised`);
+            return;
+        }
+        void this.autoView(h);
     }
 
     /** Open the VM's freerdp viewer; joins an open already in flight. */
@@ -344,11 +409,17 @@ export class CruiserService {
 
     async snapshot(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
+        if (h.isRunning()) {
+            this.store.getState().setStatus(`stop ${name} before taking a snapshot — qemu-img needs the disk offline`);
+            return;
+        }
         await this.run(`snapshot ${name}`, () => h.snapshot(`snap-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}`));
+        this.invalidateSnaps(name);
     }
     async restoreSnapshot(name: string, snap: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
         await this.run(`restore ${snap}`, () => h.restoreSnapshot(snap));
+        this.invalidateSnaps(name);
     }
 
     async launchApp(name: string, cmd: string): Promise<void> {
