@@ -61,7 +61,10 @@ input:focus { border-color:#4fc2f7; outline:none; }
 .opt { padding:7px 13px; border-radius:4px; font-size:13px; border:1px solid #2a313c;
        background:#161b23; color:#8a94a3; }
 .opt.on { background:#2e4361; color:#7fd0ff; border-color:#4fc2f7; font-weight:bold; }
-.opt.dim { opacity:.45; }
+/* Flattened 45%-opacity equivalents — a real opacity layer would rasterize
+   the label onto a transparent backdrop where LCD subpixel blending leaves
+   colored fringes. */
+.opt.dim { background:#161b23; color:#4a515d; border-color:#1f252e; }
 .hint { font-size:12px; color:#5d6775; margin:-4px 0 10px 156px; max-width:560px; line-height:1.45; }
 .hostsum { font-size:13px; color:#8a94a3; background:#161b23; border:1px solid #2a313c;
            border-radius:6px; padding:9px 12px; margin-bottom:14px; }
