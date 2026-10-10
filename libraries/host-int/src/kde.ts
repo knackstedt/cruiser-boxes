@@ -82,7 +82,14 @@ export async function kdeInstallEscapeShortcut(keys: string, action: EscapeActio
     const kc = (await which("kwriteconfig6")) ?? (await which("kwriteconfig5")) ?? (await which("kwriteconfig"));
     if (!kc) throw new Error("kwriteconfig not found");
     const kd = kdeKeys(keys);
-    const read = async () => (await run(kc, ["--file", "kglobalshortcutsrc", "--group", "kwin", "--key", shortcut], { noThrow: true })).stdout.trim();
+    // kwriteconfig5 can't read — its value arg is mandatory and it prints usage
+    // instead. Use kreadconfig when present (KF5); kwriteconfig6 reads fine.
+    const kr = (await which("kreadconfig6")) ?? (await which("kreadconfig5")) ?? (await which("kreadconfig")) ?? kc;
+    const read = async () => {
+        const r = await run(kr, ["--file", "kglobalshortcutsrc", "--group", "kwin", "--key", shortcut], { noThrow: true });
+        const v = r.stdout.trim();
+        return r.code === 0 && v && !v.startsWith("Usage:") && !v.includes("\n") ? v : "";
+    };
     const prev = await read();
     await run(kc, ["--file", "kglobalshortcutsrc", "--group", "kwin", "--key", shortcut, `${kd},${kd},${shortcut}`]);
     // kglobalaccel watches the file on Wayland; reconfigure nudges X11.

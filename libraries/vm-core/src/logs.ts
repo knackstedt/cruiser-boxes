@@ -2,9 +2,12 @@
 // logs.ts — VM log sources.
 //
 // Runner side: host files under <vm>/run/ —
-//   cruiser.log           lifecycle + provision journal (appendVmLog)
-//   qemu.log              QEMU -D diagnostics
-//   serial.log            guest serial console (attached on every boot)
+//   cruiser.log           lifecycle + provision journal (appendVmLog,
+//                         capped at 256 KiB then head-trimmed to 192 KiB)
+//   qemu.log              QEMU -D diagnostics (QEMU truncates each launch)
+//   serial.log            guest serial console (attached on every boot;
+//                         QEMU truncates each launch — a marathon boot with
+//                         a chatty console can still grow unbounded)
 //   install-serial.log    ISO autoinstall boot console
 //
 // Guest side: systemd journal read live. Transport is QGA guest-exec
@@ -14,7 +17,7 @@
 // ============================================================================
 
 import { statSync } from "node:fs";
-import { appendFile, mkdir, open } from "node:fs/promises";
+import { appendFile, mkdir, open, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { VmHandle } from "./lifecycle/vm";
 import type { VmPaths } from "./paths";
@@ -63,12 +66,33 @@ export async function tailFile(path: string, lines = 300, maxBytes = 512 * 1024)
     }
 }
 
+// cruiser.log is the only run/ file cruiser appends to — QEMU truncates
+// -serial file: and -D outputs at every launch, so those are bounded per
+// boot. The lifecycle journal must not grow forever either: once it passes
+// the cap the oldest bytes are dropped, keeping the newest LOG_KEEP_BYTES.
+const LOG_CAP_BYTES = 256 * 1024;
+const LOG_KEEP_BYTES = 192 * 1024;
+
 /** Append a timestamped line to <vm>/run/cruiser.log — the runner's own
  *  journal. Best-effort: logging must never break a lifecycle op. */
 export async function appendVmLog(paths: VmPaths, msg: string): Promise<void> {
     try {
         await mkdir(paths.run, { recursive: true });
-        await appendFile(join(paths.run, "cruiser.log"), `${new Date().toISOString()} ${msg}\n`);
+        const file = join(paths.run, "cruiser.log");
+        await appendFile(file, `${new Date().toISOString()} ${msg}\n`);
+        const { size } = await stat(file);
+        if (size <= LOG_CAP_BYTES) return;
+        const fh = await open(file, "r");
+        const buf = Buffer.alloc(LOG_KEEP_BYTES);
+        try {
+            await fh.read(buf, 0, LOG_KEEP_BYTES, size - LOG_KEEP_BYTES);
+        } finally {
+            await fh.close();
+        }
+        // drop the partial first line so the trimmed log starts mid-stream
+        const nl = buf.indexOf(0x0a);
+        const tail = nl >= 0 ? buf.subarray(nl + 1) : buf;
+        await writeFile(file, Buffer.concat([Buffer.from("… older log trimmed …\n"), tail]));
     } catch { /* run/ may not exist yet (pre-create) — drop the line */ }
 }
 

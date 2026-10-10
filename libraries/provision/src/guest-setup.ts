@@ -135,7 +135,7 @@ systemctl daemon-reload || true`;
 # debian/ubuntu keep custom.conf under /etc/gdm3, fedora under /etc/gdm.
 for GDMCONF in /etc/gdm3/custom.conf /etc/gdm/custom.conf; do
     [ -d "$(dirname "$GDMCONF")" ] || continue
-    grep -q AutomaticLoginEnable "$GDMCONF" 2>/dev/null || tee -a "$GDMCONF" <<'GDM'
+    grep -q "^AutomaticLoginEnable=" "$GDMCONF" 2>/dev/null || tee -a "$GDMCONF" <<'GDM'
 
 [daemon]
 AutomaticLoginEnable=true

@@ -79,6 +79,25 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 - `wmctrl -x` wmclass is "instance.class" (e.g. `xfreerdp.xfreerdp`) — match
   per-part, case-insensitive. freerdp titles are `cruiser:<vm>` (not
   "FreeRDP"), which is the pid-match fallback in `ViewerSession`.
+- KWin collapses multi-monitor fullscreen to the single containing monitor
+  when a window moves desktops — `x11MoveToDesktop` re-toggles fullscreen
+  (off/on, off-screen) whenever `_NET_WM_FULLSCREEN_MONITORS` is set so the
+  freerdp /multimon span is re-read. Likewise `x11SetFullscreen` is
+  ensure-only: a redundant add,fullscreen triggers the same collapse.
+- `vm start`/`vm view` auto-open the viewer and HOLD the process until it
+  closes (`--no-view` opts out) — `ViewerSession.exited()` exists because the
+  escape-shortcut uninstallers only run in-process; exiting after `open()`
+  orphans the kglobalshortcutsrc/gsettings edits.
+- QEMU slirp hostfwd completes the TCP handshake host-side even when nothing
+  is listening in the guest — `waitRdpPort` sends an X.224 negotiation probe
+  instead of a bare connect, or a cold boot launches freerdp into a dead
+  forward.
+- `kwriteconfig5` can't read (value arg is mandatory — it prints usage, which
+  then gets captured as the "previous" value and written back). Read via
+  `kreadconfig` first; `kwriteconfig6` reads fine.
+- gdm3 ships `# AutomaticLoginEnable = true` as a comment in custom.conf —
+  idempotency greps for appended config must anchor to `^Key=` or they
+  match the stock comment and never write.
 - DownDraft fixes go to `../downdraft-engine` and are committed there.
 - `downdraft.config.json` sets `"runtime": "node"` — the `draft dev` shell's
   Vite ModuleRunner is ~5× slower under Bun's node:vm (≈2.2s vs ≈11.8s to

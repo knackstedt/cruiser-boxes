@@ -18,7 +18,8 @@
 
 import { mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { VmRegistry, VmSpec, VmHandle, defaultSpec } from "../libraries/vm-core/src/index";
+import { VmRegistry, VmSpec, VmHandle, HeadMode, defaultSpec } from "../libraries/vm-core/src/index";
+import type { ViewerSession } from "../libraries/host-int/src/session";
 import { listUsbDevices } from "../libraries/vm-core/src/usb/usb";
 import { createDisk } from "../libraries/vm-core/src/disk/ops";
 import { resolveToolchain } from "../libraries/vm-core/src/qemu/resolve";
@@ -38,7 +39,8 @@ usage: cruiser <area> <command> [args]
                    [--distro ubuntu|debian|fedora] [--desktop gnome|kde]
                    [--browser none|firefox|chrome|chromium|vivaldi|brave]
                    [--snap] [--xfonts] [--devtools toolchain,python,rust,…]
-  vm start <name> [--mode <headmode>]   vm stop <name>    vm kill <name>
+  vm start <name> [--mode <headmode>] [--no-view]         (auto-opens the viewer like the UI)
+  vm stop <name>                        vm kill <name>
   vm status <name>                      vm args <name>   (print QEMU argv)
   vm snapshots <name>                   vm snapshot <name> <snapname>
   vm restore <name> <snapname>          vm snapshot-rm <name> <snapname>
@@ -78,6 +80,18 @@ function prevIsFlag(a: string): boolean {
 
 const registry = new VmRegistry();
 await registry.scan();
+
+/** Hold the process until the viewer exits so in-process cleanup (escape
+ *  shortcut uninstallers) actually runs — exiting right after open() would
+ *  orphan the kglobalshortcutsrc/gsettings edits. ctrl+c closes the viewer. */
+async function holdViewer(s: ViewerSession): Promise<void> {
+    const onSig = () => { void s.close(); };
+    process.on("SIGINT", onSig);
+    process.on("SIGTERM", onSig);
+    await s.exited();
+    process.off("SIGINT", onSig);
+    process.off("SIGTERM", onSig);
+}
 
 async function needVm(name?: string): Promise<VmHandle> {
     if (!name) { console.error("missing vm name"); usage(); }
@@ -137,8 +151,27 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
                 console.log(`creating disk ${h.diskPath()} (${h.spec.disk.sizeGiB}G sparse)`);
                 await createDisk((await resolveToolchain()).qemuImg, h.diskPath(), h.spec.disk.sizeGiB);
             }
+            const mode = flagVal("--mode");
+            if (mode) {
+                const m = HeadMode.safeParse(mode);
+                if (!m.success) { console.error(`bad --mode '${mode}' — expected ${HeadMode.options.join("|")}`); process.exit(2); }
+                h.spec.display.headMode = m.data;
+            }
             await h.start();
             console.log(`${h.spec.name} started (pid ${h.pid()})`);
+            // Match the UI's Start button: poll for guest login, then launch the
+            // viewer and place its window per headMode. headMode "app" has no
+            // freerdp viewer (waypipe is explicit).
+            if (!has("--no-view") && h.spec.display.headMode !== "app") {
+                const { ViewerSession } = await import("../libraries/host-int/src/session");
+                const s = new ViewerSession(h.spec, { rdpWaitMs: 180_000 });
+                console.log(`waiting for ${h.spec.name} guest login (rdp :${h.spec.network.rdpPort ?? "–"})…`);
+                try {
+                    await s.open();
+                    console.log("viewer opened — close the window or ctrl+c to end the session");
+                    await holdViewer(s);
+                } catch (e) { console.error(`viewer: ${e instanceof Error ? e.message : e}`); }
+            }
             break;
         }
         case "stop": { const h = await needVm(args[0]); const out = await h.stop(); console.log(out === "stopped" ? "stopped" : "still running — guest ignored shutdown; use kill"); break; }
@@ -199,7 +232,8 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const s = new ViewerSession(h.spec);
             console.log(`adapter: ${s.adapter.id}`);
             await s.open();
-            console.log("viewer launched");
+            console.log("viewer launched — close the window or ctrl+c to end the session");
+            await holdViewer(s);
             break;
         }
         default: usage();

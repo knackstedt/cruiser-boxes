@@ -55,6 +55,7 @@ if (process.env.CRUISER_ROUTE) {
         store.getState().setRoute(r, r === "vm" || r === "logs" ? vmName : null);
         if (r === "logs") {
             if (process.env.CRUISER_LOG_SOURCE === "journal") store.getState().setLogs({ source: "journal" });
+            if (process.env.CRUISER_LOG_FILE) store.getState().setLogs({ file: process.env.CRUISER_LOG_FILE });
             void svc.refreshLogs();
             void svc.loadLogUnits();
             // first fetch races service init — retry once so the shot has text
@@ -62,6 +63,17 @@ if (process.env.CRUISER_ROUTE) {
         }
     }, 1500);
     if (r === "settings") setTimeout(() => svc.runDoctor(), 1600);
+    if (r === "create" && process.env.CRUISER_FAKE_BUSY) {
+        // Repro for the stale-scroll blank pane: pin .content's scrollport
+        // to the bottom (the Create button lives there), then flip busy
+        // like createVm does — the form→spinner swap must still paint.
+        const panel = () => (shell as unknown as { panel?: { scrollTo(t: string, x: number, y: number): void } }).panel;
+        setTimeout(() => panel()?.scrollTo(".content", 0, 1e9), 2200);
+        setTimeout(() => {
+            store.getState().setBusy(true);
+            store.getState().setStatus("create test-1: downloading image…");
+        }, Number(process.env.CRUISER_FAKE_BUSY) * 1000 || 3600);
+    }
 }
 
 // ── Input routing (surface = pointer/wheel, window = keys) ──

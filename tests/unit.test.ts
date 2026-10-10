@@ -3,7 +3,7 @@ import { createServer, type Socket } from "node:net";
 import { rm, writeFile } from "node:fs/promises";
 import { defaultSpec, parseVmSpec } from "../libraries/vm-core/src/config/schema";
 import { diskPath, VMS_DIR, vmPaths } from "../libraries/vm-core/src/paths";
-import { journalArgs, tailFile, runnerLogFiles } from "../libraries/vm-core/src/logs";
+import { appendVmLog, journalArgs, tailFile, runnerLogFiles } from "../libraries/vm-core/src/logs";
 import { join } from "node:path";
 import { JsonSocket } from "../libraries/vm-core/src/qmp/socket-json";
 import { guestLayoutFromHost } from "../libraries/provision/src/monitors";
@@ -327,6 +327,29 @@ describe("logs", () => {
         const files = runnerLogFiles(vmPaths("cruiser-test-no-such-vm"));
         expect(files.map((f) => f.id)).toEqual(["cruiser", "qemu", "serial", "install-serial"]);
         expect(files.every((f) => !f.exists)).toBe(true);
+    });
+    test("appendVmLog trims cruiser.log once it passes the cap", async () => {
+        const dir = `/var/tmp/cruiser-test-vmlog-${process.pid}`;
+        const runDir = join(dir, "run");
+        const file = join(runDir, "cruiser.log");
+        try {
+            // ~300 KiB of numbered lines, well past the 256 KiB cap
+            const lines = Array.from({ length: 6000 }, (_, i) => `old line ${i} ${"y".repeat(40)}`);
+            const { mkdir } = await import("node:fs/promises");
+            await mkdir(runDir, { recursive: true });
+            await writeFile(file, lines.join("\n") + "\n");
+            await appendVmLog({ run: runDir } as ReturnType<typeof vmPaths>, "latest event");
+            const { stat, readFile } = await import("node:fs/promises");
+            const { size } = await stat(file);
+            expect(size).toBeLessThan(256 * 1024);
+            const text = (await readFile(file, "utf-8"));
+            expect(text.startsWith("… older log trimmed …\n")).toBe(true);
+            expect(text.trimEnd().endsWith("latest event")).toBe(true);
+            expect(text).not.toContain("old line 0 ");
+            expect(text).toContain("old line 5999 ");
+        } finally {
+            await rm(dir, { recursive: true, force: true });
+        }
     });
 });
 

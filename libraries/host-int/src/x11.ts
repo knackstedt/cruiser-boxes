@@ -64,9 +64,24 @@ export async function x11FindWindow(m: WindowMatcher, timeoutMs = 15_000): Promi
 export async function x11MoveToDesktop(w: WindowHandle, desktop: number | "all"): Promise<void> {
     const target = desktop === "all" ? "-1" : String(desktop - 1);
     await run("wmctrl", ["-i", "-r", w.id, "-t", target], { noThrow: true });
+    // KWin re-resolves fullscreen geometry on a desktop move and collapses a
+    // multi-monitor fullscreen to the single containing monitor. The window's
+    // _NET_WM_FULLSCREEN_MONITORS hint survives — toggling fullscreen off/on
+    // on the (invisible) target desktop makes KWin re-read it and re-span.
+    const fsm = await run("xprop", ["-id", w.id, "_NET_WM_FULLSCREEN_MONITORS"], { noThrow: true });
+    if (fsm.stdout.includes("=")) {
+        await run("wmctrl", ["-i", "-r", w.id, "-b", "remove,fullscreen"], { noThrow: true });
+        await new Promise((r) => setTimeout(r, 150));
+        await run("wmctrl", ["-i", "-r", w.id, "-b", "add,fullscreen"], { noThrow: true });
+    }
 }
 
 export async function x11SetFullscreen(w: WindowHandle, on: boolean): Promise<void> {
+    // Ensure-semantics: a redundant add,fullscreen makes KWin re-resolve the
+    // request without _NET_WM_FULLSCREEN_MONITORS, collapsing freerdp's
+    // /multimon span onto the single monitor under the window.
+    const cur = await run("xprop", ["-id", w.id, "_NET_WM_STATE"], { noThrow: true });
+    if (cur.stdout.includes("_NET_WM_STATE_FULLSCREEN") === on) return;
     await run("wmctrl", ["-i", "-r", w.id, "-b", `${on ? "add" : "remove"},fullscreen`], { noThrow: true });
 }
 

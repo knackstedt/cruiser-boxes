@@ -13,15 +13,25 @@ export interface ViewerLaunch {
     argv: string[];
 }
 
-/** Wait for the guest's forwarded RDP port to accept connections. */
+/** Wait for the guest's forwarded RDP port to answer an X.224 negotiation.
+ *  A bare connect is useless here — slirp hostfwd completes the handshake
+ *  host-side even when nothing is listening inside the guest, so a cold boot
+ *  would launch freerdp into a dead forward. */
 export async function waitRdpPort(port: number, timeoutMs = 90_000): Promise<boolean> {
+    // TPKT + X.224 CR TPDU (dst-ref, src-ref, class 0) + RDP_NEG_REQ
+    // (type 1, len 8, no protocols) — 19 bytes.
+    const probe = Buffer.from("030000130ee000000000000100080000000000", "hex");
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
         const ok = await new Promise<boolean>((res) => {
+            let settled = false;
+            const done = (v: boolean) => { if (!settled) { settled = true; s.destroy(); res(v); } };
             const s = createConnection({ host: "127.0.0.1", port });
-            s.once("connect", () => { s.destroy(); res(true); });
-            s.once("error", () => res(false));
-            s.setTimeout(1500, () => { s.destroy(); res(false); });
+            s.once("connect", () => s.write(probe));
+            s.once("data", () => done(true));   // any TPKT response = real RDP server
+            s.once("error", () => done(false));
+            s.once("close", () => done(false)); // slirp closes when guest refuses
+            s.setTimeout(1500, () => done(false));
         });
         if (ok) return true;
         await new Promise((r) => setTimeout(r, 1000));

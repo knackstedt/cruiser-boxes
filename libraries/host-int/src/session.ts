@@ -9,6 +9,7 @@ import type { VmSpec } from "../../vm-core/src/config/schema";
 import type { EscapeActionSpec, WindowHandle, WmAdapter } from "./types";
 import { detectAdapter } from "./detect";
 import { launchFreerdp, waitRdpPort } from "./freerdp";
+import { run } from "../../sys/src/exec";
 
 export interface ViewerSessionOpts {
     adapter?: WmAdapter;
@@ -23,6 +24,7 @@ export class ViewerSession extends EventEmitter {
     private child: ChildProcess | null = null;
     private window: WindowHandle | null = null;
     private uninstallers: (() => Promise<void>)[] = [];
+    private cleanupDone: Promise<void> = Promise.resolve();
 
     constructor(spec: VmSpec, opts: ViewerSessionOpts = {}) {
         super();
@@ -38,9 +40,16 @@ export class ViewerSession extends EventEmitter {
         if (!await waitRdpPort(rdpPort, this.opts.rdpWaitMs))
             throw new Error(`no RDP listener on 127.0.0.1:${rdpPort} — is '${this.spec.name}' running and logged in?`);
 
+        // Reap stale viewers for this VM — an orphaned freerdp (dead UI
+        // session, closed cli) would otherwise stay stacked on the target
+        // desktop and race our findWindow's title fallback.
+        const stale = await run("pgrep", ["-f", `xfreerdp.*cruiser:${this.spec.name}`], { noThrow: true });
+        for (const p of stale.stdout.trim().split("\n").filter(Boolean))
+            try { process.kill(Number(p), "SIGTERM"); } catch { /* already gone */ }
+
         const { child } = await launchFreerdp(this.spec, { rdpPort });
         this.child = child;
-        child.on("exit", (c) => { this.child = null; this.emit("closed", c); this.cleanup(); });
+        child.on("exit", (c) => { this.child = null; this.emit("closed", c); this.cleanupDone = this.cleanup(); });
 
         const d = this.spec.display;
 
@@ -98,7 +107,16 @@ export class ViewerSession extends EventEmitter {
 
     async close(): Promise<void> {
         this.child?.kill("SIGTERM");
-        await this.cleanup();
+        await (this.cleanupDone = this.cleanup());
+    }
+
+    /** Resolves once the viewer process has exited AND escape shortcuts were
+     *  uninstalled. A caller that exits early (e.g. a one-shot CLI) leaves the
+     *  kglobalshortcutsrc/gsettings edits orphaned — hold the process open on
+     *  this instead of returning after open(). */
+    async exited(): Promise<void> {
+        if (this.child) await new Promise<void>((r) => this.once("closed", () => r()));
+        await this.cleanupDone;
     }
 
     private async cleanup(): Promise<void> {

@@ -22,6 +22,10 @@ const BOOL_FIELDS: Set<string> = new Set(["snap", "extraFonts"]);
 
 const SPIN = ["◐", "◓", "◑", "◒"];
 
+/** The busy overlay that replaces the create form — identified by its root
+ *  element since RouteParts carries markup, not flags. */
+const isSpinwrap = (html: string) => html.startsWith('<div class="spinwrap"');
+
 export class CruiserShell {
     private host: HtmlUiHost;
     private panel: UiPanelHandle | null = null;
@@ -307,7 +311,17 @@ export class CruiserShell {
         } else {
             const prev = this.lastParts!;
             if (parts.topbar !== prev.topbar) p.setInnerHtml(".topbar", parts.topbar);
-            if (parts.content !== prev.content) p.setInnerHtml(".content", parts.content);
+            if (parts.content !== prev.content) {
+                p.setInnerHtml(".content", parts.content);
+                // The scrollport node survives the patch with its scroll
+                // offset, and nothing re-clamps it when the content shrinks
+                // — the Create button sits at the bottom of a long form, so
+                // the form→spinner swap leaves a near-max offset pointing
+                // past the end of the 540px .spinwrap and the pane paints
+                // empty. A spinner↔content swap resets to the top.
+                if (isSpinwrap(prev.content) !== isSpinwrap(parts.content))
+                    p.scrollTo(".content", 0, 0);
+            }
             // .logpre is a sibling of .content patched through its own
             // region — the scrollport node (and its scroll offset) survives,
             // so refreshes don't reset or blank the pane. Re-pin to the
