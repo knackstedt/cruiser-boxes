@@ -21,7 +21,13 @@ export class RenderGate {
         if (this.editing) { this.deferred = true; return; }
         this.deferred = false;
         this.last = html;
-        this.apply(html);
+        try {
+            this.apply(html);
+        } catch (e) {
+            // Apply failed — reset so the next push isn't deduped away.
+            this.last = "";
+            throw e;
+        }
     }
 
     focus(tag?: string): void {

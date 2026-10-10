@@ -97,7 +97,9 @@ export class CruiserShell {
         // overlay) — direct setText so it doesn't trip the RenderGate.
         this.spinTimer = setInterval(() => {
             if (!this.store.getState().busy) return;
-            this.panel?.setText("[data-spin]", SPIN[this.spinIdx++ % SPIN.length]!);
+            // same teardown-race guard as pushRender — a dead panel's
+            // setText must not kill the interval's process either
+            try { this.panel?.setText("[data-spin]", SPIN[this.spinIdx++ % SPIN.length]!); } catch { /* panel gone */ }
         }, 140);
         log.info("shell", "mounted");
     }
@@ -259,8 +261,16 @@ export class CruiserShell {
     /** Render fresh parts once and push the full doc through the gate —
      *  applyHtml then diffs the parts against what's mounted. */
     private pushRender(): void {
-        this.pendingParts = renderRouteParts(this.store.getState());
-        this.gate.render(this.pendingParts.html);
+        // A render exception must not escape — this runs in a microtask off
+        // the store subscription, so an uncaught throw kills the process.
+        // Stale/mixed module frames during an HMR session restart are the
+        // known trigger; the next store change re-pushes either way.
+        try {
+            this.pendingParts = renderRouteParts(this.store.getState());
+            this.gate.render(this.pendingParts.html);
+        } catch (e) {
+            log.error("shell", `render failed: ${e instanceof Error ? e.stack ?? e.message : e}`);
+        }
     }
 
     /**
