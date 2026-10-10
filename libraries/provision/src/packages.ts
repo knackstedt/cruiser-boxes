@@ -22,6 +22,7 @@ export interface GuestProfile {
     browser: GuestBrowser;
     snap: boolean;
     extraFonts: boolean;
+    autologin: boolean;
     devtools: DevTool[];
     extraPackages: string[];
 }
@@ -30,7 +31,8 @@ export function profileFromSpec(spec: VmSpec): GuestProfile {
     const o = spec.os;
     return {
         family: o.family, desktop: o.desktop, browser: o.browser,
-        snap: o.snap, extraFonts: o.extraFonts, devtools: [...o.devtools],
+        snap: o.snap, extraFonts: o.extraFonts, autologin: o.autologin,
+        devtools: [...o.devtools],
         extraPackages: [...o.extraPackages],
     };
 }

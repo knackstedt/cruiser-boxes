@@ -18,7 +18,7 @@ import { mark } from "./startup-profile";
 const log = createLogger("info");
 
 const NUM_FIELDS: Set<string> = new Set(["cpus", "memMiB", "diskGiB"]);
-const BOOL_FIELDS: Set<string> = new Set(["snap", "extraFonts"]);
+const BOOL_FIELDS: Set<string> = new Set(["snap", "extraFonts", "autologin"]);
 
 const SPIN = ["◐", "◓", "◑", "◒"];
 

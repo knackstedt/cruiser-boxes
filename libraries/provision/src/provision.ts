@@ -11,6 +11,8 @@ import { guestLayoutFromHost } from "./monitors";
 import { provisionCloudimg } from "./cloudimg";
 import { ensureIso, runIsoInstall } from "./iso-install";
 import { waitForAgent, runGuestSetup } from "./guest-setup";
+import { themeSyncEnabled, type ColorScheme } from "./theme";
+import { hostColorScheme } from "../../host-int/src/appearance";
 import { writePasswordFile } from "./nocloud";
 import { randomBytes } from "node:crypto";
 
@@ -23,6 +25,8 @@ export interface ProvisionOpts {
     sshKeys?: string[];
     /** generate guest monitors.xml from live host probe (default true). */
     mirrorHostMonitors?: boolean;
+    /** bake the host's dark/light hint into the guest (default true). */
+    syncHostTheme?: boolean;
     onLog?: (msg: string) => void;
 }
 
@@ -51,6 +55,11 @@ async function monitorsXml(spec: VmSpec, o: ProvisionOpts): Promise<string | und
     return host.length ? guestLayoutFromHost(spec.name, host).xml : undefined;
 }
 
+async function hostTheme(o: ProvisionOpts): Promise<ColorScheme | undefined> {
+    if (o.syncHostTheme === false || !themeSyncEnabled()) return undefined;
+    return (await hostColorScheme()) ?? undefined;
+}
+
 /** Cloud image path: fetch img → overlay disk → seed → boot → agent → setup. */
 export async function provisionVmCloudimg(h: VmHandle, o: ProvisionOpts): Promise<void> {
     const spec = h.spec;
@@ -73,7 +82,7 @@ export async function provisionVmCloudimg(h: VmHandle, o: ProvisionOpts): Promis
 
     log(h, o, "running guest setup (rdp, autologin, monitors)…");
     const xml = await monitorsXml(spec, o);
-    await runGuestSetup(h, { rdpPassword: pw, monitorsXml: xml, timeoutMs: 20 * 60_000 });
+    await runGuestSetup(h, { rdpPassword: pw, monitorsXml: xml, colorScheme: await hostTheme(o), timeoutMs: 20 * 60_000 });
 
     spec.provisioned.completedAt = new Date().toISOString();
     await h.saveSpec();
@@ -101,7 +110,7 @@ export async function provisionVmIso(h: VmHandle, o: ProvisionOpts): Promise<voi
 
     log(h, o, "running guest setup…");
     const xml = await monitorsXml(spec, o);
-    await runGuestSetup(h, { rdpPassword: pw, monitorsXml: xml });
+    await runGuestSetup(h, { rdpPassword: pw, monitorsXml: xml, colorScheme: await hostTheme(o) });
 
     spec.provisioned.completedAt = new Date().toISOString();
     await h.saveSpec();
@@ -117,6 +126,6 @@ export async function reprovisionGuest(h: VmHandle, o: ProvisionOpts): Promise<v
     const { rdpPassword } = await import("../../host-int/src/freerdp");
     const password = pw || (await rdpPassword(h.spec))!;
     const xml = await monitorsXml(h.spec, o);
-    await runGuestSetup(h, { rdpPassword: password, monitorsXml: xml });
+    await runGuestSetup(h, { rdpPassword: password, monitorsXml: xml, colorScheme: await hostTheme(o) });
     log(h, o, "guest setup re-applied");
 }

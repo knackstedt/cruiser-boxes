@@ -135,6 +135,9 @@ export const VmSpec = z.object({
         snap: z.boolean().default(false),
         /** extended font sets (CJK + MS core fonts) beyond the base bundle. */
         extraFonts: z.boolean().default(false),
+        /** DM autologin into the desktop session at boot. KDE: effectively
+         *  required for RDP — krdpserver is a user-session service. */
+        autologin: z.boolean().default(true),
         /** developer tooling groups (the "Developer" preset) — installed at
          *  guest-setup; retrofits running VMs on re-provision. */
         devtools: z.array(DevTool).default([]),

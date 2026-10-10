@@ -3,14 +3,15 @@
 // the script re-detects the real distro from /etc/os-release (an imported
 // disk's spec.os.family may be wrong) and picks the matching package list
 // from packages.ts. GNOME → gdm + gnome-remote-desktop system daemon;
-// KDE → sddm autologin + krdpserver (user-session service under
-// plasma-workspace.target). Port of devvm's guest-setup.sh.
+// KDE → sddm (autologin per spec.os.autologin) + krdpserver (user-session
+// service under plasma-workspace.target). Port of devvm's guest-setup.sh.
 // ============================================================================
 
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { guestAgentContext } from "../../vm-core/src/logs";
 import { profileFromSpec, resolvePackages, resolveFlatpaks } from "./packages";
+import { guestThemeScript, type ColorScheme } from "./theme";
 
 /**
  * Wait until the QEMU guest agent answers (guest booted + agent installed).
@@ -36,7 +37,7 @@ export async function waitForAgent(h: VmHandle, timeoutMs = 5 * 60_000): Promise
 const sq = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
 
 /** The guest setup script — run via `qga sh` (one bash -c per section batch). */
-export function guestSetupScript(spec: VmSpec, o: { rdpPassword: string; monitorsXmlB64?: string }): string {
+export function guestSetupScript(spec: VmSpec, o: { rdpPassword: string; monitorsXmlB64?: string; colorScheme?: ColorScheme }): string {
     const u = spec.credentials.username;
     const p = profileFromSpec(spec);
     // Resolve all three families — the script picks by live /etc/os-release
@@ -135,17 +136,23 @@ systemctl daemon-reload || true`;
 # debian/ubuntu keep custom.conf under /etc/gdm3, fedora under /etc/gdm.
 for GDMCONF in /etc/gdm3/custom.conf /etc/gdm/custom.conf; do
     [ -d "$(dirname "$GDMCONF")" ] || continue
-    grep -q "^AutomaticLoginEnable=" "$GDMCONF" 2>/dev/null || tee -a "$GDMCONF" <<'GDM'
+${p.autologin ? `    # drop prior autologin keys (ours or hand-set) then append our block —
+    # idempotent and able to flip a previous disable back on. The stock
+    # "# AutomaticLoginEnable = true" comment doesn't match the ^ anchors.
+    [ -f "$GDMCONF" ] && sed -i -e '/^AutomaticLoginEnable=/d' -e '/^AutomaticLogin=/d' "$GDMCONF"
+    tee -a "$GDMCONF" <<'GDM'
 
 [daemon]
 AutomaticLoginEnable=true
 AutomaticLogin=${u}
-GDM
+GDM` : `    # autologin off — flip a previous enable back off (re-provision retrofits).
+    [ -f "$GDMCONF" ] && sed -i -e 's/^AutomaticLoginEnable=.*/AutomaticLoginEnable=false/' \\
+        -e '/^AutomaticLogin=/d' "$GDMCONF"`}
 done
-systemctl enable gdm.service 2>/dev/null || systemctl enable gdm3.service 2>/dev/null || true` : `# SDDM autologin — krdpserver is a user-session service, so an RDP session
-# needs the autologged-in Plasma session up first.
+systemctl enable gdm.service 2>/dev/null || systemctl enable gdm3.service 2>/dev/null || true` : `# SDDM — krdpserver is a user-session service, so an RDP session needs a
+# logged-in Plasma session up first (autologin provides it).
 mkdir -p /etc/sddm.conf.d
-SESS=plasma
+${p.autologin ? `SESS=plasma
 [ -f /usr/share/wayland-sessions/plasmawayland.desktop ] && SESS=plasmawayland
 kwriteconfig6 --file /etc/sddm.conf.d/cruiser.conf --group Autologin --key User "$U" 2>/dev/null || {
     cat > /etc/sddm.conf.d/cruiser.conf <<SDDM
@@ -156,7 +163,8 @@ Session=$SESS
 SDDM
 }
 kwriteconfig6 --file /etc/sddm.conf.d/cruiser.conf --group Autologin --key Relogin true 2>/dev/null || true
-kwriteconfig6 --file /etc/sddm.conf.d/cruiser.conf --group Autologin --key Session "$SESS" 2>/dev/null || true
+kwriteconfig6 --file /etc/sddm.conf.d/cruiser.conf --group Autologin --key Session "$SESS" 2>/dev/null || true` : `# autologin off — drop the config a previous provision wrote.
+rm -f /etc/sddm.conf.d/cruiser.conf`}
 systemctl enable sddm.service 2>/dev/null || true`;
 
     const rdpSection = gnome ? `# gnome-remote-desktop system (headless) daemon — the multi-monitor path
@@ -183,7 +191,7 @@ grdctl --system rdp enable
 # The RDP listener only binds once a seat exists — make sure the DM is up
 # first (skipped on live reattach), then bounce the daemon while polling:
 # older GRD builds never retry the bind after a no-seat start.
-ss -tln | grep -q ':3389' || systemctl restart gdm 2>/dev/null || systemctl restart gdm3 2>/dev/null || true
+ss -tln | grep -q ':3389' || systemctl ${p.autologin ? "restart" : "start"} gdm 2>/dev/null || systemctl ${p.autologin ? "restart" : "start"} gdm3 2>/dev/null || true
 systemctl restart gnome-remote-desktop.service || true
 rdpok=; i=0
 while [ $i -lt 60 ]; do
@@ -221,15 +229,18 @@ KUSR kwriteconfig6 --file krdpserverrc --group General --key Autostart true
 systemctl --global enable app-org.kde.krdpserver.service 2>/dev/null || \\
     systemctl --global enable plasma-krdp_server.service 2>/dev/null || true
 # boot the autologged-in Plasma session — krdpserver starts with it.
-# (skipped if :3389 is already serving — don't kill a live reattach session)
-ss -tln | grep -q ':3389' || systemctl restart ${dm} || true
+# (skipped if :3389 is already serving — don't kill a live reattach session;
+# with autologin off use start — restart would kill a live console session)
+ss -tln | grep -q ':3389' || systemctl ${p.autologin ? "restart" : "start"} ${dm} || true
 rdpok=; i=0
-while [ $i -lt 90 ]; do
+while [ $i -lt ${p.autologin ? 90 : 5} ]; do
     if ss -tln | grep -q ':3389'; then rdpok=1; break; fi
     i=$((i+1)); sleep 2
 done
 KUSR flatpak permission-set kde-authorized remote-desktop org.kde.krdpserver yes 2>/dev/null || true
-if [ -z "$rdpok" ]; then echo "krdpserver is not listening on 3389 (needs a running Plasma session)"; exit 1; fi`;
+${p.autologin
+    ? `if [ -z "$rdpok" ]; then echo "krdpserver is not listening on 3389 (needs a running Plasma session)"; exit 1; fi`
+    : `if [ -z "$rdpok" ]; then echo "krdpserver not listening yet — autologin is off, so it binds once a user logs into the console session"; fi`}`;
 
     const lockSection = gnome ? `# no lock/suspend inside the VM (user session bus may not exist pre-login)
 runuser -u "$U" -- env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/"$UUID"/bus \\
@@ -279,6 +290,8 @@ ${lockSection}
 ${appSection}
 
 ${!gnome || !o.monitorsXmlB64 ? "" : `mkdir -p "$UHOME/.config" && echo '${o.monitorsXmlB64}' | base64 -d > "$UHOME/.config/monitors.xml" && chown -R "$U":"$U" "$UHOME/.config"`}
+
+${o.colorScheme ? guestThemeScript(spec, o.colorScheme) : ""}
 echo CRUISER_GUEST_SETUP_OK
 `;
 }
@@ -322,13 +335,13 @@ async function runGuestSetupSsh(
 /** Run guest setup inside the VM; throws unless the OK marker comes back. */
 export async function runGuestSetup(
     h: VmHandle,
-    o: { rdpPassword: string; monitorsXml?: string; timeoutMs?: number },
+    o: { rdpPassword: string; monitorsXml?: string; colorScheme?: ColorScheme; timeoutMs?: number },
 ): Promise<void> {
     const timeoutMs = o.timeoutMs ?? 10 * 60_000;
     const monitorsXmlB64 = o.monitorsXml ? Buffer.from(o.monitorsXml).toString("base64") : undefined;
     const { authorizeInGuest } = await import("../../vm-core/src/sshkey");
     await authorizeInGuest(h).catch(() => {}); // confined agents can't write files — ssh seeds still work
-    const script = guestSetupScript(h.spec, { rdpPassword: o.rdpPassword, monitorsXmlB64 });
+    const script = guestSetupScript(h.spec, { rdpPassword: o.rdpPassword, monitorsXmlB64, colorScheme: o.colorScheme });
     const res = await guestAgentContext(h)
         ? await runGuestSetupSsh(h, script, timeoutMs)
         : await h.guestSh(script, timeoutMs);

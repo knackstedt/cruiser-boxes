@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import { mark } from "./startup-profile";
 import { VmMetricsSampler } from "./metrics";
-import type { DoctorRow, HostInfo, Store, VmSummary } from "./store";
+import type { ActionState, DoctorRow, HostInfo, Store, VmSummary } from "./store";
 
 export class CruiserService {
     /** Doc-backend label shown in settings — the shell knows the real kind. */
@@ -401,6 +401,7 @@ export class CruiserService {
             spec.os.browser = f.browser as VmSpec["os"]["browser"];
             spec.os.snap = f.snap;
             spec.os.extraFonts = f.extraFonts;
+            spec.os.autologin = f.autologin;
             // filter through the enum — a stray chip id shouldn't sink create
             spec.os.devtools = f.devtools.filter((d) => DevTool.safeParse(d).success) as VmSpec["os"]["devtools"];
             if (spec.os.desktop === "kde" && f.method === "cloudimg") {
@@ -557,7 +558,10 @@ export class CruiserService {
                 await s.open();
                 if (this.viewers.has(name)) { await s.close(); return; }
                 this.viewers.set(name, s);
-                s.on("closed", () => this.viewers.delete(name));
+                const { ThemeSync } = await import("../../provision/src/theme");
+                const theme = new ThemeSync(h, (m) => this.store.getState().setStatus(`${name}: ${m}`));
+                theme.start();
+                s.on("closed", () => { this.viewers.delete(name); theme.dispose(); });
             } finally {
                 this.viewerPending.delete(name);
             }
@@ -566,16 +570,27 @@ export class CruiserService {
         return p;
     }
 
-    /** Background viewer open after start — status line only, never blocks. */
+    /** Background viewer open after start/view — no busy lock (the RDP wait
+     *  can take tens of seconds), but the VM's button cluster shows the live
+     *  action glyph until the window lands or the open fails. */
     private async autoView(h: VmHandle): Promise<void> {
         const name = h.spec.name;
         const st = this.store.getState();
         st.setStatus(`waiting for ${name} guest login (rdp :${h.spec.network.rdpPort ?? "–"})…`);
+        // Only claim the indicator when it's free or already ours — don't
+        // stomp another in-flight action, and don't clear one either.
+        let ours: ActionState | null = null;
+        if (!st.action || st.action.vm === name) {
+            ours = { vm: name, verb: "opening viewer", at: Date.now() };
+            st.setAction(ours);
+        }
         try {
             await this.ensureViewer(h);
             if (this.viewers.has(name)) st.setStatus(`${name} viewer opened`);
         } catch (e) {
             st.setStatus(`viewer for ${name}: ${e instanceof Error ? e.message : e}`);
+        } finally {
+            if (ours && this.store.getState().action === ours) st.setAction(null);
         }
     }
 

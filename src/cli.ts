@@ -38,7 +38,7 @@ usage: cruiser <area> <command> [args]
                    [--share PATH[:tag]] [--persist daemonize|owned]
                    [--distro ubuntu|debian|fedora] [--desktop gnome|kde]
                    [--browser none|firefox|chrome|chromium|vivaldi|brave]
-                   [--snap] [--xfonts] [--devtools toolchain,python,rust,…]
+                   [--snap] [--xfonts] [--no-autologin] [--devtools toolchain,python,rust,…]
   vm start <name> [--mode <headmode>] [--no-view]         (auto-opens the viewer like the UI)
   vm stop <name>                        vm kill <name>
   vm status <name>                      vm args <name>   (print QEMU argv)
@@ -93,6 +93,17 @@ async function holdViewer(s: ViewerSession): Promise<void> {
     process.off("SIGTERM", onSig);
 }
 
+/** Mirror the host dark/light hint into the guest for the viewer session's
+ *  lifetime — fire-and-forget so a missing dbus-monitor/agent can't fail
+ *  the viewer open. Dies with the session via the "closed" hook. */
+function startThemeSync(h: VmHandle, s: ViewerSession): void {
+    void import("../libraries/provision/src/theme").then(({ ThemeSync }) => {
+        const t = new ThemeSync(h, (m) => console.log(m));
+        t.start();
+        s.on("closed", () => t.dispose());
+    }).catch(() => {});
+}
+
 async function needVm(name?: string): Promise<VmHandle> {
     if (!name) { console.error("missing vm name"); usage(); }
     const h = registry.get(name);
@@ -127,6 +138,7 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const browser = flagVal("--browser"); if (browser) spec.os.browser = browser as VmSpec["os"]["browser"];
             if (has("--snap")) spec.os.snap = true;
             if (has("--xfonts")) spec.os.extraFonts = true;
+            if (has("--no-autologin")) spec.os.autologin = false;
             const devtools = flagVal("--devtools");
             if (devtools) spec.os.devtools = devtools.split(",").map((s) => s.trim()).filter(Boolean) as VmSpec["os"]["devtools"];
             for (let i = 0; i < argv.length; i++) {
@@ -168,6 +180,7 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
                 console.log(`waiting for ${h.spec.name} guest login (rdp :${h.spec.network.rdpPort ?? "–"})…`);
                 try {
                     await s.open();
+                    startThemeSync(h, s);
                     console.log("viewer opened — close the window or ctrl+c to end the session");
                     await holdViewer(s);
                 } catch (e) { console.error(`viewer: ${e instanceof Error ? e.message : e}`); }
@@ -232,6 +245,7 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const s = new ViewerSession(h.spec);
             console.log(`adapter: ${s.adapter.id}`);
             await s.open();
+            startThemeSync(h, s);
             console.log("viewer launched — close the window or ctrl+c to end the session");
             await holdViewer(s);
             break;

@@ -9,6 +9,7 @@ import { JsonSocket } from "../libraries/vm-core/src/qmp/socket-json";
 import { guestLayoutFromHost } from "../libraries/provision/src/monitors";
 import { profileFromSpec, resolvePackages, resolveFlatpaks, DEVTOOLS } from "../libraries/provision/src/packages";
 import { guestSetupScript } from "../libraries/provision/src/guest-setup";
+import { guestThemeScript } from "../libraries/provision/src/theme";
 import { pickImageFromIndex, supportsKrdp, defaultRelease } from "../libraries/provision/src/distros";
 import { freerdpArgs } from "../libraries/host-int/src/freerdp";
 import { parseEscapeAction } from "../libraries/host-int/src/session";
@@ -48,6 +49,7 @@ describe("VmSpec", () => {
         expect(s.os.desktop).toBe("gnome");
         expect(s.os.browser).toBe("none");
         expect(s.os.snap).toBe(false);
+        expect(s.os.autologin).toBe(true);
         expect(parseVmSpec({ name: "ok", os: { desktop: "kde", snap: true } }).os.desktop).toBe("kde");
     });
 });
@@ -56,7 +58,7 @@ describe("VmSpec", () => {
 
 describe("packages", () => {
     const p = (o: Partial<ReturnType<typeof profileFromSpec>> = {}) =>
-        ({ family: "ubuntu", desktop: "gnome", browser: "none", snap: false, extraFonts: false, devtools: [], extraPackages: [], ...o }) as const;
+        ({ family: "ubuntu", desktop: "gnome", browser: "none", snap: false, extraFonts: false, autologin: true, devtools: [], extraPackages: [], ...o }) as const;
     test("core stack lands on every distro + stage", () => {
         (["ubuntu", "debian", "fedora"] as const).forEach((family) => {
             (["seed", "setup"] as const).forEach((stage) => {
@@ -148,11 +150,54 @@ describe("guestSetupScript", () => {
         expect(sh).toContain("sddm.conf.d");
         expect(sh).not.toContain("gnome-remote-desktop.service");
     });
+    test("autologin defaults on and writes the DM config", () => {
+        const sh = guestSetupScript(spec(), { rdpPassword: "pw" });
+        expect(sh).toContain("AutomaticLoginEnable=true");
+        expect(sh).toContain("AutomaticLogin=u");
+    });
+    test("autologin off flips gdm off and drops the sddm conf", () => {
+        const g = guestSetupScript(spec((s) => { s.os.autologin = false; }), { rdpPassword: "pw" });
+        expect(g).toContain("AutomaticLoginEnable=false");
+        expect(g).not.toContain("AutomaticLoginEnable=true");
+        const k = guestSetupScript(spec((s) => { s.os.desktop = "kde"; s.os.autologin = false; }), { rdpPassword: "pw" });
+        expect(k).toContain("rm -f /etc/sddm.conf.d/cruiser.conf");
+        expect(k).not.toContain("AutomaticLogin");
+        // no console login means no Plasma session — warn, don't fail the run
+        expect(k).toContain("autologin is off");
+        expect(k).not.toContain("systemctl restart sddm");
+    });
     test("browser + snap get their own sections", () => {
         const sh = guestSetupScript(spec((s) => { s.os.browser = "vivaldi"; s.os.snap = true; }), { rdpPassword: "pw" });
         expect(sh).toContain("com.vivaldi.Vivaldi");
         expect(sh).toContain("flathub.flatpakrepo");
         expect(sh).toContain("snapd.socket");
+    });
+    test("host colorScheme bakes a theme section; absent by default", () => {
+        const dark = guestSetupScript(spec(), { rdpPassword: "pw", colorScheme: "dark" });
+        expect(dark).toContain("org.gnome.desktop.interface color-scheme 'prefer-dark'");
+        expect(dark).toContain("plasma-apply-colorscheme BreezeDark");
+        const light = guestSetupScript(spec(), { rdpPassword: "pw", colorScheme: "light" });
+        expect(light).toContain("color-scheme 'default'");
+        expect(light).toContain("plasma-apply-colorscheme BreezeLight");
+        const none = guestSetupScript(spec(), { rdpPassword: "pw" });
+        expect(none).not.toContain("color-scheme");
+        expect(none).not.toContain("plasma-apply-colorscheme");
+    });
+});
+
+// ── guest theme script ──
+
+describe("guestThemeScript", () => {
+    test("guarded both-DE script, per-scheme values", () => {
+        const s = defaultSpec("t1"); s.credentials.username = "u";
+        const dark = guestThemeScript(s, "dark");
+        expect(dark).toContain("'prefer-dark'");
+        expect(dark).toContain("BreezeDark");
+        expect(dark).toContain("dbus-run-session");     // pre-login fallback
+        expect(dark).toContain("|| true");              // set -eu safe
+        const light = guestThemeScript(s, "light");
+        expect(light).toContain("'default'");
+        expect(light).toContain("BreezeLight");
     });
 });
 

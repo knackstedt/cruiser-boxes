@@ -45,6 +45,7 @@ export interface CreateForm {
     browser: string;               // none|firefox|chrome|chromium|vivaldi|brave
     snap: boolean;                 // install snapd (off → flatpak only)
     extraFonts: boolean;           // CJK + MS core fonts beyond the base bundle
+    autologin: boolean;            // DM autologin into the desktop at boot
     preset: string;                // standard|developer — developer reveals the devtools menu
     devtools: string[];            // DevTool ids selected in the developer preset
     iso: string;                   // iso path/url
@@ -189,7 +190,7 @@ const defaultCreate = (): CreateForm => ({
     name: "", cpus: 4, memMiB: 8192, diskGiB: 100,
     gpu: "venus", headMode: "virtual-desktop", persist: "daemonize",
     method: "cloudimg", distro: "ubuntu", release: "26.04", desktop: "gnome",
-    browser: "none", snap: false, extraFonts: false,
+    browser: "none", snap: false, extraFonts: false, autologin: true,
     preset: "standard", devtools: [],
     iso: "", importPath: "", diskDir: "",
     username: "cruiser", password: "",

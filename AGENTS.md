@@ -36,6 +36,9 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   guest-setup).
 - `libraries/host-int` — WmAdapter impls (kde-x11 full; kde-wayland partial;
   gnome-x11; gnome-wayland stub), xfreerdp viewer + ViewerSession.
+  `appearance.ts` — host dark/light hint via the xdg-desktop-portal
+  `org.freedesktop.appearance color-scheme` read (busctl/gdbus) + a
+  dbus-monitor SettingChanged watcher.
 - `libraries/provision` — cloudimg+NoCloud, ISO autoinstall, guest-setup driver
   (QGA), monitors.xml generation. `packages.ts` is the single scoped package
   manifest (entries carry `stages: seed|setup`, `desktops`, `distros`, `when`).
@@ -44,6 +47,12 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   nodejs/npm resolve via provides (versioned nodejsXX pkgs), not `dnf list`;
   `distros.ts` holds the curated release matrix + cloud-image URL resolvers
   (Debian/Fedora resolve filenames by scraping mirror indexes).
+  `theme.ts` — host color-scheme passthrough: `guestThemeScript` bakes into
+  guest-setup (gsettings `color-scheme` / `plasma-apply-colorscheme`, both
+  `command -v`-gated so the spec's desktop guess can't misfire), and
+  `ThemeSync` re-pushes via guestRun on host portal changes for a viewer
+  session's lifetime (wired in service.ensureViewer + cli `vm start|view`).
+  `CRUISER_THEME_SYNC=0` opts out.
 - `libraries/app-mode` — waypipe over vsock (socat bridge) / ssh fallback.
 - `libraries/app-shell` — UI: zustand store, CruiserService, screens markup.
 - `libraries/sys` — exec helpers (node:child_process — runs under bun AND node).

@@ -342,6 +342,7 @@ function create(s: CruiserState): string {
         <div class="hint">installed via Flathub</div>
         ${checkRow("Snap support", "snap", f.snap, "off → flatpak is the only app channel")}
         ${checkRow("Extra fonts", "extraFonts", f.extraFonts, "CJK + MS core fonts on top of the base bundle")}
+        ${checkRow("Autologin", "autologin", f.autologin, "boot straight into the desktop — KDE needs this for RDP (krdpserver runs in the user session)")}
         ${optRow("Preset", "preset", f.preset, [["standard", "Standard"], ["developer", "Developer"]], "set-preset")}
         ${f.preset === "developer" ? `<div class="opts wrap" style="margin:0 0 6px 140px">${DEVTOOLS.map((t) =>
             `<div class="opt${f.devtools.includes(t.id) ? " on" : ""}" data-action="devtools-toggle" data-key="${esc(t.id)}"
