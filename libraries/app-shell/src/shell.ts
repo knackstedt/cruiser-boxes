@@ -8,7 +8,7 @@ import { HtmlUiHost, createLocalBackend, type UiPanelHandle } from "@downdraft/e
 import type { InputBus } from "./input-bus";
 import type { CruiserService } from "./service";
 import type { Store, CreateForm } from "./store";
-import { renderRoute } from "./screens";
+import { renderRouteParts, type RouteParts } from "./screens";
 import { DISTROS } from "../../provision/src/distros";
 import { DEVTOOLS } from "../../provision/src/packages";
 import { registerUiFonts } from "./fonts";
@@ -31,9 +31,9 @@ export class CruiserShell {
     private unsub: () => void;
     private spinIdx = 0;
     private spinTimer: ReturnType<typeof setInterval>;
-    private scrollX = 0;
-    private scrollY = 0;
     private lastRoute = "";
+    private pendingParts: RouteParts | null = null;
+    private lastParts: RouteParts | null = null;
 
     constructor(
         device: GPUDevice,
@@ -60,10 +60,10 @@ export class CruiserShell {
         // DejaVu fallback.
         registerUiFonts(this.host);
         mark("fonts");
-        const html = renderRoute(store.getState());
+        const mountParts = renderRouteParts(store.getState());
         this.panel = this.host.mount({
             rect: { x: 0, y: 0, w: width, h: height },
-            html,
+            html: mountParts.html,
             // zoom: layout runs at rect/zoom CSS px → UI renders zoom× bigger.
             // scale=1 keeps the raster at display res so text lands on hard
             // pixels instead of a downsampled (soft) supersample.
@@ -75,7 +75,8 @@ export class CruiserShell {
         });
         mark("panel-mount");
         this.lastRoute = `${store.getState().route}:${store.getState().selectedVm ?? ""}`;
-        this.gate = new RenderGate(html, (h) => this.applyHtml(h));
+        this.lastParts = mountParts;
+        this.gate = new RenderGate(mountParts.html, () => this.applyHtml());
         // Re-render on state change (cheap for now; targeted mutations later).
         let pending = false;
         this.unsub = store.subscribe(() => {
@@ -83,7 +84,7 @@ export class CruiserShell {
             pending = true;
             queueMicrotask(() => {
                 pending = false;
-                this.gate.render(renderRoute(this.store.getState()));
+                this.pushRender();
             });
         });
         this.wireActions();
@@ -199,12 +200,7 @@ export class CruiserShell {
             if (ev.t === "blur") {
                 // Queued so a focus event for the next input in the same
                 // batch lands first and keeps the render deferred.
-                if (this.gate.blur()) queueMicrotask(() => this.gate.render(renderRoute(this.store.getState())));
-                return;
-            }
-            if (ev.t === "scroll") {
-                this.scrollY = ev.st ?? 0;
-                this.scrollX = ev.sl ?? 0;
+                if (this.gate.blur()) queueMicrotask(() => this.pushRender());
                 return;
             }
             if (ev.t !== "input" && ev.t !== "change") return;
@@ -226,42 +222,46 @@ export class CruiserShell {
         });
     }
 
+    /** Render fresh parts once and push the full doc through the gate —
+     *  applyHtml then diffs the parts against what's mounted. */
+    private pushRender(): void {
+        this.pendingParts = renderRouteParts(this.store.getState());
+        this.gate.render(this.pendingParts.html);
+    }
+
     /**
-     * Swap the doc HTML while preserving `.content`'s scroll position.
-     * `setHtml` rebuilds the whole DOM so the scrollport resets to 0 — every
-     * mid-page action (USB toggle, vd picker, unit switch) used to throw the
-     * user back to the top. Route changes intentionally start at the top.
+     * Apply fresh markup. Route changes swap the whole document (scroll
+     * resets to the top — intentional). Same-route updates patch
+     * topbar/content/footer via innerHtml instead: the .content scrollport
+     * node survives, so scroll offset persists with no restore scroll —
+     * which means no scroll=0 frame between rebuild and restore (the
+     * flicker) and no scrollbar thumb re-flash on every poll.
      */
-    private applyHtml(html: string): void {
+    private applyHtml(): void {
         const p = this.panel;
-        if (!p) return;
+        const parts = this.pendingParts;
+        if (!p || !parts) return;
         const st = this.store.getState();
         const route = `${st.route}:${st.selectedVm ?? ""}`;
-        const sameRoute = route === this.lastRoute;
+        const sameRoute = route === this.lastRoute && this.lastParts !== null;
         this.lastRoute = route;
-        const x = this.scrollX;
-        const y = this.scrollY;
-        p.setHtml(html);
-        if (!sameRoute || (x === 0 && y === 0)) {
-            this.scrollX = 0;
-            this.scrollY = 0;
+        if (!sameRoute) {
+            p.setHtml(parts.html);
             // Flash the overlay scrollbar on route change so a scrollable
             // page reads as scrollable — thumbs only paint during/after
             // scroll activity (opacity fades out ~700ms after the last one).
             // The 1px nudge is imperceptible; scrollTo clamps, so a page
             // that fits emits no flash and no motion.
-            if (!sameRoute) {
-                const flash = () => { p.scrollTo(".content", 0, 1); p.scrollTo(".content", 0, 0); };
-                queueMicrotask(flash);
-                setTimeout(flash, 30);
-            }
-            return;
+            const flash = () => { p.scrollTo(".content", 0, 1); p.scrollTo(".content", 0, 0); };
+            queueMicrotask(flash);
+            setTimeout(flash, 30);
+        } else {
+            const prev = this.lastParts!;
+            if (parts.topbar !== prev.topbar) p.setInnerHtml(".topbar", parts.topbar);
+            if (parts.content !== prev.content) p.setInnerHtml(".content", parts.content);
+            if (parts.footer !== prev.footer) p.setInnerHtml(".footer", parts.footer);
         }
-        // scrollTo clamps against the node's scroll range, which isn't laid
-        // out until the next frame — retry once after layout settles.
-        const restore = () => p.scrollTo(".content", x, y);
-        queueMicrotask(restore);
-        setTimeout(restore, 30);
+        this.lastParts = parts;
     }
 
     /** Render panels into an already-open render pass covering the surface. */

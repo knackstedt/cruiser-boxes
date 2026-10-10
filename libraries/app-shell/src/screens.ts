@@ -422,7 +422,20 @@ function settings(s: CruiserState): string {
         ${btn("Run doctor", "doctor")}${docRows ? `<div style="margin-top:8px">${docRows}</div>` : `<div class="meta" style="display:inline-block;margin-left:10px">not run</div>`}`;
 }
 
-export function renderRoute(s: CruiserState): string {
+/** Per-region markup — same-route updates patch these into the live doc via
+ *  setInnerHtml, which keeps the .content scrollport node (and its scroll
+ *  offset) alive. A full setHtml rebuild resets scroll and replays the
+ *  scrollbar fade on every poll. */
+export interface RouteParts {
+    topbar: string;
+    content: string;
+    footer: string;
+    /** Full document (topbar/content/footer wrapped in the page shell) —
+     *  used for mount, route changes, and gate dedupe. */
+    html: string;
+}
+
+export function renderRouteParts(s: CruiserState): RouteParts {
     const nav = (r: string, label: string) =>
         `<div class="item${s.route === r ? " on" : ""}" data-action="nav" data-route="${r}">${label}</div>`;
     const spinner = `<div class="spinwrap"><div class="spinglyph" data-spin>◐</div>
@@ -433,13 +446,21 @@ export function renderRoute(s: CruiserState): string {
         s.route === "home" ? home(s) :
         s.route === "create" ? create(s) :
         s.route === "vm" ? vmDetail(s) : settings(s);
-    return `<html><head><style>${fontFaceCss()}${CSS}</style></head><body>
-        <div class="topbar"><div class="brand">cruiser</div>
-            <div class="nav">${nav("home", "VMs")}${nav("settings", "Settings")}</div>
-            <div style="flex:1"></div>
-            ${s.busy ? `<div class="meta">working…</div>` : ""}
-        </div>
+    const topbar = `<div class="brand">cruiser</div>
+        <div class="nav">${nav("home", "VMs")}${nav("settings", "Settings")}</div>
+        <div style="flex:1"></div>
+        ${s.busy ? `<div class="meta">working…</div>` : ""}`;
+    const footer = esc(s.status);
+    return {
+        topbar, content: body, footer,
+        html: `<html><head><style>${fontFaceCss()}${CSS}</style></head><body>
+        <div class="topbar">${topbar}</div>
         <div class="content">${body}</div>
-        <div class="footer">${esc(s.status)}</div>
-    </body></html>`;
+        <div class="footer">${footer}</div>
+    </body></html>`,
+    };
+}
+
+export function renderRoute(s: CruiserState): string {
+    return renderRouteParts(s).html;
 }
