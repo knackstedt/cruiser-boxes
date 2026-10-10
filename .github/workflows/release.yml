@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    # e.g. v1.0.0 — prerelease tags (v1.0.0-rc.1) publish as prereleases.
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: package + publish
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: ./.github/actions/downdraft-deps
+
+      - name: Stamp version from tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const version = process.env.TAG.replace(/^v/, "");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.version = version;
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+            console.log(`version -> ${version}`);
+          '
+
+      - name: Package (deb + AppImage via draft release)
+        # Formats come from build.linux.target in package.json; runtime from
+        # downdraft.config.json ("node" — emit-tree + shipped node binary).
+        run: bunx draft release --target=linux
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          shopt -s nullglob
+          artifacts=(release/*.deb release/*.AppImage release/*.flatpak)
+          if (( ${#artifacts[@]} == 0 )); then
+            echo "No release artifacts found in release/" >&2
+            ls -la release/ >&2 || true
+            exit 1
+          fi
+          args=(--title "$TAG" --generate-notes)
+          [[ "$TAG" == *-* ]] && args+=(--prerelease)
+          gh release create "$TAG" "${args[@]}" "${artifacts[@]}"

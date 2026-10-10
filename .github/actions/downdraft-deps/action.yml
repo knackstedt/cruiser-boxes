@@ -1,0 +1,40 @@
+name: "Install deps (npm @downdraft)"
+description: >
+  Rewrites the file:../downdraft-engine dev dependencies to the published
+  @downdraft/* npm packages and runs bun install. Local dev links against a
+  sibling engine checkout; CI consumes the released packages instead — the
+  standalone-consumer path `draft` is built for.
+inputs:
+  downdraft-version:
+    description: "npm version spec for @downdraft/* packages"
+    required: false
+    default: "^0.2.0"
+runs:
+  using: "composite"
+  steps:
+    - name: Point @downdraft/* deps at the npm registry
+      shell: bash
+      env:
+        DD_VERSION: ${{ inputs.downdraft-version }}
+      run: |
+        node -e '
+          const fs = require("fs");
+          const path = "package.json";
+          const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
+          const want = process.env.DD_VERSION;
+          for (const sec of ["dependencies", "devDependencies"]) {
+            for (const [name, spec] of Object.entries(pkg[sec] ?? {})) {
+              if (typeof spec === "string" && spec.startsWith("file:")) {
+                console.log(`${name}: ${spec} -> ${want}`);
+                pkg[sec][name] = want;
+              }
+            }
+          }
+          fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
+        '
+
+    - name: Install dependencies
+      shell: bash
+      # Not --frozen-lockfile: bun.lock pins the file: layout; the patched
+      # manifest re-resolves against the registry.
+      run: bun install

@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Reused by release.yml so tags run the same gate before packaging.
+  workflow_call:
+
+jobs:
+  check:
+    name: typecheck / lint / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: ./.github/actions/downdraft-deps
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Test
+        # Scoped to tests/ — bare `bun test` recurses into src-tarballs/.
+        run: bun test tests/
