@@ -43,13 +43,15 @@ export class CruiserService {
         });
         mark("svc:scan");
         this.registry.list().forEach((h) => this.handles.set(h.spec.name, h));
-        // refresh/host/extras/settings write disjoint store fields — run
-        // together; each spawn chain (qdbus, wmctrl, df) overlaps instead
-        // of queuing behind the last.
+        // refresh/host/settings write disjoint store fields — run together;
+        // each spawn chain (qdbus, wmctrl, df) overlaps instead of queuing
+        // behind the last. Create-screen extras (desktops, USB list, disk
+        // free) take ~8s of spawns and gate nothing — they overlap the same
+        // window but deliberately don't hold service-init.
+        this.refreshCreateExtras().then(() => mark("svc:extras")).catch(() => {});
         await Promise.all([
             this.refresh().then(() => mark("svc:refresh")),
             this.refreshHost().then(() => mark("svc:host")),
-            this.refreshCreateExtras().then(() => mark("svc:extras")).catch(() => {}),
             this.refreshSettings().catch(() => {}),
         ]);
         this.pollTimer = setInterval(() => this.refresh().catch(() => {}), 3000);
