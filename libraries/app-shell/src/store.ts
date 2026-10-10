@@ -59,6 +59,14 @@ export interface CreateForm {
 
 export interface DoctorRow { label: string; ok: boolean; fix: string }
 
+/** In-flight action shown on the triggering VM's button (the ◐ glyph is
+ *  animated by the shell's busy ticker via [data-spin]). */
+export interface ActionState {
+    vm: string | null;             // target VM; null = global op (create/doctor)
+    verb: string;                  // "stopping" | "starting" | …
+    at: number;                    // Date.now() — label derives elapsed seconds
+}
+
 export interface HostInfo {
     session: string;
     adapterId: string;
@@ -131,6 +139,7 @@ export interface CruiserState {
     vms: VmSummary[];
     status: string;
     busy: boolean;                 // an async action is in flight
+    action: ActionState | null;    // which action — renders on its VM's button
     create: CreateForm;
     doctor: DoctorRow[] | null;
     host: HostInfo | null;
@@ -152,6 +161,7 @@ export interface CruiserActions {
     setVms(vms: VmSummary[]): void;
     setStatus(status: string): void;
     setBusy(busy: boolean): void;
+    setAction(a: ActionState | null): void;
     setField<K extends keyof CreateForm>(k: K, v: CreateForm[K]): void;
     resetCreate(): void;
     setDoctor(rows: DoctorRow[] | null): void;
@@ -193,6 +203,7 @@ export function createCruiserStore() {
         vms: [],
         status: "ready",
         busy: false,
+        action: null,
         create: defaultCreate(),
         doctor: null,
         host: null,
@@ -208,6 +219,7 @@ export function createCruiserStore() {
         setVms: (vms) => set({ vms }),
         setStatus: (status) => set({ status }),
         setBusy: (busy) => set({ busy }),
+        setAction: (action) => set({ action }),
         setField: (k, v) => set((s) => ({ create: { ...s.create, [k]: v } })),
         resetCreate: () => set({ create: defaultCreate() }),
         setDoctor: (doctor) => set({ doctor }),

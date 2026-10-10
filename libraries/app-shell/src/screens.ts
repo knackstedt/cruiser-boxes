@@ -173,8 +173,16 @@ function spark(kind: "cpu" | "mem", samples: number[]): string {
 }
 
 /** Action buttons for a VM state — shared between the list row and the
- *  detail screen. Destructive ops render their armed label. */
-function vmBtns(vm: VmSummary, confirm: string | null, detail = false): string {
+ *  detail screen. Destructive ops render their armed label. While an action
+ *  targets this VM the cluster collapses to a single live indicator — the
+ *  shell's busy ticker animates [data-spin] (~140ms/frame). */
+function vmBtns(vm: VmSummary, s: CruiserState, detail = false): string {
+    const act = s.action?.vm === vm.name ? s.action : null;
+    if (act) {
+        const secs = Math.floor((Date.now() - act.at) / 1000);
+        return `<div class="btn sm dim"><span data-spin>◐</span>&nbsp;${esc(act.verb)}… ${secs}s</div>`;
+    }
+    const confirm = s.confirm;
     const up = vm.state === "running";
     const paused = vm.state === "paused";
     const transitional = vm.state === "starting" || vm.state === "stopping";
@@ -199,7 +207,7 @@ function vmBtns(vm: VmSummary, confirm: string | null, detail = false): string {
     return parts.join("");
 }
 
-function vmRow(vm: VmSummary, confirm: string | null): string {
+function vmRow(vm: VmSummary, s: CruiserState): string {
     const up = vm.state === "running";
     const specs = `${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB RAM · ${vm.diskGiB} GiB cap`;
     const diskParts = [
@@ -221,13 +229,13 @@ function vmRow(vm: VmSummary, confirm: string | null): string {
         </div>
         ${up ? `<div class="sparks">${spark("cpu", vm.cpu)}${spark("mem", vm.mem)}</div>` : ""}
         <div class="pill ${pillClass(vm.state)}">${esc(vm.state)}</div>
-        ${vmBtns(vm, confirm)}
+        ${vmBtns(vm, s)}
     </div>`;
 }
 
 function home(s: CruiserState): string {
     const list = s.vms.length
-        ? `<div class="vmlist">${s.vms.map((vm) => vmRow(vm, s.confirm)).join("")}</div>`
+        ? `<div class="vmlist">${s.vms.map((vm) => vmRow(vm, s)).join("")}</div>`
         : `<div class="empty">No VMs yet.
             <div style="margin-top:14px">${btn("+ New VM", "nav", attr("route", "create"))}</div></div>`;
     return `<div class="vmlist-head"><div class="h1">Virtual Machines</div>
@@ -384,7 +392,7 @@ function vmDetail(s: CruiserState): string {
             <div class="k">persist</div><div>${esc(vm.persist)}</div>
         </div>
         <div style="margin:10px 0 18px">
-            ${vmBtns(vm, s.confirm, true)}
+            ${vmBtns(vm, s, true)}
         </div>
         <div class="h2">Snapshots</div>
         ${snapSection}
@@ -531,16 +539,19 @@ export function renderRouteParts(s: CruiserState): RouteParts {
     const spinner = `<div class="spinwrap"><div class="spinglyph" data-spin>◐</div>
         <div class="spinlbl">${esc(s.status)}</div>
         ${s.route === "create" ? `<div class="meta">provisioning can take a few minutes — the image download is cached for future VMs</div>` : ""}</div>`;
+    // Busy only takes over the create wizard — provisioning runs for minutes
+    // and the form shouldn't be touched mid-flight. Everywhere else the
+    // topbar "working…" + footer status carry the in-flight op: blanking the
+    // VM list for a 20s stop drain reads as "the list vanished".
     const body =
-        s.busy ? spinner :
+        s.busy && s.route === "create" ? spinner :
         s.route === "home" ? home(s) :
         s.route === "create" ? create(s) :
         s.route === "vm" ? vmDetail(s) :
         s.route === "logs" ? logsView(s) : settings(s);
     const topbar = `<div class="brand">cruiser</div>
         <div class="nav">${nav("home", "VMs")}${nav("settings", "Settings")}</div>
-        <div style="flex:1"></div>
-        ${s.busy ? `<div class="meta">working…</div>` : ""}`;
+        <div style="flex:1"></div>`;
     const footer = esc(s.status);
     const log = s.route === "logs" ? logPaneInner(s) : null;
     return {

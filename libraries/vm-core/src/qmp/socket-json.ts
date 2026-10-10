@@ -17,7 +17,7 @@ export class JsonSocket extends EventEmitter {
     private buf: Buffer = Buffer.alloc(0);
     private pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
     private nextId = 1;
-    private handshake: ((first: any) => void) | null = null;
+    private handshake: { resolve: (first: any) => void; reject: (e: Error) => void } | null = null;
     private closed = false;
 
     protected constructor(sock: Socket) {
@@ -25,7 +25,10 @@ export class JsonSocket extends EventEmitter {
         this.sock = sock;
         sock.on("data", (d) => this.feed(d));
         sock.on("close", () => this.onClose());
-        sock.on("error", (e) => { this.emit("error", e); });
+        // Re-emitting "error" on an EventEmitter with no listener throws and
+        // kills the process — reject in-flight ops instead (a reset socket is
+        // expected whenever QEMU exits mid-op, e.g. stop while metrics polls).
+        sock.on("error", (e) => this.onError(e));
     }
 
     static open(path: string, timeoutMs = 10_000): Promise<JsonSocket> {
@@ -59,7 +62,7 @@ export class JsonSocket extends EventEmitter {
     }
 
     private dispatch(msg: any): void {
-        if (this.handshake) { const h = this.handshake; this.handshake = null; h(msg); return; }
+        if (this.handshake) { const h = this.handshake; this.handshake = null; h.resolve(msg); return; }
         if (msg.id !== undefined && this.pending.has(Number(msg.id))) {
             const p = this.pending.get(Number(msg.id))!;
             this.pending.delete(Number(msg.id));
@@ -74,7 +77,10 @@ export class JsonSocket extends EventEmitter {
     expectFirst(timeoutMs = 10_000): Promise<any> {
         return new Promise((resolve, reject) => {
             const to = setTimeout(() => reject(new Error("handshake timeout")), timeoutMs);
-            this.handshake = (m) => { clearTimeout(to); resolve(m); };
+            this.handshake = {
+                resolve: (m) => { clearTimeout(to); resolve(m); },
+                reject: (e) => { clearTimeout(to); reject(e); },
+            };
         });
     }
 
@@ -96,8 +102,17 @@ export class JsonSocket extends EventEmitter {
         });
     }
 
+    private onError(e: Error): void {
+        this.closed = true;
+        if (this.handshake) { const h = this.handshake; this.handshake = null; h.reject(e); }
+        this.pending.forEach((p) => p.reject(e));
+        this.pending.clear();
+        if (this.listenerCount("error") > 0) this.emit("error", e);
+    }
+
     private onClose(): void {
         this.closed = true;
+        if (this.handshake) { const h = this.handshake; this.handshake = null; h.reject(new Error("socket closed")); }
         this.pending.forEach((p) => p.reject(new Error("socket closed")));
         this.pending.clear();
         this.emit("close");

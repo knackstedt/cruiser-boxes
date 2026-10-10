@@ -131,19 +131,23 @@ export class CruiserService {
         if (st.create.method !== "imported") st.setField("method", "imported");
     }
 
-    private async run<T>(label: string, fn: () => Promise<T>, done?: (r: T) => string): Promise<T | undefined> {
+    private async run<T>(label: string, fn: () => Promise<T>,
+        opts: { done?: (r: T) => string; vm?: string; verb?: string } = {},
+    ): Promise<T | undefined> {
         const st = this.store.getState();
-        if (st.busy) return undefined;
+        if (st.busy) { st.setStatus(`${label} ignored — another action is still running`); return undefined; }
         st.setBusy(true); st.setStatus(`${label}…`);
+        if (opts.verb) st.setAction({ vm: opts.vm ?? null, verb: opts.verb, at: Date.now() });
         try {
             const r = await fn();
-            st.setStatus(done ? done(r) : `${label} done`);
+            st.setStatus(opts.done ? opts.done(r) : `${label} done`);
             return r;
         } catch (e) {
             st.setStatus(`${label} failed: ${e instanceof Error ? e.message : e}`);
             return undefined;
         } finally {
             st.setBusy(false);
+            st.setAction(null);
             this.refresh().catch(() => {});
         }
     }
@@ -441,7 +445,7 @@ export class CruiserService {
 
     async start(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
-        await this.run(`start ${name}`, () => h.start());
+        await this.run(`start ${name}`, () => h.start(), { vm: name, verb: "starting" });
         // Boot → autologin → gnome-remote-desktop takes a while; open()'s
         // waitRdpPort polls for it in the background instead of holding
         // `busy`. headMode "app" has no freerdp viewer (waypipe is explicit).
@@ -456,13 +460,16 @@ export class CruiserService {
                 `stopping ${name} — guest is shutting down… ${Math.floor(ms / 1000)}s ` +
                 `(power off, not suspend — memory is not saved)`,
             ));
-        }, (out) => out === "stopped"
-            ? `${name} powered off cleanly`
-            : `${name} ignored the shutdown request — still running; use Kill to force power off`);
+        }, {
+            done: (out) => out === "stopped"
+                ? `${name} powered off cleanly`
+                : `${name} ignored the shutdown request — still running; use Kill to force power off`,
+            vm: name, verb: "stopping",
+        });
     }
     async kill(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
-        await this.run(`kill ${name}`, () => h.kill());
+        await this.run(`kill ${name}`, () => h.kill(), { vm: name, verb: "killing" });
     }
     async remove(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
@@ -476,12 +483,12 @@ export class CruiserService {
             this.metrics.drop(name);
             this.snapCache.delete(name);
             this.store.getState().setRoute("home");
-        });
+        }, { vm: name, verb: "deleting" });
     }
 
     async resume(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
-        await this.run(`resume ${name}`, () => h.resume());
+        await this.run(`resume ${name}`, () => h.resume(), { vm: name, verb: "resuming" });
     }
 
     /** Save the edit form back onto the VM's spec. Only boot-time fields are
@@ -576,12 +583,13 @@ export class CruiserService {
             this.store.getState().setStatus(`stop ${name} before taking a snapshot — qemu-img needs the disk offline`);
             return;
         }
-        await this.run(`snapshot ${name}`, () => h.snapshot(`snap-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}`));
+        await this.run(`snapshot ${name}`, () => h.snapshot(`snap-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}`),
+            { vm: name, verb: "saving snapshot" });
         this.invalidateSnaps(name);
     }
     async restoreSnapshot(name: string, snap: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
-        await this.run(`restore ${snap}`, () => h.restoreSnapshot(snap));
+        await this.run(`restore ${snap}`, () => h.restoreSnapshot(snap), { vm: name, verb: "restoring" });
         this.invalidateSnaps(name);
     }
 
@@ -590,7 +598,7 @@ export class CruiserService {
         await this.run(`launch ${cmd}`, async () => {
             const { launchApp } = await import("../../app-mode/src/waypipe");
             await launchApp(h, cmd);
-        });
+        }, { vm: name, verb: "launching" });
     }
 
     async runDoctor(): Promise<void> {
