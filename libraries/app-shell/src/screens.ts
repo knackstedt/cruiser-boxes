@@ -89,6 +89,22 @@ input:focus { border-color:#4fc2f7; outline:none; }
 .snap { display:inline-block; padding:5px 11px; margin:0 6px 6px 0; font-size:12px;
         background:#212933; border-radius:11px; color:#8a94a3; }
 .snap.armed { background:#3a2e1d; color:#f0c98a; }
+.logbar { display:flex; align-items:center; gap:10px; margin-bottom:12px; flex-wrap:wrap; }
+/* On the logs route the scrollpane is a SIBLING of .content (see RouteParts)
+   — patching .content's innerHTML would rebuild a nested .logpre on every
+   poll, resetting its scroll offset and flashing the pane. A top-level
+   scrollport patched via its own innerHTML keeps the node (and offset) alive. */
+.content.logtop { flex:0 1 auto; max-height:55%; }
+.logpre { flex:1; min-height:80px; margin:0 20px 12px;
+          font-family:'Cruiser Mono',monospace; font-size:11px; line-height:1.5;
+          background:#0b0e13; border:1px solid #2a313c; border-radius:6px;
+          padding:10px 12px; overflow-y:scroll;
+          scrollbar-color:#5d6a80 transparent; white-space:pre-wrap;
+          word-break:break-all; color:#c8d2e0; }
+.logmeta { font-size:11px; color:#5d6775; }
+.logerr { color:#f08aa8; }
+.unitlist { max-height:104px; overflow-y:scroll; scrollbar-color:#5d6a80 transparent;
+            margin:0 0 10px 140px; }
 .footer { height:28px; flex-shrink:0;
           display:flex; align-items:center; padding:0 18px;
           background:#161b23; border-top:1px solid #2a313c;
@@ -124,6 +140,13 @@ function fmtBytes(b: number): string {
     return g >= 10 ? `${Math.round(g)} GiB`
         : g >= 1 ? `${g.toFixed(1)} GiB`
         : `${Math.round(b / 1048576)} MiB`;
+}
+
+/** Small sizes for log files — MiB granularity reads "0 MiB" on a 4KB log. */
+function fmtSmall(b: number): string {
+    return b >= 1048576 ? fmtBytes(b)
+        : b >= 1024 ? `${(b / 1024).toFixed(1)} KiB`
+        : `${b} B`;
 }
 
 /** Guest fs usage vs the disk cap: "guest 34.5 / 98 GiB". */
@@ -164,6 +187,7 @@ function vmBtns(vm: VmSummary, confirm: string | null, detail = false): string {
     if (up || paused) parts.push(b("Stop", "vm-stop", "btn sm dim"));
     if (stopped) parts.push(b("Start", "vm-start"));
     if (!transitional) parts.push(b("Edit", "vm-edit", "btn sm dim"));
+    parts.push(btn("Logs", "nav", attr("route", "logs") + attr("vm", vm.name), "btn sm dim"));
     if (up || paused || transitional)
         parts.push(confirm === `vm-kill:${vm.name}`
             ? b("Confirm kill", "vm-kill", "btn sm warn")
@@ -367,6 +391,69 @@ function vmDetail(s: CruiserState): string {
         <div style="margin-top:24px">${btn("‹ VMs", "nav", attr("route", "home"), "btn dim")}</div>`;
 }
 
+// ── logs ──
+
+function logsView(s: CruiserState): string {
+    const name = s.selectedVm ?? "?";
+    const vm = s.vms.find((v) => v.name === name);
+    const l = s.logs;
+    const chip = (field: string, value: string, label: string, cur: string) =>
+        `<div class="opt${cur === value ? " on" : ""}" data-action="log-set" data-field="${esc(field)}" data-value="${esc(value)}">${esc(label)}</div>`;
+    const srcTabs = `<div class="opts">${chip("source", "runner", "runner log", l.source)}${chip("source", "journal", "guest journal", l.source)}</div>`;
+    const linesSel = `<div class="opts">${[100, 300, 1000, 3000].map((n) => chip("lines", String(n), String(n), String(l.lines))).join("")}</div>`;
+    const follow = `<div class="opt${l.follow ? " on" : ""}" data-action="log-set" data-field="follow" data-value="${!l.follow}">follow</div>`;
+
+    const controls = l.source === "runner"
+        ? `<div class="row"><div class="lbl">File</div><div class="opts wrap">${l.files.length
+            ? l.files.map((f) =>
+                `<div class="opt${l.file === f.id ? " on" : ""}${f.exists ? "" : " dim"}" data-action="log-set" data-field="file" data-value="${esc(f.id)}">${esc(f.name)}${f.exists ? ` <span class="meta">${fmtSmall(f.sizeBytes)}</span>` : ""}</div>`).join("")
+            : `<span class="meta">probing…</span>`}</div></div>`
+        : `${vm?.state === "running" ? "" : `<div class="hint" style="margin-left:0">the guest isn't running — start it to read its journal</div>`}
+            <div class="row"><div class="lbl">Unit</div>
+                <input data-field="log-unit" value="${esc(l.unit)}" style="width:260px">
+                ${l.unit ? `<div class="opt" data-action="log-set" data-field="unit" data-value="">clear</div>` : ""}</div>
+            ${l.units.length ? `<div class="opts wrap unitlist">${l.units.slice(0, 80).map((u) =>
+                `<div class="opt${l.unit === u ? " on" : ""}" data-action="log-set" data-field="unit" data-value="${esc(u)}">${esc(u)}</div>`).join("")}</div>` : ""}
+            <div class="row"><div class="lbl">Priority</div><div class="opts">${
+                chip("priority", "", "all", l.priority) + chip("priority", "err", "err+", l.priority) +
+                chip("priority", "warning", "warning+", l.priority) + chip("priority", "info", "info+", l.priority) +
+                chip("priority", "debug", "debug", l.priority)}</div></div>
+            <div class="row"><div class="lbl">Boot</div><div class="opts">${
+                chip("boot", "0", "current", l.boot) + chip("boot", "-1", "previous", l.boot) + chip("boot", "", "all", l.boot)}</div></div>
+            <div class="row"><div class="lbl">Since</div>
+                <input data-field="log-since" value="${esc(l.since)}" style="width:200px">
+                <div class="meta">e.g. "1 hour ago", "today", "10:00"</div></div>
+            <div class="row"><div class="lbl">Grep</div>
+                <input data-field="log-grep" value="${esc(l.grep)}" style="width:260px">
+                <div class="meta">regex filter (journalctl -g)</div></div>`;
+
+    const meta = [
+        l.fetchedAt ? `fetched ${Math.max(0, Math.round((Date.now() - l.fetchedAt) / 1000))}s ago` : "",
+        l.transport ? `via ${l.transport}` : "",
+        l.loading ? "fetching…" : "",
+    ].filter(Boolean).join(" · ");
+
+    // .logpre is NOT emitted here — it's a sibling of .content patched
+    // through the RouteParts.log region so the scrollport node survives
+    // content patches (see applyHtml).
+    return `<div class="h1">${esc(name)} logs <span class="pill ${pillClass(vm?.state ?? "")}">${esc(vm?.state ?? "?")}</span></div>
+        <div class="logbar">${srcTabs}<span class="meta">lines</span>${linesSel}${follow}${btn("Refresh", "log-refresh", "", "btn sm")}</div>
+        ${controls}
+        <div class="logmeta" style="margin-bottom:6px">${esc(meta)}</div>
+        <div style="margin-top:16px">${btn(`‹ ${name}`, "nav", attr("route", "vm") + attr("vm", name), "btn dim")}</div>`;
+}
+
+/** Inner markup of the logs scrollpane — patched into .logpre directly so
+ *  the scrollport node (and its scroll offset) survives content updates.
+ *  .logend is the bottom sentinel the shell probes for "is pinned"
+ *  (a class, not an id — scroll events report the nearest ancestor id and
+ *  we want them to keep resolving to #logpane). */
+function logPaneInner(s: CruiserState): string {
+    const l = s.logs;
+    const body = l.error ? `<span class="logerr">${esc(l.error)}</span>` : esc(l.text || "(empty)");
+    return `${body}<div class="logend" style="height:1px"></div>`;
+}
+
 // ── settings / doctor ──
 
 function settings(s: CruiserState): string {
@@ -430,6 +517,9 @@ export interface RouteParts {
     topbar: string;
     content: string;
     footer: string;
+    /** Inner markup of the logs scrollpane (.logpre), or null on other
+     *  routes — patched as its own region so the scrollport node survives. */
+    log: string | null;
     /** Full document (topbar/content/footer wrapped in the page shell) —
      *  used for mount, route changes, and gate dedupe. */
     html: string;
@@ -445,17 +535,20 @@ export function renderRouteParts(s: CruiserState): RouteParts {
         s.busy ? spinner :
         s.route === "home" ? home(s) :
         s.route === "create" ? create(s) :
-        s.route === "vm" ? vmDetail(s) : settings(s);
+        s.route === "vm" ? vmDetail(s) :
+        s.route === "logs" ? logsView(s) : settings(s);
     const topbar = `<div class="brand">cruiser</div>
         <div class="nav">${nav("home", "VMs")}${nav("settings", "Settings")}</div>
         <div style="flex:1"></div>
         ${s.busy ? `<div class="meta">working…</div>` : ""}`;
     const footer = esc(s.status);
+    const log = s.route === "logs" ? logPaneInner(s) : null;
     return {
-        topbar, content: body, footer,
+        topbar, content: body, footer, log,
         html: `<html><head><style>${fontFaceCss()}${CSS}</style></head><body>
         <div class="topbar">${topbar}</div>
-        <div class="content">${body}</div>
+        <div class="content${log !== null ? " logtop" : ""}">${body}</div>
+        ${log !== null ? `<div class="logpre" id="logpane">${log}</div>` : ""}
         <div class="footer">${footer}</div>
     </body></html>`,
     };

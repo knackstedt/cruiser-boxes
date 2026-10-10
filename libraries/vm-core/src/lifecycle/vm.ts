@@ -17,6 +17,7 @@ import { QmpClient } from "../qmp/client";
 import { QgaClient } from "../qga/client";
 import * as disk from "../disk/ops";
 import * as usb from "../usb/usb";
+import { appendVmLog } from "../logs";
 import { run, spawnChild, virtiofsdPath } from "../../../sys/src/exec";
 
 export type VmState = "stopped" | "starting" | "running" | "stopping" | "paused" | "crashed" | "unknown";
@@ -135,6 +136,7 @@ export class VmHandle extends EventEmitter {
         if (!existsSync(this.paths.ovmfVars)) await copyFile(OVMF_VARS_TEMPLATE, this.paths.ovmfVars);
 
         const built = await this.buildArgv(opts);
+        void appendVmLog(this.paths, `start: mode=${opts.mode ?? "run"} persist=${this.spec.persist} gpu=${this.spec.gpu.mode}`);
 
         // virtiofsd daemons must be up before QEMU opens the sockets.
         const vfsdBin = built.virtiofsd.length ? await virtiofsdPath() : null;
@@ -156,6 +158,7 @@ export class VmHandle extends EventEmitter {
             this.qemuChild = spawnChild(this.toolchain.qemu, built.argv, { env, stdio: "ignore" });
             this.qemuChild.on("exit", (code) => {
                 this.qemuChild = null;
+                void appendVmLog(this.paths, `qemu exited (code ${code})`);
                 this.emit("exit", code);
             });
             this.qemuChild.unref();
@@ -165,10 +168,15 @@ export class VmHandle extends EventEmitter {
         const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
         for (;;) {
             if (existsSync(this.paths.monitorSock)) {
-                try { await this.withQmp((q) => q.queryStatus()); return; } catch { /* not ready */ }
+                try {
+                    await this.withQmp((q) => q.queryStatus());
+                    void appendVmLog(this.paths, `started: pid ${this.pid()}`);
+                    return;
+                } catch { /* not ready */ }
             }
             if (Date.now() > deadline) {
                 const tail = existsSync(this.paths.log) ? readFileSync(this.paths.log, "utf-8").slice(-2000) : "";
+                void appendVmLog(this.paths, `start timed out after ${opts.timeoutMs ?? 30000}ms`);
                 throw new Error(`qemu did not come up in ${opts.timeoutMs ?? 30000}ms\n${tail}`);
             }
             await new Promise((r) => setTimeout(r, 250));
@@ -192,12 +200,17 @@ export class VmHandle extends EventEmitter {
             onWait?.(Date.now() - started);
             await new Promise((r) => setTimeout(r, 500));
         }
-        if (this.isRunning()) return "timeout";
+        if (this.isRunning()) {
+            void appendVmLog(this.paths, `stop: guest ignored ACPI powerdown (${timeoutMs}ms)`);
+            return "timeout";
+        }
         this.cleanupRunDir();
+        void appendVmLog(this.paths, "stopped: guest powered off");
         return "stopped";
     }
 
     async kill(timeoutMs = 10_000): Promise<void> {
+        void appendVmLog(this.paths, "kill: SIGKILL");
         const pid = this.pid();
         if (pid) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
         // quit's reply races the socket teardown — swallow the rejection either way.

@@ -7,7 +7,8 @@
 //       disk.qcow2                system disk
 //       OVMF_VARS.fd              per-VM UEFI vars
 //       run/                      monitor.sock, qga.sock, spice.sock,
-//                               virtiofs.sock, qemu.pid, qemu.log
+//                               virtiofs.sock, qemu.pid, qemu.log,
+//                               serial.log, cruiser.log (runner journal)
 //       snapshots/                (external snapshot files if used)
 //   ~/.cache/cruiser/             cloudimg downloads, seed work dirs
 //   <repo>/opt/                   toolchain binaries (CRUISER_OPT override)

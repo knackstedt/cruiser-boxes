@@ -153,9 +153,15 @@ export function buildArgs(
         if (ins.kernel && ins.initrd) {
             push("-kernel", ins.kernel, "-initrd", ins.initrd);
             push("-append", "boot=casper autoinstall ds=nocloud console=ttyS0,115200n8 ---");
-            push("-serial", `file:${ins.serialLog ?? paths.serialLog}`);
         }
     }
+
+    // serial console to file on every boot — the Logs screen tails it.
+    // autoinstall boots (kernel+initrd) keep their dedicated log path.
+    const serialLog = opts.mode === "install" && opts.install?.kernel && opts.install?.initrd
+        ? (opts.install.serialLog ?? paths.serialLog)
+        : paths.serialLog;
+    push("-serial", `file:${serialLog}`);
 
     if (spec.persist === "daemonize") push("-daemonize");
     push("-pidfile", paths.pidFile, "-D", paths.log);

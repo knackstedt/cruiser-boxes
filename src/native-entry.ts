@@ -46,10 +46,21 @@ const svc = new CruiserService(store);
 const shell = new CruiserShell(device as unknown as GPUDevice, format, surface.width, surface.height, bus, store, svc);
 mark("shell");
 svc.init().then(() => mark("service-init")).catch((e) => store.getState().setStatus(`init failed: ${e}`));
-// dev harness knob: CRUISER_ROUTE=create|vm|settings preselects a route for screenshots
+// dev harness knob: CRUISER_ROUTE=create|vm|settings|logs preselects a route for screenshots
+// (CRUISER_VM overrides the vm selected for vm/logs routes)
 if (process.env.CRUISER_ROUTE) {
-    const r = process.env.CRUISER_ROUTE as "create" | "vm" | "settings";
-    setTimeout(() => store.getState().setRoute(r, r === "vm" ? "test1" : null), 1500);
+    const r = process.env.CRUISER_ROUTE as "create" | "vm" | "settings" | "logs";
+    const vmName = process.env.CRUISER_VM ?? "test1";
+    setTimeout(() => {
+        store.getState().setRoute(r, r === "vm" || r === "logs" ? vmName : null);
+        if (r === "logs") {
+            if (process.env.CRUISER_LOG_SOURCE === "journal") store.getState().setLogs({ source: "journal" });
+            void svc.refreshLogs();
+            void svc.loadLogUnits();
+            // first fetch races service init — retry once so the shot has text
+            setTimeout(() => void svc.refreshLogs(), 2500);
+        }
+    }, 1500);
     if (r === "settings") setTimeout(() => svc.runDoctor(), 1600);
 }
 

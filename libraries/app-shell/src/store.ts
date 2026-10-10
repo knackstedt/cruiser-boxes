@@ -103,7 +103,27 @@ export interface UsbChoice {
     writable: boolean;
 }
 
-export type Route = "home" | "create" | "vm" | "settings";
+export type Route = "home" | "create" | "vm" | "settings" | "logs";
+
+/** Logs screen state — source picker + journal filters + fetched text. */
+export interface LogsState {
+    source: "runner" | "journal";
+    file: string;                // runner log id ("cruiser" | "qemu" | "serial" | "install-serial")
+    follow: boolean;             // poll the source while the screen is open
+    lines: number;
+    unit: string;
+    priority: string;            // "" = all
+    boot: string;                // "" = all boots, "0" current, "-1" previous…
+    since: string;               // journalctl timespec, "" = unset
+    grep: string;                // -g regex, "" = unset
+    text: string;
+    error: string | null;
+    transport: string;           // "qga" | "ssh" | "" — last journal fetch
+    files: { id: string; name: string; path: string; exists: boolean; sizeBytes: number }[];
+    units: string[];             // _SYSTEMD_UNIT values from the current boot
+    fetchedAt: number;
+    loading: boolean;
+}
 
 export interface CruiserState {
     route: Route;
@@ -124,6 +144,7 @@ export interface CruiserState {
     confirm: string | null;
     /** Name of the VM being edited in the create wizard (edit mode), or null. */
     editVm: string | null;
+    logs: LogsState;
 }
 
 export interface CruiserActions {
@@ -143,9 +164,16 @@ export interface CruiserActions {
     setSysinfo(si: SysInfo | null): void;
     setConfirm(c: string | null): void;
     setEditVm(name: string | null): void;
+    setLogs(p: Partial<LogsState>): void;
 }
 
 export type CruiserStore = CruiserState & CruiserActions;
+
+const defaultLogs = (): LogsState => ({
+    source: "runner", file: "cruiser", follow: false,
+    lines: 300, unit: "", priority: "", boot: "0", since: "", grep: "",
+    text: "", error: null, transport: "", files: [], units: [], fetchedAt: 0, loading: false,
+});
 
 const defaultCreate = (): CreateForm => ({
     name: "", cpus: 4, memMiB: 8192, diskGiB: 100,
@@ -175,6 +203,7 @@ export function createCruiserStore() {
         sysinfo: null,
         confirm: null,
         editVm: null,
+        logs: defaultLogs(),
         setRoute: (route, vm = null) => set({ route, selectedVm: vm, confirm: null, editVm: null }),
         setVms: (vms) => set({ vms }),
         setStatus: (status) => set({ status }),
@@ -189,6 +218,7 @@ export function createCruiserStore() {
         setSysinfo: (sysinfo) => set({ sysinfo }),
         setConfirm: (confirm) => set({ confirm }),
         setEditVm: (editVm) => set({ editVm }),
+        setLogs: (p) => set((s) => ({ logs: { ...s.logs, ...p } })),
         toggleUsb: (key) => set((s) => ({
             create: {
                 ...s.create,

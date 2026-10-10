@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { createServer, type Socket } from "node:net";
-import { rm } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { defaultSpec, parseVmSpec } from "../libraries/vm-core/src/config/schema";
-import { diskPath, VMS_DIR } from "../libraries/vm-core/src/paths";
+import { diskPath, VMS_DIR, vmPaths } from "../libraries/vm-core/src/paths";
+import { journalArgs, tailFile, runnerLogFiles } from "../libraries/vm-core/src/logs";
 import { join } from "node:path";
 import { JsonSocket } from "../libraries/vm-core/src/qmp/socket-json";
 import { guestLayoutFromHost } from "../libraries/provision/src/monitors";
@@ -280,6 +281,52 @@ describe("freerdpArgs", () => {
     test("+grab-keyboard when grab enabled", () => {
         const s = spec("windowed"); s.display.grabKeyboard = true;
         expect(freerdpArgs(s, { rdpPort: 1 })).toContain("+grab-keyboard");
+    });
+});
+
+// ── logs ──
+
+describe("logs", () => {
+    test("journalArgs builds the filtered command", () => {
+        expect(journalArgs()).toEqual(["/usr/bin/journalctl", "--no-pager", "-o", "short-iso", "-n", "300"]);
+        expect(journalArgs({ lines: 500, unit: "sshd.service", priority: "err", boot: -1, since: "1 hour ago", grep: "fail" }))
+            .toEqual(["/usr/bin/journalctl", "--no-pager", "-o", "short-iso", "-n", "500",
+                "-u", "sshd.service", "-p", "err", "-b", "-1", "--since", "1 hour ago", "-g", "fail"]);
+    });
+    test("journalArgs drops bogus priorities and clamps lines", () => {
+        const a = journalArgs({ lines: 99999, priority: "bogus" });
+        expect(a).toContain("5000");
+        expect(a).not.toContain("bogus");
+        expect(a).not.toContain("-p");
+    });
+    test("tailFile reads the last N lines", async () => {
+        const p = `/var/tmp/cruiser-test-tail-${process.pid}.log`;
+        await writeFile(p, Array.from({ length: 50 }, (_, i) => `line ${i}`).join("\n") + "\n");
+        try {
+            const t = await tailFile(p, 5);
+            const got = t.trim().split("\n");
+            expect(got).toHaveLength(5);
+            expect(got[4]).toBe("line 49");
+        } finally {
+            await rm(p, { force: true });
+        }
+    });
+    test("tailFile bounds the read to the tail of a large file", async () => {
+        const p = `/var/tmp/cruiser-test-tail-big-${process.pid}.log`;
+        await writeFile(p, Array.from({ length: 20000 }, (_, i) => `${"x".repeat(60)} ${i}`).join("\n"));
+        try {
+            const t = await tailFile(p, 10, 5000);
+            const got = t.trim().split("\n");
+            expect(got).toHaveLength(10);
+            expect(got[9]).toContain("19999");
+        } finally {
+            await rm(p, { force: true });
+        }
+    });
+    test("runnerLogFiles lists the run-dir sources", () => {
+        const files = runnerLogFiles(vmPaths("cruiser-test-no-such-vm"));
+        expect(files.map((f) => f.id)).toEqual(["cruiser", "qemu", "serial", "install-serial"]);
+        expect(files.every((f) => !f.exists)).toBe(true);
     });
 });
 

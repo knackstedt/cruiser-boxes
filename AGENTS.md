@@ -29,6 +29,11 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 - `src/cli.ts` — headless control surface (vm/usb/provision/host/doctor).
 - `libraries/vm-core` — VmSpec schema, QEMU argv builder, QMP/QGA clients
   (pure TS over unix sockets), lifecycle + reattach, disk ops, USB, rendernode.
+  `logs.ts` — the Logs screen's backends: run/ file tails (cruiser.log is
+  tee'd from lifecycle + provision via `appendVmLog`; serial.log is attached
+  on every boot) and guest journalctl with filters over QGA, falling back to
+  ssh+sudo when `guestAgentContext` reports a confined agent (also used by
+  guest-setup).
 - `libraries/host-int` — WmAdapter impls (kde-x11 full; kde-wayland partial;
   gnome-x11; gnome-wayland stub), xfreerdp viewer + ViewerSession.
 - `libraries/provision` — cloudimg+NoCloud, ISO autoinstall, guest-setup driver

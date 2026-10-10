@@ -34,6 +34,10 @@ export class CruiserShell {
     private lastRoute = "";
     private pendingParts: RouteParts | null = null;
     private lastParts: RouteParts | null = null;
+    private logInputTimer: ReturnType<typeof setTimeout> | null = null;
+    /** True while the log pane sits at (or the user wants) the bottom —
+     *  scroll events on #logpane recompute it via the #logend sentinel. */
+    private logPinned = true;
 
     constructor(
         device: GPUDevice,
@@ -116,9 +120,13 @@ export class CruiserShell {
         const st = () => this.store.getState();
         const svc = this.svc;
         this.host.onAction("nav", (d) => {
-            const route = d.route as "home" | "create" | "settings" | "vm" | undefined;
+            const route = d.route as "home" | "create" | "settings" | "vm" | "logs" | undefined;
             if (!route) return;
             st().setRoute(route, d.vm ?? null);
+            if (route === "logs") {
+                void svc.refreshLogs();
+                void svc.loadLogUnits();
+            }
             if (route === "create") {
                 void svc.refreshCreateExtras();
                 // Fresh wizard on each entry — also clears values an Edit
@@ -191,6 +199,18 @@ export class CruiserShell {
             if (d.vm && d.snap && this.armed(`vm-restore:${d.vm}:${d.snap}`)) svc.restoreSnapshot(d.vm, d.snap);
         });
         this.host.onAction("doctor", () => { svc.runDoctor(); });
+        this.host.onAction("log-set", (d) => {
+            const f = d.field;
+            if (!f) return;
+            const patch: Record<string, unknown> = {};
+            if (f === "lines") patch.lines = Number(d.value) || 300;
+            else if (f === "follow") patch.follow = d.value === "true";
+            else patch[f] = d.value ?? "";
+            st().setLogs(patch);
+            if (f === "source" && d.value === "journal") void svc.loadLogUnits();
+            void svc.refreshLogs();
+        });
+        this.host.onAction("log-refresh", () => { void svc.refreshLogs(); });
     }
 
     /** <input data-field="x"> → store.create[x] on every input event. */
@@ -203,9 +223,23 @@ export class CruiserShell {
                 if (this.gate.blur()) queueMicrotask(() => this.pushRender());
                 return;
             }
+            if (ev.t === "scroll") {
+                if (ev.id === "logpane") void this.updateLogPin();
+                return;
+            }
             if (ev.t !== "input" && ev.t !== "change") return;
             const field = ev.d?.field;
             if (!field || ev.v === undefined) return;
+            // log-* fields bind to store.logs — write directly (a setLogs
+            // re-render is gated while the input holds focus anyway) and
+            // debounce a fetch so typing filters live.
+            if (field.startsWith("log-")) {
+                const st = this.store.getState();
+                (st.logs as unknown as Record<string, unknown>)[field.slice(4)] = ev.v;
+                if (this.logInputTimer) clearTimeout(this.logInputTimer);
+                this.logInputTimer = setTimeout(() => { void this.svc.refreshLogs(); }, 700);
+                return;
+            }
             const cur = this.store.getState().create;
             // memInput is display-only: convert the typed value to memMiB in
             // the active unit. Writing memMiB directly keeps focus stable.
@@ -255,16 +289,48 @@ export class CruiserShell {
             const flash = () => { p.scrollTo(".content", 0, 1); p.scrollTo(".content", 0, 0); };
             queueMicrotask(flash);
             setTimeout(flash, 30);
+            // log pane opens pinned to the newest lines
+            if (st.route === "logs") {
+                this.logPinned = true;
+                setTimeout(() => p.scrollTo(".logpre", 0, 1e9), 60);
+            }
         } else {
             const prev = this.lastParts!;
             if (parts.topbar !== prev.topbar) p.setInnerHtml(".topbar", parts.topbar);
             if (parts.content !== prev.content) p.setInnerHtml(".content", parts.content);
+            // .logpre is a sibling of .content patched through its own
+            // region — the scrollport node (and its scroll offset) survives,
+            // so refreshes don't reset or blank the pane. Re-pin to the
+            // newest lines only when already at the bottom or following.
+            if (parts.log !== null && parts.log !== prev.log) {
+                p.setInnerHtml(".logpre", parts.log);
+                if (this.logPinned || st.logs.follow) this.pinLogToBottom();
+            }
             if (parts.footer !== prev.footer) p.setInnerHtml(".footer", parts.footer);
         }
         this.lastParts = parts;
     }
 
-    /** Render panels into an already-open render pass covering the surface. */
+    /** Re-pin the log pane to its newest lines — now + once after layout
+     *  (scrollTo clamps against the scroll range, which lags a frame). */
+    private pinLogToBottom(): void {
+        const p = this.panel;
+        if (!p) return;
+        this.logPinned = true;
+        p.scrollTo(".logpre", 0, 1e9);
+        setTimeout(() => this.panel?.scrollTo(".logpre", 0, 1e9), 30);
+    }
+
+    /** Sentinel probe: the .logend div sits at the pane's end — when its
+     *  rect is within ~2 lines of the pane's bottom edge the user is at the
+     *  tail and refreshes may re-pin; scrolled up means "leave me here". */
+    private async updateLogPin(): Promise<void> {
+        const p = this.panel;
+        if (!p) return;
+        const [pre, end] = await Promise.all([p.getRect(".logpre"), p.getRect(".logend")]);
+        if (!pre || !end) return;
+        this.logPinned = end.y <= pre.y + pre.h + 32;
+    }
     composite(pass: GPURenderPassEncoder): void {
         this.host.compositor.render(pass, this.W, this.H);
     }
@@ -276,6 +342,7 @@ export class CruiserShell {
 
     dispose(): void {
         clearInterval(this.spinTimer);
+        if (this.logInputTimer) clearTimeout(this.logInputTimer);
         if (this.confirmTimer) clearTimeout(this.confirmTimer);
         this.unsub();
         this.host.dispose();

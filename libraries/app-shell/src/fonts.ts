@@ -18,6 +18,7 @@ import { readFileSync } from "node:fs";
 // rules so screens.ts picks up whatever was actually registered.
 let regularUrl = "ui://cruiser-fonts/regular.ttf";
 let boldUrl = "ui://cruiser-fonts/bold.ttf";
+let monoUrl = "ui://cruiser-fonts/mono.ttf";
 
 type ResourceSink = { registerResource(url: string, bytes: Uint8Array | ArrayBuffer): void };
 
@@ -41,7 +42,8 @@ function fontExt(path: string): string {
 export function fontFaceCss(): string {
     return (
         `@font-face { font-family:'Cruiser Sans'; font-weight:400; src:url('${regularUrl}'); }\n` +
-        `@font-face { font-family:'Cruiser Sans'; font-weight:700; src:url('${boldUrl}'); }\n`
+        `@font-face { font-family:'Cruiser Sans'; font-weight:700; src:url('${boldUrl}'); }\n` +
+        `@font-face { font-family:'Cruiser Mono'; font-weight:400; src:url('${monoUrl}'); }\n`
     );
 }
 
@@ -59,6 +61,11 @@ export function registerUiFonts(sink: ResourceSink): void {
         const bold = fcFontFile("sans-serif:weight=bold") ?? regular;
         boldUrl = `ui://cruiser-fonts/bold${fontExt(bold)}`;
         sink.registerResource(boldUrl, readFileSync(bold));
+        const mono = fcFontFile("monospace");
+        if (mono) {
+            monoUrl = `ui://cruiser-fonts/mono${fontExt(mono)}`;
+            sink.registerResource(monoUrl, readFileSync(mono));
+        }
     } catch {
         // fc-match absent / unreadable font — the embedded fallback applies.
     }

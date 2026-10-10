@@ -5,6 +5,7 @@
 
 import { VmSpec } from "../../vm-core/src/config/schema";
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
+import { appendVmLog } from "../../vm-core/src/logs";
 import { detectAdapter } from "../../host-int/src/detect";
 import { guestLayoutFromHost } from "./monitors";
 import { provisionCloudimg } from "./cloudimg";
@@ -26,7 +27,11 @@ export interface ProvisionOpts {
 }
 
 const noop = () => {};
-function log(o: ProvisionOpts, m: string) { (o.onLog ?? noop)(m); }
+function log(h: VmHandle, o: ProvisionOpts, m: string) {
+    (o.onLog ?? noop)(m);
+    // tee into run/cruiser.log — the runner journal the Logs screen reads
+    void appendVmLog(h.paths, m);
+}
 
 /** Generate + persist credentials; returns plaintext password for the run. */
 async function ensurePassword(spec: VmSpec, o: ProvisionOpts): Promise<string> {
@@ -52,7 +57,7 @@ export async function provisionVmCloudimg(h: VmHandle, o: ProvisionOpts): Promis
     const pw = await ensurePassword(spec, o);
     const { pubText } = await (await import("../../vm-core/src/sshkey")).ensureKeypair();
     const sshKeys = [...(o.sshKeys ?? []), pubText];
-    log(o, `fetching cloud image (${spec.os.family} ${o.release ?? (spec.os.release || "default")})…`);
+    log(h, o, `fetching cloud image (${spec.os.family} ${o.release ?? (spec.os.release || "default")})…`);
     const tc = await (await import("../../vm-core/src/qemu/resolve")).resolveToolchain();
     const { seedIso } = await provisionCloudimg(spec, tc.qemuImg, {
         release: o.release, username: spec.credentials.username, password: pw,
@@ -60,19 +65,19 @@ export async function provisionVmCloudimg(h: VmHandle, o: ProvisionOpts): Promis
     });
     await h.saveSpec();
 
-    log(o, "first boot with NoCloud seed (cloud-init provisioning)…");
+    log(h, o, "first boot with NoCloud seed (cloud-init provisioning)…");
     await h.start({ mode: "install", install: { seedIso } });
 
-    log(o, "waiting for guest agent (cloud-init is installing the desktop stack — first boot is slow)…");
+    log(h, o, "waiting for guest agent (cloud-init is installing the desktop stack — first boot is slow)…");
     await waitForAgent(h, 25 * 60_000);
 
-    log(o, "running guest setup (rdp, autologin, monitors)…");
+    log(h, o, "running guest setup (rdp, autologin, monitors)…");
     const xml = await monitorsXml(spec, o);
     await runGuestSetup(h, { rdpPassword: pw, monitorsXml: xml, timeoutMs: 20 * 60_000 });
 
     spec.provisioned.completedAt = new Date().toISOString();
     await h.saveSpec();
-    log(o, `provisioned ${spec.name} — connect with 'cruiser vm view ${spec.name}'`);
+    log(h, o, `provisioned ${spec.name} — connect with 'cruiser vm view ${spec.name}'`);
 }
 
 /** ISO path: autoinstall to disk (long), then normal boot + guest setup. */
@@ -83,24 +88,24 @@ export async function provisionVmIso(h: VmHandle, o: ProvisionOpts): Promise<voi
     const sshKeys = [...(o.sshKeys ?? []), pubText];
     const iso = o.iso!.startsWith("http") ? await ensureIso(o.iso!) : o.iso!;
 
-    log(o, "running unattended install (watch: tail -f run/install-serial.log)…");
+    log(h, o, "running unattended install (watch: tail -f run/install-serial.log)…");
     await runIsoInstall(spec, { iso, username: spec.credentials.username, password: pw, sshKeys, timezone: o.timezone });
     await h.saveSpec();
 
-    log(o, "install complete — first normal boot…");
+    log(h, o, "install complete — first normal boot…");
     await h.start();
-    log(o, "waiting for guest agent…");
+    log(h, o, "waiting for guest agent…");
     // first boot of a fully installed desktop is slow (gdm/snap/agent init) —
     // the 26.04 desktop ISO took ~9min to a live agent
     await waitForAgent(h, 15 * 60_000);
 
-    log(o, "running guest setup…");
+    log(h, o, "running guest setup…");
     const xml = await monitorsXml(spec, o);
     await runGuestSetup(h, { rdpPassword: pw, monitorsXml: xml });
 
     spec.provisioned.completedAt = new Date().toISOString();
     await h.saveSpec();
-    log(o, `provisioned ${spec.name} — connect with 'cruiser vm view ${spec.name}'`);
+    log(h, o, `provisioned ${spec.name} — connect with 'cruiser vm view ${spec.name}'`);
 }
 
 /** Re-run just the in-guest setup on an already-provisioned VM. */
@@ -113,5 +118,5 @@ export async function reprovisionGuest(h: VmHandle, o: ProvisionOpts): Promise<v
     const password = pw || (await rdpPassword(h.spec))!;
     const xml = await monitorsXml(h.spec, o);
     await runGuestSetup(h, { rdpPassword: password, monitorsXml: xml });
-    log(o, "guest setup re-applied");
+    log(h, o, "guest setup re-applied");
 }

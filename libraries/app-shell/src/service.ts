@@ -10,6 +10,7 @@ import { CACHE_DIR, CLOUDIMG_DIR, CONFIG_DIR, DATA_DIR, ISO_DIR, VMS_DIR } from 
 import { detectAdapter, detectSession } from "../../host-int/src/detect";
 import { ViewerSession } from "../../host-int/src/session";
 import { listUsbDevices } from "../../vm-core/src/usb/usb";
+import { runnerLogFiles, tailFile, guestJournal, guestJournalUnits } from "../../vm-core/src/logs";
 import { run, which } from "../../sys/src/exec";
 import { cpus, totalmem, homedir } from "node:os";
 import { join } from "node:path";
@@ -24,6 +25,7 @@ export class CruiserService {
     private registry = new VmRegistry();
     private handles = new Map<string, VmHandle>();
     private pollTimer: ReturnType<typeof setInterval> | null = null;
+    private logTimer: ReturnType<typeof setInterval> | null = null;
     private viewers = new Map<string, ViewerSession>();
     private viewerPending = new Map<string, Promise<void>>();
     private metrics = new VmMetricsSampler();
@@ -51,10 +53,18 @@ export class CruiserService {
             this.refreshSettings().catch(() => {}),
         ]);
         this.pollTimer = setInterval(() => this.refresh().catch(() => {}), 3000);
+        // "follow" on the logs screen — re-fetch while it's open; a slow
+        // journal fetch just overlaps the next tick (loading flag guards).
+        this.logTimer = setInterval(() => {
+            const st = this.store.getState();
+            if (st.route === "logs" && st.logs.follow && !st.logs.loading)
+                this.refreshLogs().catch(() => {});
+        }, 3000);
     }
 
     async dispose(): Promise<void> {
         if (this.pollTimer) clearInterval(this.pollTimer);
+        if (this.logTimer) clearInterval(this.logTimer);
         this.viewers.forEach((v) => v.close().catch(() => {}));
         // owned = stops with the app; ephemeral = stops AND deletes the vm dir.
         for (const h of this.handles.values()) {
@@ -283,6 +293,62 @@ export class CruiserService {
             desktops,
         };
         this.store.getState().setHost(host);
+    }
+
+    // ── logs ──
+
+    /** Fetch the active log source for the selected VM into store.logs. */
+    async refreshLogs(): Promise<void> {
+        const st = this.store.getState();
+        const name = st.selectedVm;
+        const h = name ? this.handles.get(name) : undefined;
+        if (!h) return;
+        const l = st.logs;
+        if (l.source === "runner") {
+            const files = runnerLogFiles(h.paths);
+            const f = files.find((x) => x.id === l.file) ?? files[0]!;
+            try {
+                const text = f.exists ? await tailFile(f.path, l.lines) : "";
+                st.setLogs({
+                    files, text,
+                    error: f.exists ? null : `${f.name} not created yet`,
+                    loading: false, fetchedAt: Date.now(),
+                });
+            } catch (e) {
+                st.setLogs({ files, error: e instanceof Error ? e.message : String(e), loading: false });
+            }
+            return;
+        }
+        // journal — needs a live guest
+        if (!h.isRunning()) {
+            st.setLogs({ error: "the guest isn't running — start it to read its journal", loading: false });
+            return;
+        }
+        st.setLogs({ loading: true });
+        try {
+            const r = await guestJournal(h, {
+                lines: l.lines,
+                unit: l.unit || undefined,
+                priority: l.priority || undefined,
+                boot: l.boot === "" ? undefined : Number(l.boot),
+                since: l.since || undefined,
+                grep: l.grep || undefined,
+            });
+            st.setLogs({ text: r.text.trim() || "(no entries match)", transport: r.transport, error: null, loading: false, fetchedAt: Date.now() });
+        } catch (e) {
+            st.setLogs({ error: e instanceof Error ? e.message : String(e), loading: false });
+        }
+    }
+
+    /** Unit names for the journal unit picker — one-shot per screen entry. */
+    async loadLogUnits(): Promise<void> {
+        const st = this.store.getState();
+        const h = st.selectedVm ? this.handles.get(st.selectedVm) : undefined;
+        if (!h || !h.isRunning()) return;
+        try {
+            const { units } = await guestJournalUnits(h);
+            st.setLogs({ units });
+        } catch { /* picker stays empty — the unit text field still works */ }
     }
 
     // ── actions ──

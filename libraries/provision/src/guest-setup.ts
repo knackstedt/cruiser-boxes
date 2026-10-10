@@ -9,6 +9,7 @@
 
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import type { VmSpec } from "../../vm-core/src/config/schema";
+import { guestAgentContext } from "../../vm-core/src/logs";
 import { profileFromSpec, resolvePackages, resolveFlatpaks } from "./packages";
 
 /**
@@ -283,20 +284,6 @@ echo CRUISER_GUEST_SETUP_OK
 }
 
 /**
- * Is the guest agent exec context confined? Fedora confines qemu-ga under
- * SELinux (virt_qemu_ga_t) — root uid but no system privileges. Returns the
- * context string (or "" on probe failure).
- */
-async function agentContext(h: VmHandle): Promise<string> {
-    const r = await h.guestSh("cat /proc/self/attr/current 2>/dev/null; id -u", 15_000)
-        .catch(() => null);
-    if (!r) return "";
-    const out = String(r.stdout);
-    const last = out.trim().split("\n").pop() ?? "";
-    return out.includes("_ga_t:") || !last.startsWith("0") ? out : "";
-}
-
-/**
  * Guest setup over SSH. Needed where qemu-ga is SELinux-confined (Fedora):
  * sshd runs unconfined and the seed grants the user NOPASSWD sudo.
  * Requires the cruiser key authorized (seed injects it for provisioned VMs).
@@ -342,7 +329,7 @@ export async function runGuestSetup(
     const { authorizeInGuest } = await import("../../vm-core/src/sshkey");
     await authorizeInGuest(h).catch(() => {}); // confined agents can't write files — ssh seeds still work
     const script = guestSetupScript(h.spec, { rdpPassword: o.rdpPassword, monitorsXmlB64 });
-    const res = await agentContext(h)
+    const res = await guestAgentContext(h)
         ? await runGuestSetupSsh(h, script, timeoutMs)
         : await h.guestSh(script, timeoutMs);
     const stdout = res.stdout?.toString() ?? "";

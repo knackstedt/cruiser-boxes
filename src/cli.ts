@@ -5,7 +5,7 @@
 //   bun run src/cli.ts vm list
 //   bun run src/cli.ts vm create <name> [--cpus N --mem MiB --gpu venus|virgl|software
 //                                        --disk GiB --head-mode M --share PATH]
-//   bun run src/cli.ts vm start|stop|kill|status|args <name>
+//   bun run src/cli.ts vm start|stop|kill|status|args|logs <name>
 //   bun run src/cli.ts vm snapshot <name> <snap> | restore <name> <snap> |
 //                      snapshots <name> | backup <name> <dest> | resize <name> <GiB>
 //   bun run src/cli.ts usb ls | attach <vm> <vid:pid> | detach <vm> <id>
@@ -44,6 +44,9 @@ usage: cruiser <area> <command> [args]
   vm restore <name> <snapname>          vm snapshot-rm <name> <snapname>
   vm backup <name> <dest.qcow2>         vm resize <name> <newGiB>
   vm rm <name> [--disk]                vm view <name>   launch freerdp viewer + place window
+  vm logs <name> [--file cruiser|qemu|serial|install-serial] [--lines N]
+           [--journal] [--unit U] [--priority P] [--boot N] [--since X] [--grep PAT]
+           [--units]                    guest journal via QGA (ssh fallback on confined agents)
   host session                         detected DE/session + adapter caps
   host monitors|desktops               probe host display topology
   usb ls                                usb attach <vm> <vid:pid>
@@ -149,6 +152,32 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
         case "backup": { const h = await needVm(args[0]); if (!args[1]) usage(); await h.backup(args[1]); console.log(`backed up -> ${args[1]}`); break; }
         case "resize": { const h = await needVm(args[0]); await h.resizeDisk(Number(args[1])); console.log(`resized to ${args[1]}G`); break; }
         case "rm": { await needVm(args[0]); await registry.remove(args[0]!, { deleteDisk: has("--disk") }); console.log("removed"); break; }
+        case "logs": {
+            const h = await needVm(args[0]);
+            const logs = await import("../libraries/vm-core/src/logs");
+            if (has("--units")) {
+                const u = await logs.guestJournalUnits(h);
+                u.units.forEach((x) => console.log(x));
+                console.error(`— ${u.units.length} units via ${u.transport}`);
+                break;
+            }
+            if (has("--journal")) {
+                const r = await logs.guestJournal(h, {
+                    lines: num("--lines"), unit: flagVal("--unit"), priority: flagVal("--priority"),
+                    boot: num("--boot"), since: flagVal("--since"), grep: flagVal("--grep"),
+                });
+                process.stdout.write(r.text.endsWith("\n") ? r.text : `${r.text}\n`);
+                console.error(`— via ${r.transport}`);
+                break;
+            }
+            const files = logs.runnerLogFiles(h.paths);
+            const want = flagVal("--file") ?? "cruiser";
+            const f = files.find((x) => x.id === want || x.path === want);
+            if (!f) { console.error(`unknown runner log '${want}' — options: ${files.map((x) => x.id).join(", ")}`); process.exit(1); }
+            if (!f.exists) { console.error(`${f.name}: not created yet (${f.path})`); process.exit(1); }
+            process.stdout.write(await logs.tailFile(f.path, num("--lines") ?? 300));
+            break;
+        }
         case "mount": {
             const h = await needVm(args[0]);
             const { mountGuest } = await import("../libraries/host-int/src/mount");
