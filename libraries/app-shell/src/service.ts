@@ -457,8 +457,8 @@ export class CruiserService {
         const h = this.handles.get(name); if (!h) return;
         const st = this.store.getState();
         await this.run(`stop ${name}`, () => {
-            st.setStatus(`stopping ${name} — sent ACPI shutdown request to the guest OS`);
-            return h.stop(20_000, (ms) => st.setStatus(
+            st.setStatus(`stopping ${name} — sent shutdown request to the guest OS`);
+            return h.stop(60_000, (ms) => st.setStatus(
                 `stopping ${name} — guest is shutting down… ${Math.floor(ms / 1000)}s ` +
                 `(power off, not suspend — memory is not saved)`,
             ));

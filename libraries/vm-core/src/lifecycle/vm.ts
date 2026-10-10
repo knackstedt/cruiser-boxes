@@ -184,16 +184,26 @@ export class VmHandle extends EventEmitter {
     }
 
     /**
-     * Graceful shutdown: asks the guest OS to power off via ACPI
-     * (`system_powerdown`) — this is a normal shutdown, NOT suspend-to-disk;
-     * memory contents are discarded. `onWait` fires ~every 500ms with the
-     * elapsed time while the guest drains. Returns "stopped" once the QEMU
-     * process exits, or "timeout" if the guest ignored the request — callers
-     * decide whether to escalate to kill().
+     * Graceful shutdown: asks the guest OS to power off — this is a normal
+     * shutdown, NOT suspend-to-disk; memory contents are discarded. Two
+     * mechanisms are attempted: QMP `system_powerdown` (an ACPI power-button
+     * event — desktop sessions can inhibit it: KDE's Powerdevil swallows it
+     * on Fedora guests) and QGA `guest-shutdown` (an init-level shutdown
+     * that doesn't depend on power-button handling). Whichever the guest
+     * honors first wins; a missing monitor or dead agent just drops that
+     * path. `onWait` fires ~every 500ms with the elapsed time while the
+     * guest drains. Returns "stopped" once the QEMU process exits, or
+     * "timeout" if the guest ignored the request — callers decide whether
+     * to escalate to kill().
      */
-    async stop(timeoutMs = 30_000, onWait?: (elapsedMs: number) => void): Promise<"stopped" | "timeout"> {
+    async stop(timeoutMs = 60_000, onWait?: (elapsedMs: number) => void): Promise<"stopped" | "timeout"> {
         if (!this.isRunning()) return "stopped";
-        try { await this.withQmp((q) => q.systemPowerdown()); } catch { /* fall through */ }
+        let acpi = false, agent = false;
+        try { await this.withQmp((q) => q.systemPowerdown()); acpi = true; } catch { /* no monitor */ }
+        // The agent may take seconds to not-answer; keep the probe budget
+        // short so an agent-less guest doesn't stall the drain wait.
+        try { await this.withQga((g) => g.shutdown("powerdown"), 5_000); agent = true; } catch { /* no agent */ }
+        void appendVmLog(this.paths, `stop: shutdown requested (acpi=${acpi} agent=${agent})`);
         const deadline = Date.now() + timeoutMs;
         const started = Date.now();
         while (this.isRunning() && Date.now() < deadline) {
@@ -201,7 +211,7 @@ export class VmHandle extends EventEmitter {
             await new Promise((r) => setTimeout(r, 500));
         }
         if (this.isRunning()) {
-            void appendVmLog(this.paths, `stop: guest ignored ACPI powerdown (${timeoutMs}ms)`);
+            void appendVmLog(this.paths, `stop: guest ignored shutdown request (${timeoutMs}ms, acpi=${acpi} agent=${agent})`);
             return "timeout";
         }
         this.cleanupRunDir();
