@@ -1,0 +1,30 @@
+/* cruiser docs — brand tint over the default Starlight theme */
+:root {
+    --sl-color-accent-low: #1d3348;
+    --sl-color-accent: #4aa3ff;
+    --sl-color-accent-high: #bfe0ff;
+    --sl-color-white: #ffffff;
+    --sl-color-gray-1: #eceef2;
+    --sl-color-gray-2: #c2c7d0;
+    --sl-color-gray-3: #8b93a1;
+    --sl-color-gray-4: #5a6270;
+    --sl-color-gray-5: #3a4049;
+    --sl-color-gray-6: #2b3038;
+    --sl-color-gray-7: #21252c;
+    --sl-color-black: #17191e;
+}
+
+:root[data-theme="light"] {
+    --sl-color-accent-low: #cfe6ff;
+    --sl-color-accent: #0b6bcb;
+    --sl-color-accent-high: #083d75;
+    --sl-color-white: #17191e;
+    --sl-color-gray-1: #21252c;
+    --sl-color-gray-2: #3a4049;
+    --sl-color-gray-3: #5a6270;
+    --sl-color-gray-4: #8b93a1;
+    --sl-color-gray-5: #c2c7d0;
+    --sl-color-gray-6: #eceef2;
+    --sl-color-gray-7: #f6f7f9;
+    --sl-color-black: #ffffff;
+}

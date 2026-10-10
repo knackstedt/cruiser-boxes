@@ -22,6 +22,17 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   process start): entry/host/shell/service stages in `startup-profile.ts`
   plus per-stage marks inside `createNativeHost` (engine).
 
+## CI / releases
+
+- `.github/workflows/ci.yml` — typecheck + lint + `bun test tests/` on push/PR;
+  reused by `release.yml` (tag `v*` → `draft release --target=linux` →
+  deb + AppImage uploaded to a GitHub release; `-` in the tag = prerelease).
+- CI does NOT use the sibling `file:` engine checkout —
+  `.github/actions/downdraft-deps` rewrites `@downdraft/*` to the published
+  npm version (`^0.2.0` by default). Engine changes must be **published to
+  npm** before cruiser CI can see them; typecheck fails on unreleased APIs
+  (e.g. `PanelSpec.smoothWheel` existed locally long before npm had it).
+
 ## Layout
 
 - `src/native-entry.ts` — DownDraft app entry (bare `createNativeHost` +

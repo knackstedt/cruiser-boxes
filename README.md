@@ -15,6 +15,9 @@ Working today (verified on KDE/X11, QEMU 11.1.1):
 - Provisioning pipeline: cloudimg+NoCloud and ISO autoinstall code paths,
   QGA guest-setup driver (gnome-remote-desktop system daemon, autologin,
   share mounts, monitors.xml generated from host topology)
+- Host theme passthrough: the dark/light hint is baked at provisioning and
+  live-synced into the guest DE while a viewer is attached
+  (`CRUISER_THEME_SYNC=0` opts out)
 - USB enumeration + QMP hotplug plumbing, snapshots/backup/resize ops
 - Waypipe app-mode scaffolding (vsock primary, ssh fallback)
 - DownDraft UI: VM list, create wizard, VM detail, settings+doctor —
@@ -36,5 +39,6 @@ bun run src/native-entry.ts                  # the UI
 Host deps: `apt install freerdp3-x11 ovmf cloud-image-utils waypipe socat
 wmctrl xdotool qdbus` (+ `virtiofsd` for the preferred share backend).
 
-Docs: `docs/architecture.md`, `docs/de-matrix.md`, `docs/vfio.md`,
-`docs/rendering-futures.md`. Agent notes: `AGENTS.md`.
+Docs: the `docs/` Starlight site (deployed to GitHub Pages via
+`.github/workflows/deploy-docs.yml`; `cd docs && bun run dev` to preview).
+Agent notes: `AGENTS.md`.

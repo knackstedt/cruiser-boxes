@@ -1,0 +1,53 @@
+---
+title: Cruiser
+description: QEMU/KVM VM manager for Linux guests — GPU-accelerated virtual machines integrated into your desktop.
+template: splash
+hero:
+    tagline: GPU-accelerated Linux VMs, integrated into your desktop — fullscreen, windowed, whole-desktop, or single-app. Raw QEMU, no containers, no Electron.
+    image:
+        file: ../../assets/logo.svg
+    actions:
+        - text: Get started
+          link: /installation/
+          icon: right-arrow
+        - text: CLI reference
+          link: /reference/cli/
+          icon: document
+          variant: minimal
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+## What is Cruiser?
+
+Cruiser is a WinBoat-style QEMU/KVM manager for **Linux guests**. WinBoat wraps
+QEMU in Docker because Windows needs an appliance boundary — Linux guests need
+none of that. Cruiser drives QEMU directly over its QMP/QGA unix sockets, so
+lifecycle, hotplug, snapshots, and in-guest exec are all first-class, and
+daemonized VMs survive app restarts by reattaching to their sockets.
+
+<CardGrid stagger>
+    <Card title="Real GPU acceleration" icon="rocket">
+        Venus (Vulkan-in-guest via virglrenderer), virgl (OpenGL), or software —
+        with automatic render-node selection.
+    </Card>
+    <Card title="Desktop-integrated viewing" icon="laptop">
+        xfreerdp viewer in windowed, virtual-desktop, or fullscreen-monitor head
+        modes, placed by per-DE window adapters.
+    </Card>
+    <Card title="Single-app mode" icon="puzzle">
+        Guest applications appear as native host windows over waypipe (vsock or
+        SSH transport).
+    </Card>
+    <Card title="One-command provisioning" icon="setting">
+        Cloud-image + NoCloud or ISO autoinstall, then a QGA-driven guest-setup
+        that wires the RDP stack, shares, theme, and monitors.
+    </Card>
+</CardGrid>
+
+## Where to next?
+
+- **[Installation](/installation/)** — host dependencies, the pinned QEMU toolchain, and `doctor`.
+- **[Quickstart](/quickstart/)** — create, provision, and view a VM in five commands.
+- **[Creating VMs](/guides/creating-vms/)** — every `vm create` flag and what it maps to.
+- **[Architecture](/internals/architecture/)** — how the pieces fit together under the hood.

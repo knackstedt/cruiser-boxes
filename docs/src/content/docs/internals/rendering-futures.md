@@ -1,4 +1,7 @@
-# Rendering futures — fewer copies than FreeRDP
+---
+title: Rendering futures
+description: Design note — candidate paths to fewer copies than FreeRDP.
+---
 
 ## Today's path (baseline)
 
@@ -14,14 +17,14 @@ a video stream: encode/decode latency + artifacts + CPU burn on both sides.
 ### 1. IronRDP → napi-rs → wgpu (the planned investigation)
 
 Replace xfreerdp's X11 window with an in-process RDP client rendered
-straight into the DownDraft surface:
+straight into the app surface:
 
 - `IronRDP` (Rust, maintained) does the RPD decode; exposes pixel buffers.
 - napi-rs binding → an `RdpClient` node addon living in this repo
   (`native/rdp-client/`) — no C/C++, consistent with house rules.
 - Upload decoded frames as wgpu textures → the app composites into its own
-  surface (fullscreen-monitor mode becomes a real DownDraft window, app
-  chrome and RDP in one compositor).
+  surface (fullscreen-monitor mode becomes a real app window, chrome and
+  RDP in one compositor).
 
 Saves the X11 round-trip, gives us control of frame pacing vsync-aligned
 with the host, and unlocks per-region updates. Still a video codec on the

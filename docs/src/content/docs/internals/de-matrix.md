@@ -1,4 +1,7 @@
-# DE / session capability matrix
+---
+title: DE / session capability matrix
+description: What each host desktop environment + session type can do for window placement and shortcuts.
+---
 
 | capability | kde-x11 | kde-wayland | gnome-x11 | gnome-wayland | other X11 (EWMH) |
 |---|---|---|---|---|---|
@@ -9,10 +12,12 @@
 | fullscreen | wmctrl -b ✅ | ⚠️ KWin script | wmctrl -b ✅ | ❌ | wmctrl -b ✅ |
 | escape shortcuts | kglobalshortcutsrc + KWin reconfigure ✅ | same ✅ | gsettings wm.keybindings ✅ | ❌ needs extension | ❌ |
 
-## Verified live (this host: KDE/X11, KWin X11, 4 desktops, 3 monitors)
+## Verified live
+
+Reference host: KDE/X11, KWin X11, 4 desktops, 3 monitors.
 
 - `host monitors` → xrandr parses DP-4/DP-0/HDMI-1 with exact geometry
-- `host desktops` → qdbus returns real UUIDs (matches devvm kwinrulesrc)
+- `host desktops` → qdbus returns real UUIDs
 - freerdp window found by pid, moved to desktop 3, fullscreened
 
 ## Gaps & plan
@@ -27,3 +32,10 @@
   then, `windowed` mode still works (the viewer places itself).
 - **escape shortcuts** only function when the viewer runs `-grab-keyboard`
   (host keeps the combos). With `+grab-keyboard` set, install is skipped.
+
+## Matching details
+
+- `wmctrl -x` wmclass is `instance.class` (e.g. `xfreerdp.xfreerdp`) —
+  matched per-part, case-insensitive.
+- freerdp window titles are `cruiser:<vm>` (not "FreeRDP"), which is the
+  pid-match fallback in `ViewerSession`.

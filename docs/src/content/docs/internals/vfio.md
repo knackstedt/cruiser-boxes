@@ -1,11 +1,18 @@
-# VFIO PCIe passthrough — design note (not implemented)
+---
+title: VFIO design note
+description: PCIe passthrough as a future GPU mode — what it would take and why it's deferred.
+---
+
+:::note[Not implemented]
+This is a design note. GPU (and eventually other PCIe device) passthrough
+is deliberately out of the initial build — it's the highest-risk feature
+(can wedge the host GPU driver) and the Venus path covers the perf story
+for most workloads.
+:::
 
 ## Scope
 
-GPU (and eventually other PCIe device) passthrough as a selectable GPU mode
-alongside venus/virgl/software. Deliberately out of the initial build —
-it's the highest-risk feature (can wedge the host GPU driver) and the Venus
-path covers the perf story for most workloads.
+GPU passthrough as a selectable GPU mode alongside venus/virgl/software.
 
 ## What it would take
 
@@ -27,7 +34,7 @@ path covers the perf story for most workloads.
 
 ## Hazards
 
-- Host loses the card while bound (this box's display is on it).
+- Host loses the card while bound (the dev box's display is on it).
 - NVIDIA vfio quirks (error 43 workarounds are mostly history, but code
   paths differ per vendor).
 - Suspend/resume + reset bugs are card-specific.
