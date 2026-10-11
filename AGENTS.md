@@ -168,6 +168,13 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   main thread) — a full-page vello repaint is ~20ms, so in-process raster
   starves input during scroll/fade animations. `CRUISER_UI_BACKEND=local`
   forces the in-process backend; the settings page shows the live kind.
+  Node-runtime workers (packaged builds): pre-fix `worker-bootstrap.mjs`
+  drops host→worker messages posted before `self.onmessage` is assigned —
+  the mount-time doc "create" lands in that window → blank window. The
+  engine fix (queue until assignment) is committed in ../downdraft-engine;
+  until it ships on npm, `CruiserShell` defers initPanel until the worker's
+  ready handshake flips `host.docCaps` (2s failsafe). Bun/Deno unaffected —
+  their native Workers queue per spec.
 - Escape shortcuts require `-grab-keyboard` (host keeps combos) — the schema
   default `grabKeyboard:false` is load-bearing. `command:<cmd>` actions bind
   via KDE khotkeys (Plasma 5 — a `SIMPLE_ACTION_DATA` entry in khotkeysrc +
