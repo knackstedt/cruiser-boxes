@@ -10,6 +10,7 @@
 // ============================================================================
 
 import { run } from "../../sys/src/exec";
+import { createHash } from "node:crypto";
 import type {
     AdapterCaps, EscapeActionSpec,
     WindowHandle, WindowMatcher, WmAdapter,
@@ -128,6 +129,7 @@ export function gnomeX11(): WmAdapter {
         ...base,
         async installEscapeShortcut(keys: string, action: EscapeActionSpec) {
             const binding = gnomeKeys(keys);
+            if (action.kind === "command") return gnomeInstallCommandShortcut(binding, action.argv);
             const path = gnomeKeybindFor(action);
             if (!path) throw new Error(`escape action '${action.kind}' has no GNOME binding`);
             const [schema, key] = path;
@@ -140,11 +142,15 @@ export function gnomeX11(): WmAdapter {
 
 function gnomeKeys(keys: string): string {
     // "ctrl+alt+delete" → "<Ctrl><Alt>Delete"
-    const map: Record<string, string> = { delete: "Delete", escape: "Escape", return: "Return", space: "space" };
+    const map: Record<string, string> = {
+        delete: "Delete", escape: "Escape", return: "Return", enter: "Return", space: "space", tab: "Tab",
+        end: "End", insert: "Insert", ins: "Insert", home: "Home",
+        pageup: "Page_Up", pgup: "Page_Up", pagedown: "Page_Down", pgdn: "Page_Down",
+    };
     const parts = keys.toLowerCase().split("+");
     const mods = parts.slice(0, -1).map((m) => `<${m === "meta" || m === "super" ? "Super" : m[0]!.toUpperCase() + m.slice(1)}>`).join("");
     const k = parts[parts.length - 1]!;
-    return mods + (map[k] ?? (k.length === 1 ? k.toUpperCase() : k));
+    return mods + (map[k] ?? (/^f\d{1,2}$/.test(k) ? k.toUpperCase() : k.length === 1 ? k.toUpperCase() : k));
 }
 
 function gnomeKeybindFor(action: EscapeActionSpec): [string, string] | null {
@@ -153,6 +159,38 @@ function gnomeKeybindFor(action: EscapeActionSpec): [string, string] | null {
     if (action.kind === "desktop-cycle")
         return ["org.gnome.desktop.wm.keybindings", action.dir === 1 ? "switch-to-workspace-right" : "switch-to-workspace-left"];
     return null;
+}
+
+/** GVariant string literal — single-quoted, backslash escapes. */
+const gv = (s: string) => `'${s.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+
+/**
+ * Command actions ride a relocatable media-keys custom-keybinding slot —
+ * the same thing Settings → Keyboard → Custom Shortcuts writes. The slot id
+ * is keyed by argv so repeat installs share it; uninstall restores the
+ * bindings list and resets the slot.
+ */
+async function gnomeInstallCommandShortcut(binding: string, argv: string[]): Promise<() => Promise<void>> {
+    const BASE = "org.gnome.settings-daemon.plugins.media-keys";
+    const SUB = `${BASE}.custom-keybinding`;
+    const id = `cruiser-${createHash("sha256").update(argv.join("\0")).digest("hex").slice(0, 8)}`;
+    const path = `/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/${id}/`;
+    const prev = (await run("gsettings", ["get", BASE, "custom-keybindings"], { noThrow: true })).stdout.trim();
+    const cur = [...prev.matchAll(/'[^']*'/g)].map((m) => m[0]);
+    const next = cur.includes(gv(path)) ? prev
+        : cur.length ? `[${cur.concat(gv(path)).join(", ")}]`
+        : `[${gv(path)}]`;
+    if (next !== prev) await run("gsettings", ["set", BASE, "custom-keybindings", next]);
+    const at = `${SUB}:${path}`;
+    await run("gsettings", ["set", at, "name", gv(`cruiser escape: ${argv.join(" ").slice(0, 60)}`)]);
+    await run("gsettings", ["set", at, "binding", gv(binding)]);
+    // the command runs through a shell — single-quote argv like logs.ts
+    const cmdline = argv.map((a) => `'${a.replaceAll("'", `'"'"'`)}'`).join(" ");
+    await run("gsettings", ["set", at, "command", gv(cmdline)]);
+    return async () => {
+        await run("gsettings", ["set", BASE, "custom-keybindings", prev || "@as []"], { noThrow: true });
+        await run("gsettings", ["reset-recursively", at], { noThrow: true });
+    };
 }
 
 // ── gnome-wayland — read-only until a companion shell extension ships ──

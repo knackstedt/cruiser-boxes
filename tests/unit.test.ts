@@ -416,8 +416,19 @@ describe("escape shortcuts", () => {
         expect(parseEscapeAction("ungrab")).toEqual({ kind: "ungrab" });
         expect(parseEscapeAction("bogus")).toBeNull();
     });
+    test("parseEscapeAction command — sh -c wrapper, keeps colons", () => {
+        expect(parseEscapeAction("command:cruiser vm kill x")).toEqual({ kind: "command", argv: ["sh", "-c", "cruiser vm kill x"] });
+        expect(parseEscapeAction("command:echo a:b:c")).toEqual({ kind: "command", argv: ["sh", "-c", "echo a:b:c"] });
+        expect(parseEscapeAction("command:")).toBeNull();
+    });
     test("kdeKeys normalizes", () => {
         expect(kdeKeys("ctrl+alt+delete")).toBe("Ctrl+Alt+Del");
         expect(kdeKeys("meta+ctrl+left")).toBe("Meta+Ctrl+Left");
+        expect(kdeKeys("ctrl+alt+end")).toBe("Ctrl+Alt+End");
+        expect(kdeKeys("ctrl+shift+f4")).toBe("Ctrl+Shift+F4");
+    });
+    test("default spec carries the kill escape hatch", () => {
+        const esc = defaultSpec("abc").display.escapeShortcuts;
+        expect(esc).toContainEqual({ keys: "ctrl+alt+end", action: "command:{cli} vm kill {vm}" });
     });
 });

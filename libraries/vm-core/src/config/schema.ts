@@ -105,8 +105,16 @@ export const VmSpec = z.object({
         sticky: z.boolean().default(false),       // fullscreen-monitor only: all desktops
         virtualDesktop: z.number().int().min(1).default(2),  // virtual-desktop mode
         windowSize: z.object({ w: z.number().int(), h: z.number().int() }).default({ w: 1600, h: 1000 }),
+        /**
+         * Host keybindings while the viewer runs. action: "<name>" or
+         * "<name>:<arg>" — host-desktop:<n>, desktop-cycle-left|right,
+         * ungrab, command:<cmdline> (sh -c; {vm} → vm name, {cli} → the
+         * cruiser cli invocation). The default kill binding is the
+         * guest-hung escape hatch.
+         */
         escapeShortcuts: z.array(EscapeShortcut).default([
             { keys: "ctrl+alt+delete", action: "host-desktop:1" },
+            { keys: "ctrl+alt+end", action: "command:{cli} vm kill {vm}" },
         ]),
         dynamicResolution: z.boolean().default(true),
         /**

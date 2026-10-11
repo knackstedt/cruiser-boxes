@@ -42,14 +42,17 @@ export function escapesActive(spec: VmSpec): boolean {
     return spec.display.headMode !== "windowed" && !spec.display.grabKeyboard;
 }
 
-export function escapeActionLabel(action: string): string {
-    const [kind, arg] = action.split(":", 2);
+export function escapeActionLabel(action: string, vmName = "{vm}"): string {
+    const i = action.indexOf(":");
+    const kind = i < 0 ? action : action.slice(0, i);
+    const arg = i < 0 ? undefined : action.slice(i + 1);
     switch (kind) {
         case "host-desktop": return `jump to host desktop ${arg ?? 1}`;
         case "desktop-cycle-left": return "cycle host desktops left";
         case "desktop-cycle-right": return "cycle host desktops right";
         case "ungrab": return "release viewer grab";
         case "none": return "no action";
+        case "command": return `run: ${(arg ?? "").replaceAll("{vm}", vmName).replaceAll("{cli}", "cruiser")}`;
         default: return action;
     }
 }
@@ -61,7 +64,7 @@ export function watermarkLines(spec: VmSpec): { text: string; kind: "title" | "d
     ];
     if (escapesActive(spec)) {
         for (const s of spec.display.escapeShortcuts.slice(0, 2))
-            lines.push({ text: `${s.keys} -> ${escapeActionLabel(s.action)}`, kind: "detail" });
+            lines.push({ text: `${s.keys} -> ${escapeActionLabel(s.action, spec.name)}`, kind: "detail" });
     } else {
         lines.push({ text: "ctrl+alt+enter toggles viewer fullscreen", kind: "detail" });
     }
@@ -73,7 +76,7 @@ export function watermarkLines(spec: VmSpec): { text: string; kind: "title" | "d
 export function shortcutsDoc(spec: VmSpec): string {
     const n = spec.name;
     const esc = escapesActive(spec)
-        ? spec.display.escapeShortcuts.map((s) => `- \`${s.keys}\` — ${escapeActionLabel(s.action)}`).join("\n") ||
+        ? spec.display.escapeShortcuts.map((s) => `- \`${s.keys}\` — ${escapeActionLabel(s.action, spec.name)}`).join("\n") ||
           "(none configured in `display.escapeShortcuts`)"
         : `None — this VM's head mode is \`${spec.display.headMode}\`${spec.display.grabKeyboard ? " with keyboard grab on" : ""}, so no host bindings are installed.`;
     return `# Cruiser VM shortcuts — ${n}

@@ -69,7 +69,10 @@ viewer is focused — e.g. the default `ctrl+alt+delete → host-desktop:1`
 jumps you back to host desktop 1 instead of sending the combo to the guest.
 
 Actions: `host-desktop:<n>`, `desktop-cycle-left`, `desktop-cycle-right`,
-`ungrab`, `none`.
+`ungrab`, `none`, `command:<cmdline>` — arbitrary host command via `sh -c`
+(`{vm}`/`{cli}` placeholders expand at install). The default
+`ctrl+alt+end → command:{cli} vm kill {vm}` is the escape hatch for a hung
+guest.
 
 They're only possible because the schema default `display.grabKeyboard:
 false` runs freerdp with `-grab-keyboard` — freerdp *doesn't* grab the

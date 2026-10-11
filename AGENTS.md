@@ -150,7 +150,11 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   starves input during scroll/fade animations. `CRUISER_UI_BACKEND=local`
   forces the in-process backend; the settings page shows the live kind.
 - Escape shortcuts require `-grab-keyboard` (host keeps combos) — the schema
-  default `grabKeyboard:false` is load-bearing.
+  default `grabKeyboard:false` is load-bearing. `command:<cmd>` actions bind
+  via KDE `[services]` desktop-launcher / GNOME custom-keybinding slots;
+  `{vm}`/`{cli}` placeholders expand in ViewerSession.open (`{cli}` →
+  `bun run src/cli.ts` in dev, `cruiser` packaged). Default:
+  `ctrl+alt+end → command:{cli} vm kill {vm}`.
 - HMR (`draft dev`): `native-entry.ts` is a "blocking entry" — its
   close-wait must release via `__ddSession.onDispose(() => resolve())` and
   skip `host.destroy()` on session end (the host is persistent-layer; the

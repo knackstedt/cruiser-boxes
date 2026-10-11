@@ -46,14 +46,16 @@ Edit while the VM is stopped; the next `vm start` picks changes up.
 | `sticky` | `false` | fullscreen-monitor only: show on all desktops |
 | `virtualDesktop` | `2` | target desktop for virtual-desktop mode |
 | `windowSize` | `{w:1600, h:1000}` | windowed mode size |
-| `escapeShortcuts` | `[{keys:"ctrl+alt+delete", action:"host-desktop:1"}]` | host keybindings while the viewer runs — keys normalized lowercase, action `name` or `name:arg` |
+| `escapeShortcuts` | `[{keys:"ctrl+alt+delete", action:"host-desktop:1"}, {keys:"ctrl+alt+end", action:"command:{cli} vm kill {vm}"}]` | host keybindings while the viewer runs — keys normalized lowercase, action `name` or `name:arg` |
 | `dynamicResolution` | `true` | freerdp dynamic-resolution channel |
 | `wallpaper` | `{managed:true, position:"bottom-right"}` | cruiser-managed guest wallpaper — watermarked with the VM name + escape hints; `position`: corner/`center`/`off` (no watermark); `managed:false` leaves the guest alone; `source` = host image path (default: generated gradient) |
 | `sound` / `microphone` / `clipboard` | `true` | RDP redirection toggles |
 | `grabKeyboard` | `false` | `false` → freerdp `-grab-keyboard` (host keeps global shortcuts — required for escape shortcuts); `true` → `+grab-keyboard` (guest gets all keys) |
 
 Escape actions: `host-desktop:<n>` · `desktop-cycle-left` ·
-`desktop-cycle-right` · `ungrab` · `none`.
+`desktop-cycle-right` · `ungrab` · `none` · `command:<cmdline>` (run via
+`sh -c`; `{vm}` expands to the VM name, `{cli}` to the cruiser CLI — `bun
+run …/src/cli.ts` in dev trees, `cruiser` when packaged).
 
 ## usb.autoAttach
 
@@ -100,7 +102,10 @@ disks the family may be wrong — guest-setup re-detects from
     "headMode": "virtual-desktop",
     "monitors": "all",
     "virtualDesktop": 3,
-    "escapeShortcuts": [{ "keys": "ctrl+alt+delete", "action": "host-desktop:1" }],
+    "escapeShortcuts": [
+      { "keys": "ctrl+alt+delete", "action": "host-desktop:1" },
+      { "keys": "ctrl+alt+end", "action": "command:{cli} vm kill {vm}" }
+    ],
     "grabKeyboard": false
   },
   "shares": [{ "hostPath": "/home/me/code", "tag": "code", "readOnly": false }],

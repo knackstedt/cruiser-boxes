@@ -3,6 +3,10 @@
 // ============================================================================
 
 import { run, which } from "../../sys/src/exec";
+import { createHash } from "node:crypto";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { DesktopInfo, EscapeActionSpec } from "./types";
 
 async function qdbus(args: string[]): Promise<string> {
@@ -51,8 +55,11 @@ export function kdeKeys(keys: string): string {
         ctrl: "Ctrl", control: "Ctrl", alt: "Alt", shift: "Shift", meta: "Meta", super: "Meta",
         delete: "Del", del: "Del", backspace: "Backspace", return: "Return", enter: "Return",
         escape: "Esc", esc: "Esc", space: "Space", tab: "Tab", left: "Left", right: "Right", up: "Up", down: "Down",
+        end: "End", insert: "Ins", ins: "Ins", home: "Home",
+        pageup: "PgUp", pgup: "PgUp", pagedown: "PgDn", pgdn: "PgDn",
     };
-    return keys.toLowerCase().split("+").map((k) => map[k] ?? (k.length === 1 ? k.toUpperCase() : k)).join("+");
+    return keys.toLowerCase().split("+").map((k) =>
+        map[k] ?? (/^f\d{1,2}$/.test(k) ? k.toUpperCase() : k.length === 1 ? k.toUpperCase() : k)).join("+");
 }
 
 /** Map an escape action to a KWin shortcut name (component "kwin"). */
@@ -70,15 +77,9 @@ function kwinShortcutFor(action: EscapeActionSpec): string | null {
  * Returns an uninstaller restoring the previous binding.
  */
 export async function kdeInstallEscapeShortcut(keys: string, action: EscapeActionSpec): Promise<() => Promise<void>> {
+    if (action.kind === "command") return kdeInstallCommandShortcut(keys, action.argv);
     const shortcut = kwinShortcutFor(action);
-    if (!shortcut) {
-        if (action.kind === "command") {
-            // TODO(phase2): custom command actions need a registered kglobalaccel
-            // component (a tiny dbus service). For now fail loudly.
-            throw new Error("command escape actions need a kglobalaccel component — not implemented yet");
-        }
-        throw new Error(`escape action '${action.kind}' has no KWin shortcut mapping`);
-    }
+    if (!shortcut) throw new Error(`escape action '${action.kind}' has no KWin shortcut mapping`);
     const kc = (await which("kwriteconfig6")) ?? (await which("kwriteconfig5")) ?? (await which("kwriteconfig"));
     if (!kc) throw new Error("kwriteconfig not found");
     const kd = kdeKeys(keys);
@@ -97,6 +98,56 @@ export async function kdeInstallEscapeShortcut(keys: string, action: EscapeActio
     return async () => {
         await run(kc, ["--file", "kglobalshortcutsrc", "--group", "kwin", "--key", shortcut, prev || "none"]);
         await qdbus(["org.kde.KWin", "/KWin", "reconfigure"]).catch(() => {});
+    };
+}
+
+/** Re-read path for kglobalacceld's own groups ([services]) — unlike the
+ *  kwin component, nothing else pokes it. The daemon watches the file on
+ *  Plasma 6; the dbus call + user-unit reload cover older/cold sessions.
+ *  Best-effort every leg. */
+async function reloadKglobalaccel(): Promise<void> {
+    await qdbus(["org.kde.kglobalaccel", "/kglobalaccel", "org.kde.KGlobalAccel.reconfigure"]).catch(() => {});
+    await run("systemctl", ["--user", "try-reload-or-restart", "plasma-kglobalaccel.service"], { noThrow: true }).catch(() => {});
+}
+
+/** Desktop-entry Exec escaping: % must double; quote args with specials. */
+function desktopExec(argv: string[]): string {
+    const esc = (a: string) => (/[\s"\\`$']/.test(a) ? `"${a.replace(/["\\`$]/g, "\\$&")}"` : a);
+    return argv.map(esc).join(" ").replaceAll("%", "%%");
+}
+
+/**
+ * Command actions ride kglobalaccel's app-launcher: a NoDisplay .desktop
+ * file + a [services][<id>.desktop] _launch binding — the same mechanism
+ * System Settings → Shortcuts → Applications uses, so no registered
+ * component is needed. id is keyed by argv so repeat installs share a file.
+ */
+async function kdeInstallCommandShortcut(keys: string, argv: string[]): Promise<() => Promise<void>> {
+    const kc = (await which("kwriteconfig6")) ?? (await which("kwriteconfig5")) ?? (await which("kwriteconfig"));
+    if (!kc) throw new Error("kwriteconfig not found");
+    const kr = (await which("kreadconfig6")) ?? (await which("kreadconfig5")) ?? (await which("kreadconfig")) ?? kc;
+    const id = `cruiser-escape-${createHash("sha256").update(argv.join("\0")).digest("hex").slice(0, 8)}`;
+    const apps = join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "applications");
+    await mkdir(apps, { recursive: true });
+    const desktop = join(apps, `${id}.desktop`);
+    const label = argv.join(" ");
+    await writeFile(desktop,
+        `[Desktop Entry]\nType=Application\nName=cruiser escape: ${label.slice(0, 80)}\nExec=${desktopExec(argv)}\nNoDisplay=true\n`,
+        { mode: 0o644 });
+    const kd = kdeKeys(keys);
+    const grp = ["--file", "kglobalshortcutsrc", "--group", "services", "--group", `${id}.desktop`];
+    const read = async () => {
+        const r = await run(kr, [...grp, "--key", "_launch"], { noThrow: true });
+        const v = r.stdout.trim();
+        return r.code === 0 && v && !v.startsWith("Usage:") && !v.includes("\n") ? v : "";
+    };
+    const prev = await read();
+    await run(kc, [...grp, "--key", "_launch", `${kd},${kd},${label.slice(0, 40)}`]);
+    await reloadKglobalaccel();
+    return async () => {
+        await run(kc, [...grp, "--key", "_launch", prev || "none"]);
+        await rm(desktop, { force: true }).catch(() => {});
+        await reloadKglobalaccel();
     };
 }
 

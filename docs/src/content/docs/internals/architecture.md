@@ -79,7 +79,9 @@ Guest-side gotchas learned the hard way (all handled in `provision/`):
 Escape shortcuts (schema `display.escapeShortcuts`) are installed as *host*
 keybindings (KDE `kglobalshortcutsrc` / GNOME gsettings) and only work when
 freerdp runs `-grab-keyboard` — the default (`grabKeyboard:false` is
-load-bearing).
+load-bearing). `command:<cmdline>` actions ride KDE's `[services]` desktop-
+launcher binding / GNOME's media-keys `custom-keybinding` slot; `{vm}` and
+`{cli}` expand at install time.
 
 ## Provisioning
 

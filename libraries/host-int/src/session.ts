@@ -4,6 +4,7 @@
 // ============================================================================
 
 import { EventEmitter } from "node:events";
+import { existsSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import type { EscapeActionSpec, WindowHandle, WmAdapter } from "./types";
@@ -90,7 +91,8 @@ export class ViewerSession extends EventEmitter {
         if (d.headMode !== "windowed" && this.adapter.caps.shortcuts && !d.grabKeyboard) {
             for (let i = 0; i < d.escapeShortcuts.length; i++) {
                 const s = d.escapeShortcuts[i]!;
-                const action = parseEscapeAction(s.action);
+                const action = parseEscapeAction(
+                    s.action.replaceAll("{vm}", this.spec.name).replaceAll("{cli}", cruiserCliPrefix()));
                 if (action) {
                     const un = await this.adapter.installEscapeShortcut(s.keys, action).catch(() => null);
                     if (un) this.uninstallers.push(un);
@@ -125,14 +127,29 @@ export class ViewerSession extends EventEmitter {
     }
 }
 
-/** "host-desktop:1" | "desktop-cycle-left" | "desktop-cycle-right" | "ungrab" */
+/** "host-desktop:1" | "desktop-cycle-left" | "desktop-cycle-right" |
+ *  "ungrab" | "command:<cmdline>" (run via sh -c; {vm}/{cli} placeholders
+ *  are already substituted by the caller). */
 export function parseEscapeAction(s: string): EscapeActionSpec | null {
-    const [kind, arg] = s.split(":", 2);
+    // arg is everything after the first colon — command cmdlines may
+    // themselves contain colons, so split(":",2) is out.
+    const i = s.indexOf(":");
+    const kind = i < 0 ? s : s.slice(0, i);
+    const arg = i < 0 ? undefined : s.slice(i + 1);
     switch (kind) {
         case "host-desktop": return { kind: "host-desktop", index: Number(arg ?? 1) };
         case "desktop-cycle-left": return { kind: "desktop-cycle", dir: -1 };
         case "desktop-cycle-right": return { kind: "desktop-cycle", dir: 1 };
         case "ungrab": return { kind: "ungrab" };
+        case "command": return arg ? { kind: "command", argv: ["sh", "-c", arg] } : null;
         default: return null;
     }
+}
+
+/** What `{cli}` expands to in escape-shortcut commands — dev trees resolve
+ *  to the repo's cli.ts via bun; packaged builds don't ship it, so the
+ *  installed `cruiser` binary is assumed on PATH. */
+export function cruiserCliPrefix(): string {
+    const cli = new URL("../../../src/cli.ts", import.meta.url).pathname;
+    return existsSync(cli) ? `bun run ${cli}` : "cruiser";
 }
