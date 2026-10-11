@@ -116,7 +116,7 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 - `vm start`/`vm view` auto-open the viewer and HOLD the process until it
   closes (`--no-view` opts out) — `ViewerSession.exited()` exists because the
   escape-shortcut uninstallers only run in-process; exiting after `open()`
-  orphans the kglobalshortcutsrc/gsettings edits.
+  orphans the kglobalshortcutsrc/khotkeysrc/gsettings edits.
 - QEMU slirp hostfwd completes the TCP handshake host-side even when nothing
   is listening in the guest — `waitRdpPort` sends an X.224 negotiation probe
   instead of a bare connect, or a cold boot launches freerdp into a dead
@@ -151,9 +151,16 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   forces the in-process backend; the settings page shows the live kind.
 - Escape shortcuts require `-grab-keyboard` (host keeps combos) — the schema
   default `grabKeyboard:false` is load-bearing. `command:<cmd>` actions bind
-  via KDE `[services]` desktop-launcher / GNOME custom-keybinding slots;
-  `{vm}`/`{cli}` placeholders expand in ViewerSession.open (`{cli}` →
-  `bun run src/cli.ts` in dev, `cruiser` packaged). Default:
+  via KDE khotkeys (Plasma 5 — a `SIMPLE_ACTION_DATA` entry in khotkeysrc +
+  `kded5 /modules/khotkeys reread_configuration`) or the `[services]`
+  desktop-launcher (Plasma 6 — khotkeys was removed), plus GNOME
+  custom-keybinding slots. Plasma-5 gotchas learned live: `[services]`
+  launchers bind but never dispatch on kglobalaccel5; a daemon restart
+  flushes in-memory config over pending file edits; trigger `Uuid`s must be
+  stable per command because khotkeys registers the grab under them and does
+  NOT release it on reread (uninstall calls `KGlobalAccel.unregister`
+  explicitly). `{vm}`/`{cli}` placeholders expand in ViewerSession.open
+  (`{cli}` → `bun run src/cli.ts` in dev, `cruiser` packaged). Default:
   `ctrl+alt+end → command:{cli} vm kill {vm}`.
 - HMR (`draft dev`): `native-entry.ts` is a "blocking entry" — its
   close-wait must release via `__ddSession.onDispose(() => resolve())` and

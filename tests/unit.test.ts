@@ -13,7 +13,7 @@ import { guestThemeScript } from "../libraries/provision/src/theme";
 import { pickImageFromIndex, supportsKrdp, defaultRelease } from "../libraries/provision/src/distros";
 import { freerdpArgs } from "../libraries/host-int/src/freerdp";
 import { parseEscapeAction } from "../libraries/host-int/src/session";
-import { kdeKeys } from "../libraries/host-int/src/kde";
+import { kdeKeys, khotkeysDataGroups, khotkeysDropGroups, khotkeysUuid } from "../libraries/host-int/src/kde";
 
 // ── schema ──
 
@@ -430,5 +430,40 @@ describe("escape shortcuts", () => {
     test("default spec carries the kill escape hatch", () => {
         const esc = defaultSpec("abc").display.escapeShortcuts;
         expect(esc).toContainEqual({ keys: "ctrl+alt+end", action: "command:{cli} vm kill {vm}" });
+    });
+    test("khotkeysDataGroups maps top-level Data_N markers", () => {
+        const src = [
+            "[Data]", "DataCount=3",
+            "[Data_1]", "Comment=KMenuEdit", "Type=ACTION_DATA_GROUP",
+            "[Data_1Conditions]", "Comment=ignored", "ConditionsCount=0",
+            "[Data_2]", "Comment=cruiser-escape:abc123", "Type=SIMPLE_ACTION_DATA",
+            "[Other]", "Comment=nope",
+        ].join("\n");
+        const g = khotkeysDataGroups(src);
+        expect(g.get(1)).toBe("KMenuEdit");
+        expect(g.get(2)).toBe("cruiser-escape:abc123");
+        expect(g.size).toBe(2);
+    });
+    test("khotkeysDropGroups drops victim sections, keeps prefix-collision groups", () => {
+        const src = [
+            "[Data]", "DataCount=41",
+            "[Data_4]", "Comment=cruiser-escape:x", "Type=SIMPLE_ACTION_DATA",
+            "[Data_4Actions]", "ActionsCount=1",
+            "[Data_4Triggers0]", "Key=Ctrl+Alt+End", "Type=SHORTCUT",
+            "[Data_41]", "Comment=keep me", "Type=SIMPLE_ACTION_DATA",
+            "[Data_41Triggers0]", "Key=Ctrl+Alt+T", "Type=SHORTCUT",
+        ].join("\n");
+        const out = khotkeysDropGroups(src, [4]);
+        expect(out).not.toContain("cruiser-escape:x");
+        expect(out).not.toContain("Ctrl+Alt+End");
+        expect(out).toContain("keep me");
+        expect(out).toContain("Ctrl+Alt+T");
+        expect(out).toContain("DataCount=41");
+    });
+    test("khotkeysUuid is deterministic and uuid-shaped", () => {
+        const u = khotkeysUuid("8debf92e");
+        expect(u).toBe(khotkeysUuid("8debf92e"));
+        expect(u).toMatch(/^\{[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\}$/);
+        expect(u).not.toBe(khotkeysUuid("deadbeef"));
     });
 });
