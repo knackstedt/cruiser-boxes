@@ -39,6 +39,7 @@ usage: cruiser <area> <command> [args]
                    [--distro ubuntu|debian|fedora] [--desktop gnome|kde]
                    [--browser none|firefox|chrome|chromium|vivaldi|brave]
                    [--snap] [--xfonts] [--no-autologin] [--devtools toolchain,python,rust,…]
+                   [--sync a,b,c] [--no-sync x,y]     host→guest sync channels (see vm sync)
                    [--wallpaper PATH] [--wallpaper-pos POS]
   vm start <name> [--mode <headmode>] [--no-view]         (auto-opens the viewer like the UI)
   vm stop <name>                        vm kill <name>
@@ -50,6 +51,12 @@ usage: cruiser <area> <command> [args]
   vm wallpaper <name> [--source PATH|--no-source] [--position POS] [--managed|--no-managed]
                                       [--apply]         guest wallpaper + watermark (POS: top-left|top-right|
                                                         bottom-left|bottom-right|center|off)
+  vm sync <name>                      list host→guest sync channels (on/off per vm.json)
+  vm sync <name> <channel> on|off     toggle a channel (--apply pushes it now if running)
+                                      channels: theme accentColor contrast timezone locale
+                                      keyboard monitors hostWallpaper | gitIdentity proxy
+                                      caCerts sshAgent   (last four default off — they push
+                                      host credentials/identity/trust into the guest)
   vm logs <name> [--file cruiser|qemu|serial|install-serial] [--lines N]
            [--journal] [--unit U] [--priority P] [--boot N] [--since X] [--grep PAT]
            [--units]                    guest journal via QGA (ssh fallback on confined agents)
@@ -97,12 +104,13 @@ async function holdViewer(s: ViewerSession): Promise<void> {
     process.off("SIGTERM", onSig);
 }
 
-/** Mirror the host dark/light hint into the guest for the viewer session's
- *  lifetime — fire-and-forget so a missing dbus-monitor/agent can't fail
- *  the viewer open. Dies with the session via the "closed" hook. */
-function startThemeSync(h: VmHandle, s: ViewerSession): void {
-    void import("../libraries/provision/src/theme").then(({ ThemeSync }) => {
-        const t = new ThemeSync(h, (m) => console.log(m));
+/** Host → guest syncs for the viewer session's lifetime (portal appearance
+ *  keys + timezone watchers, session one-shots, optional agent forward) —
+ *  fire-and-forget so a missing dbus-monitor/agent can't fail the viewer
+ *  open. Dies with the session via the "closed" hook. */
+function startSessionSyncs(h: VmHandle, s: ViewerSession): void {
+    void import("../libraries/provision/src/sync").then(({ SessionSyncs }) => {
+        const t = new SessionSyncs(h, (m) => console.log(`${h.spec.name}: ${m}`));
         t.start();
         s.on("closed", () => t.dispose());
     }).catch(() => {});
@@ -110,7 +118,7 @@ function startThemeSync(h: VmHandle, s: ViewerSession): void {
 
 /** Push the managed wallpaper into the guest if inputs changed (or a prior
  *  apply only staged). Fire-and-forget — same nonblocking rules as
- *  startThemeSync: nothing here may delay or fail the viewer open. */
+ *  startSessionSyncs: nothing here may delay or fail the viewer open. */
 function startWallpaperSync(h: VmHandle): void {
     void import("../libraries/provision/src/wallpaper").then(({ ensureGuestWallpaper }) =>
         ensureGuestWallpaper(h, (m) => console.log(`${h.spec.name}: ${m}`))
@@ -156,6 +164,16 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             if (devtools) spec.os.devtools = devtools.split(",").map((s) => s.trim()).filter(Boolean) as VmSpec["os"]["devtools"];
             const wp = flagVal("--wallpaper"); if (wp) spec.display.wallpaper.source = wp;
             const wpPos = flagVal("--wallpaper-pos"); if (wpPos) spec.display.wallpaper.position = wpPos as VmSpec["display"]["wallpaper"]["position"];
+            const { SYNC_IDS } = await import("../libraries/provision/src/sync");
+            const applySyncList = (list: string | undefined, on: boolean) => {
+                for (const k of (list ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
+                    if (!(SYNC_IDS as readonly string[]).includes(k))
+                        { console.error(`unknown sync channel '${k}' — options: ${SYNC_IDS.join(", ")}`); process.exit(2); }
+                    spec.sync[k as keyof typeof spec.sync] = on;
+                }
+            };
+            applySyncList(flagVal("--sync"), true);
+            applySyncList(flagVal("--no-sync"), false);
             for (let i = 0; i < argv.length; i++) {
                 if (argv[i] === "--share") {
                     const [p, tag] = (argv[i + 1] ?? "").split(":");
@@ -195,7 +213,7 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
                 console.log(`waiting for ${h.spec.name} guest login (rdp :${h.spec.network.rdpPort ?? "–"})…`);
                 try {
                     await s.open();
-                    startThemeSync(h, s);
+                    startSessionSyncs(h, s);
                     startWallpaperSync(h);
                     console.log("viewer opened — close the window or ctrl+c to end the session");
                     await holdViewer(s);
@@ -276,6 +294,32 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             console.log(`wallpaper: managed=${w.managed} position=${w.position} source=${w.source ?? "(generated default)"}`);
             break;
         }
+        case "sync": {
+            const h = await needVm(args[0]);
+            const { SYNC_IDS, syncEnabled } = await import("../libraries/provision/src/sync");
+            const chan = args[1];
+            if (!chan) {
+                SYNC_IDS.forEach((id) =>
+                    console.log(`${id.padEnd(14)} ${h.spec.sync[id] ? "on " : "off"}${syncEnabled(h.spec, id) === h.spec.sync[id] ? "" : " (env-killed)"}`));
+                break;
+            }
+            if (!(SYNC_IDS as readonly string[]).includes(chan)) {
+                console.error(`unknown sync channel '${chan}' — options: ${SYNC_IDS.join(", ")}`); process.exit(2);
+            }
+            const v = args[2];
+            if (v !== "on" && v !== "off") { console.error("expected: vm sync <name> <channel> on|off"); usage(); }
+            h.spec.sync[chan as keyof typeof h.spec.sync] = v === "on";
+            await h.saveSpec();
+            console.log(`sync.${chan} = ${v}`);
+            if (has("--apply")) {
+                if (!h.isRunning()) { console.error("vm isn't running — applies at next session"); break; }
+                if (chan === "sshAgent")
+                    console.log("note: the agent forward is held by a viewer session — open `vm view` to activate it");
+                const { SessionSyncs } = await import("../libraries/provision/src/sync");
+                await new SessionSyncs(h, (m) => console.log(`${h.spec.name}: ${m}`)).applyOnce();
+            }
+            break;
+        }
         case "view": {
             const h = await needVm(args[0]);
             if (!h.isRunning()) { console.error(`'${h.spec.name}' is not running`); process.exit(1); }
@@ -283,7 +327,7 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const s = new ViewerSession(h.spec);
             console.log(`adapter: ${s.adapter.id}`);
             await s.open();
-            startThemeSync(h, s);
+            startSessionSyncs(h, s);
             startWallpaperSync(h);
             console.log("viewer launched — close the window or ctrl+c to end the session");
             await holdViewer(s);

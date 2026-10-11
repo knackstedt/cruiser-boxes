@@ -19,7 +19,7 @@ import {
     x11CurrentDesktop, x11Desktops, x11FindWindow, x11Focus, x11Monitors,
     x11MoveToDesktop, x11MoveToMonitor, x11SetFullscreen, x11SwitchDesktop,
 } from "./x11";
-import { kdeDesktops, kdeInstallEscapeShortcut, kdeSwitchDesktop, kwinScript } from "./kde";
+import { kdeDesktops, kdeInstallEscapeShortcut, kdeMonitors, kdeSwitchDesktop, kwinScript } from "./kde";
 
 // ── shared X11 machinery ──
 
@@ -82,13 +82,13 @@ export function kdeWayland(): WmAdapter {
     return {
         id: "kde-wayland",
         caps: {
-            monitors: false,          // no xrandr on wayland; TODO: kscreen dbus
+            monitors: true,           // kscreen-doctor json (scale + refresh)
             desktops: true,
             placeWindows: true,       // via KWin script
             shortcuts: true,
-            notes: "window ops via temporary KWin scripts; monitor listing not yet wired (kscreen dbus)",
+            notes: "window ops via temporary KWin scripts; monitors via kscreen-doctor",
         },
-        monitors: async () => [],
+        monitors: kdeMonitors,
         desktops: kdeDesktops,
         async findWindow(m: WindowMatcher, timeoutMs = 10_000): Promise<WindowHandle | null> {
             // Poll workspace.windowList via KWin script is expensive; use it once.

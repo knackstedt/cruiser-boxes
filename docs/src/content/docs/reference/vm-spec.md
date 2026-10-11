@@ -23,6 +23,7 @@ Edit while the VM is stopped; the next `vm start` picks changes up.
 | `usb` | object | | `autoAttach: UsbDeviceRef[]` |
 | `shares` | array | `[]` | `{ hostPath, tag, readOnly }` — see [file sharing](/guides/file-sharing/) |
 | `os` | object | | guest OS profile — see below |
+| `sync` | object | | host→guest sync channels — see below |
 | `network` | object | | `hostfwd[]`, `sshPort`, `rdpPort`, `vsock` (dflt true) |
 | `persist` | enum | `daemonize` | `daemonize` · `owned` · `ephemeral` |
 | `provisioned` | object | | `method: cloudimg\|iso\|imported`, `source`, `completedAt` — written by provisioning |
@@ -79,6 +80,41 @@ disks the family may be wrong — guest-setup re-detects from
 | `autologin` | `true` | DM autologin; effectively required for KDE RDP |
 | `devtools` | `[]` | `toolchain` · `python` · `node` · `rust` · `go` · `containers` · `linters` · `debug` · `shell` |
 | `extraPackages` | `[]` | extra distro packages, strict-validated names |
+
+## sync (host → guest)
+
+Per-channel booleans; old `vm.json` files parse with defaults (no
+migration). Channels marked **live** re-push while a viewer session is
+open; the rest apply at session start (and provision, where noted),
+hash-gated via `run/sync.state` so in-guest drift isn't clobbered unless
+the host value actually changed.
+
+| Field | Default | Notes |
+|---|---|---|
+| `theme` | `true` | dark/light via xdg portal — **live** + provision bake |
+| `accentColor` | `true` | portal accent-color → GNOME named accent / KDE `AccentColor` — **live** |
+| `contrast` | `true` | portal contrast → high-contrast — **live** |
+| `timezone` | `true` | host zone → `timedatectl`; provision default + **live** (watches `/etc/localtime`) |
+| `locale` | `true` | host `LANG` → `localectl`; seed + provision + session start |
+| `keyboard` | `true` | host X11 keymap → `localectl`/DE input sources; seed + provision + session start |
+| `monitors` | `true` | host topology (incl. scale/rate) → `monitors.xml`; provision + session start, GNOME guests |
+| `hostWallpaper` | `true` | host's wallpaper as the managed composite's base image (watermark still applied; `display.wallpaper.source` wins) |
+| `gitIdentity` | `false` | host `user.name`/`user.email` → guest git config. **Security-sensitive** |
+| `proxy` | `false` | host proxy → guest gsettings/kioslaverc + `/etc/profile.d` env. **Security-sensitive** |
+| `caCerts` | `false` | host custom CA roots → guest trust store. **Security-sensitive** |
+| `sshAgent` | `false` | host `SSH_AUTH_SOCK` → guest via a held `ssh -N -R` forward (session lifetime). **Security-sensitive** |
+
+The last four default off deliberately: they move host identity, trust, or
+credentials into the guest — opt in per VM.
+
+Env overrides: `CRUISER_HOST_SYNC=0` disables everything;
+`CRUISER_SYNC_<ID>=0` per channel (`CRUISER_SYNC_THEME`, `_ACCENT`,
+`_CONTRAST`, `_TIMEZONE`, `_LOCALE`, `_KEYBOARD`, `_MONITORS`,
+`_HOST_WALLPAPER`, `_GIT`, `_PROXY`, `_CA_CERTS`, `_SSH_AGENT`);
+`CRUISER_THEME_SYNC=0` still honored for `theme`. CLI: `vm create
+--sync a,b --no-sync x,y` at create; `vm sync <name>` lists channels,
+`vm sync <name> <channel> on|off` persists a toggle (`--apply` re-pushes
+immediately on a running VM).
 
 ## network
 

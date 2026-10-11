@@ -17,7 +17,20 @@ import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import { mark } from "./startup-profile";
 import { VmMetricsSampler } from "./metrics";
-import type { ActionState, DoctorRow, HostInfo, Store, VmSummary } from "./store";
+import type { ActionState, CreateForm, DoctorRow, HostInfo, Store, VmSummary } from "./store";
+
+/** create/edit form sync fields → spec.sync keys. */
+const SYNC_FORM: [keyof CreateForm, keyof VmSpec["sync"]][] = [
+    ["syncTheme", "theme"], ["syncAccent", "accentColor"], ["syncContrast", "contrast"],
+    ["syncTimezone", "timezone"], ["syncLocale", "locale"], ["syncKeyboard", "keyboard"],
+    ["syncMonitors", "monitors"], ["syncHostWallpaper", "hostWallpaper"],
+    ["syncGit", "gitIdentity"], ["syncProxy", "proxy"], ["syncCa", "caCerts"],
+    ["syncAgent", "sshAgent"],
+];
+
+function applySyncForm(spec: VmSpec, f: CreateForm): void {
+    SYNC_FORM.forEach(([fk, sk]) => { spec.sync[sk] = f[fk] as boolean; });
+}
 
 export class CruiserService {
     /** Doc-backend label shown in settings — the shell knows the real kind. */
@@ -167,6 +180,7 @@ export class CruiserService {
             snapshots: [],
             vd: s.display.virtualDesktop,
             usbKeys: s.usb.autoAttach.map((u) => [u.vendorId, u.productId, u.serial].filter(Boolean).join(":")),
+            sync: { ...s.sync },
             cpu: [], mem: [],
         };
     }
@@ -404,6 +418,7 @@ export class CruiserService {
             spec.os.autologin = f.autologin;
             // filter through the enum — a stray chip id shouldn't sink create
             spec.os.devtools = f.devtools.filter((d) => DevTool.safeParse(d).success) as VmSpec["os"]["devtools"];
+            applySyncForm(spec, f);
             if (spec.os.desktop === "kde" && f.method === "cloudimg") {
                 const { supportsKrdp } = await import("../../provision/src/distros");
                 if (!supportsKrdp(spec.os.family, spec.os.release))
@@ -525,6 +540,7 @@ export class CruiserService {
                 const [vendorId = "", productId = "", serial = ""] = k.split(":");
                 return { vendorId, productId, ...(serial ? { serial } : {}), atBoot: true };
             });
+            applySyncForm(spec, f);
             this.validateSpec(spec);
             if (f.diskGiB !== h.spec.disk.sizeGiB) await h.resizeDisk(f.diskGiB);
             h.spec = spec;
@@ -558,15 +574,15 @@ export class CruiserService {
                 await s.open();
                 if (this.viewers.has(name)) { await s.close(); return; }
                 this.viewers.set(name, s);
-                const { ThemeSync } = await import("../../provision/src/theme");
-                const theme = new ThemeSync(h, (m) => this.store.getState().setStatus(`${name}: ${m}`));
-                theme.start();
-                // Wallpaper sync — fire-and-forget like ThemeSync.push; a
+                const { SessionSyncs } = await import("../../provision/src/sync");
+                const syncs = new SessionSyncs(h, (m) => this.store.getState().setStatus(`${name}: ${m}`));
+                syncs.start();
+                // Wallpaper sync — fire-and-forget like a session one-shot; a
                 // dead agent or slow jimp decode mustn't delay the viewer.
                 void import("../../provision/src/wallpaper").then(({ ensureGuestWallpaper }) =>
                     ensureGuestWallpaper(h, (m) => this.store.getState().setStatus(`${name}: ${m}`))
                 ).catch(() => {});
-                s.on("closed", () => { this.viewers.delete(name); theme.dispose(); });
+                s.on("closed", () => { this.viewers.delete(name); syncs.dispose(); });
             } finally {
                 this.viewerPending.delete(name);
             }

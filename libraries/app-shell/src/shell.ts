@@ -18,7 +18,12 @@ import { mark } from "./startup-profile";
 const log = createLogger("info");
 
 const NUM_FIELDS: Set<string> = new Set(["cpus", "memMiB", "diskGiB"]);
-const BOOL_FIELDS: Set<string> = new Set(["snap", "extraFonts", "autologin"]);
+const BOOL_FIELDS: Set<string> = new Set([
+    "snap", "extraFonts", "autologin",
+    "syncTheme", "syncAccent", "syncContrast", "syncTimezone", "syncLocale",
+    "syncKeyboard", "syncMonitors", "syncHostWallpaper",
+    "syncGit", "syncProxy", "syncCa", "syncAgent",
+]);
 
 const SPIN = ["◐", "◓", "◑", "◒"];
 
@@ -188,6 +193,15 @@ export class CruiserShell {
                 name: vm.name, cpus: vm.cpus, memMiB: vm.memMiB, diskGiB: vm.diskGiB,
                 gpu: vm.gpuMode, headMode: vm.headMode, persist: vm.persist,
                 vd: vm.vd, usb: [...vm.usbKeys],
+            });
+            const sy = vm.sync;
+            if (sy) Object.assign(st().create, {
+                syncTheme: sy.theme ?? true, syncAccent: sy.accentColor ?? true,
+                syncContrast: sy.contrast ?? true, syncTimezone: sy.timezone ?? true,
+                syncLocale: sy.locale ?? true, syncKeyboard: sy.keyboard ?? true,
+                syncMonitors: sy.monitors ?? true, syncHostWallpaper: sy.hostWallpaper ?? true,
+                syncGit: sy.gitIdentity ?? false, syncProxy: sy.proxy ?? false,
+                syncCa: sy.caCerts ?? false, syncAgent: sy.sshAgent ?? false,
             });
             st().setRoute("create");
             st().setEditVm(vm.name);

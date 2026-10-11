@@ -94,25 +94,63 @@ expand at install time.
 - **iso**: desktop ISO + autoinstall seed, casper kernel direct-booted with
   serial log → poweroff → normal boot → same guest-setup.
 
-## Host theme passthrough
+## Host → guest sync
 
-`host-int/appearance.ts` reads the host's dark/light preference from the
-xdg-desktop-portal `org.freedesktop.appearance` `color-scheme` key (busctl,
-gdbus fallback — 0 = no preference, 1 = dark, 2 = light) and watches the
-portal's `SettingChanged` signal via `dbus-monitor`. `provision/theme.ts`
-applies it in-guest over `guestRun` (QGA, ssh+sudo fallback for confined
-agents): `gsettings … color-scheme prefer-dark|default` for GNOME/GTK —
-the `dbus-run-session` fallback makes the dconf write land pre-login —
-and `plasma-apply-colorscheme BreezeDark|BreezeLight` for Plasma, with a
-bare `kdeglobals` write as fallback. Both paths are `command -v`-gated so
-a wrong `spec.os.desktop` on an imported disk can't misfire.
+`spec.sync` gates twelve channels — see [vm.json](/reference/vm-spec/#sync-host--guest)
+for the table. Eight default on (appearance/convenience); the four that
+move host identity, trust, or credentials into the guest (`gitIdentity`,
+`proxy`, `caCerts`, `sshAgent`) default off.
 
-The hint is baked during guest-setup (`syncHostTheme` provision opt) so
-the first login is already themed, then `ThemeSync` re-pushes on host
-changes for a viewer session's lifetime — wired in `ensureViewer` and
-cli `vm start|view`. Light maps to `default` rather than `prefer-light`
-for older gsettings schemas, and host "no preference" is never pushed.
-`CRUISER_THEME_SYNC=0` opts out.
+Host side, `host-int/appearance.ts` reads portal keys
+(`color-scheme`/`accent-color`/`contrast`; busctl, gdbus fallback) and
+runs one shared `dbus-monitor` on the portal's `SettingChanged` signal.
+`host-int/hoststate.ts` probes everything non-portal: timezone, `LANG`,
+X11 keymap, the host's wallpaper path, git `user.name`/`user.email`,
+gsettings/kioslaverc proxy, custom CA roots, `SSH_AUTH_SOCK`.
+
+Guest side, `provision/sync.ts` (`SessionSyncs`, viewer-session lifetime —
+wired in `ensureViewer` + cli `vm start|view`) applies them in three
+classes:
+
+- **Live** — theme/accent/contrast ride the shared portal watcher;
+  timezone rides an `fs.watch` on `/etc/localtime` + `/etc/timezone`
+  (system-bus monitoring needs root; inotify doesn't). All live pushes are
+  serialized with a queued rerun so host-change bursts can't drop a
+  channel, and a per-channel hash skips no-change pushes (a failed apply
+  doesn't advance the hash, so the next change retries).
+- **Session one-shots** — locale, keyboard, monitors (GNOME guests —
+  `monitors.xml` incl. probed scale/refresh), git identity, proxy, CA
+  certs. Hash-gated via `run/sync.state` like `wallpaper.state`: in-guest
+  drift is never clobbered unless the host value actually changed.
+- **Held process** — `sshAgent` holds an `ssh -N -R` remote-forward of the
+  host agent socket for the session (`ExitOnForwardFailure`, keepalives,
+  respawn with backoff), and wires `SSH_AUTH_SOCK` into the guest's
+  `/etc/environment`. No keys are ever copied — opt-in only.
+
+Every channel's guest script follows the `guestThemeScript` mold: run via
+`guestRun` as root (QGA, ssh+sudo fallback for SELinux-confined agents),
+`runuser` for user-context steps, `command -v` gates so a wrong
+`spec.os.desktop` on an imported disk can't misfire, and never a nonzero
+exit that could abort a provision bake. Theme applies as
+`gsettings … color-scheme prefer-dark|default` (the `dbus-run-session`
+fallback makes the dconf write land pre-login) or
+`plasma-apply-colorscheme BreezeDark|BreezeLight` with a bare `kdeglobals`
+fallback; light maps to `default` rather than `prefer-light` for older
+gsettings schemas, and host "no preference" is never pushed.
+
+Provision bakes the same values so first login is already right: the
+NoCloud/autoinstall seeds take the host timezone/locale/keymap instead of
+the old `UTC`/`en_US.UTF-8`/`us` hardcodes, and guest-setup re-applies the
+appearance channels.
+
+`hostWallpaper` doesn't bypass the managed-wallpaper system — the host's
+current wallpaper becomes the *base image* of the jimp composite, and the
+VM watermark is still rendered on top. `display.wallpaper.source` wins
+when set.
+
+Env kills: `CRUISER_HOST_SYNC=0` disables all channels,
+`CRUISER_SYNC_<ID>=0` per channel, `CRUISER_THEME_SYNC=0` and
+`CRUISER_WALLPAPER=0` still honored.
 
 ## Lifecycle persistence
 

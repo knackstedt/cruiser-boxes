@@ -17,6 +17,10 @@ export interface SeedOpts {
     password?: string;
     sshAuthorizedKeys?: string[];
     timezone?: string;
+    /** "en_US.UTF-8" — host-derived upstream when locale sync is on. */
+    locale?: string;
+    /** X11 layout ("us", "de", …) — host-derived upstream when keyboard sync is on. */
+    keyboard?: string;
     /** resolved package list — see packages.ts (resolvePackages(profile,"seed")) */
     packages: string[];
     /**
@@ -38,7 +42,7 @@ export function cloudimgUserData(o: SeedOpts): string {
 hostname: ${o.hostname}
 preserve_hostname: false
 timezone: ${o.timezone ?? "UTC"}
-users:
+${o.locale ? `locale: ${o.locale}\n` : ""}${o.keyboard ? `keyboard: { layout: ${o.keyboard} }\n` : ""}users:
   - name: ${o.username}
     gecos: ${o.hostname}
     groups: [sudo, render, adm]
@@ -62,8 +66,8 @@ export function autoinstallUserData(o: SeedOpts): string {
     return `#cloud-config
 autoinstall:
   version: 1
-  locale: en_US.UTF-8
-  keyboard: { layout: us }
+  locale: ${o.locale ?? "en_US.UTF-8"}
+  keyboard: { layout: ${o.keyboard ?? "us"} }
   timezone: ${o.timezone ?? "UTC"}
   identity:
     hostname: ${o.hostname}

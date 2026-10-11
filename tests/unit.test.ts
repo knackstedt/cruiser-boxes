@@ -181,11 +181,11 @@ describe("guestSetupScript", () => {
         expect(sh).toContain("flathub.flatpakrepo");
         expect(sh).toContain("snapd.socket");
     });
-    test("host colorScheme bakes a theme section; absent by default", () => {
-        const dark = guestSetupScript(spec(), { rdpPassword: "pw", colorScheme: "dark" });
+    test("host snapshot bakes theme sections; absent by default", () => {
+        const dark = guestSetupScript(spec(), { rdpPassword: "pw", host: { scheme: "dark" } });
         expect(dark).toContain("org.gnome.desktop.interface color-scheme 'prefer-dark'");
         expect(dark).toContain("plasma-apply-colorscheme BreezeDark");
-        const light = guestSetupScript(spec(), { rdpPassword: "pw", colorScheme: "light" });
+        const light = guestSetupScript(spec(), { rdpPassword: "pw", host: { scheme: "light" } });
         expect(light).toContain("color-scheme 'default'");
         expect(light).toContain("plasma-apply-colorscheme BreezeLight");
         const none = guestSetupScript(spec(), { rdpPassword: "pw" });

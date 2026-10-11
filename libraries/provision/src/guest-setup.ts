@@ -11,7 +11,7 @@ import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { guestAgentContext } from "../../vm-core/src/logs";
 import { profileFromSpec, resolvePackages, resolveFlatpaks } from "./packages";
-import { guestThemeScript, type ColorScheme } from "./theme";
+import { guestSyncScript, type HostSnapshot } from "./sync";
 
 /**
  * Wait until the QEMU guest agent answers (guest booted + agent installed).
@@ -37,7 +37,7 @@ export async function waitForAgent(h: VmHandle, timeoutMs = 5 * 60_000): Promise
 const sq = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
 
 /** The guest setup script — run via `qga sh` (one bash -c per section batch). */
-export function guestSetupScript(spec: VmSpec, o: { rdpPassword: string; monitorsXmlB64?: string; colorScheme?: ColorScheme }): string {
+export function guestSetupScript(spec: VmSpec, o: { rdpPassword: string; monitorsXmlB64?: string; host?: HostSnapshot }): string {
     const u = spec.credentials.username;
     const p = profileFromSpec(spec);
     // Resolve all three families — the script picks by live /etc/os-release
@@ -304,7 +304,7 @@ ${appSection}
 
 ${!gnome || !o.monitorsXmlB64 ? "" : `mkdir -p "$UHOME/.config" && echo '${o.monitorsXmlB64}' | base64 -d > "$UHOME/.config/monitors.xml" && chown -R "$U":"$U" "$UHOME/.config"`}
 
-${o.colorScheme ? guestThemeScript(spec, o.colorScheme) : ""}
+${o.host ? guestSyncScript(spec, o.host) : ""}
 echo CRUISER_GUEST_SETUP_OK
 `;
 }
@@ -348,13 +348,13 @@ async function runGuestSetupSsh(
 /** Run guest setup inside the VM; throws unless the OK marker comes back. */
 export async function runGuestSetup(
     h: VmHandle,
-    o: { rdpPassword: string; monitorsXml?: string; colorScheme?: ColorScheme; timeoutMs?: number },
+    o: { rdpPassword: string; monitorsXml?: string; host?: HostSnapshot; timeoutMs?: number },
 ): Promise<void> {
     const timeoutMs = o.timeoutMs ?? 10 * 60_000;
     const monitorsXmlB64 = o.monitorsXml ? Buffer.from(o.monitorsXml).toString("base64") : undefined;
     const { authorizeInGuest } = await import("../../vm-core/src/sshkey");
     await authorizeInGuest(h).catch(() => {}); // confined agents can't write files — ssh seeds still work
-    const script = guestSetupScript(h.spec, { rdpPassword: o.rdpPassword, monitorsXmlB64, colorScheme: o.colorScheme });
+    const script = guestSetupScript(h.spec, { rdpPassword: o.rdpPassword, monitorsXmlB64, host: o.host });
     const res = await guestAgentContext(h)
         ? await runGuestSetupSsh(h, script, timeoutMs)
         : await h.guestSh(script, timeoutMs);

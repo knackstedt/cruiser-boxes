@@ -36,7 +36,7 @@ export function guestLayoutFromHost(vmName: string, host: MonitorInfo[], maxOutp
     const logical = mons.map((m, i) => `    <logicalmonitor>
       <x>${m.x}</x>
       <y>${m.y}</y>
-      <scale>1</scale>${m.primary ? "\n      <primary>yes</primary>" : ""}
+      <scale>${m.scale ?? 1}</scale>${m.primary ? "\n      <primary>yes</primary>" : ""}
       <monitor>
         <monitorspec>
           <connector>Virtual-${i + 1}</connector>
@@ -47,7 +47,7 @@ export function guestLayoutFromHost(vmName: string, host: MonitorInfo[], maxOutp
         <mode>
           <width>${m.w}</width>
           <height>${m.h}</height>
-          <rate>60.000</rate>
+          <rate>${(m.refresh ?? 60).toFixed(3)}</rate>
         </mode>
       </monitor>
     </logicalmonitor>`).join("\n");

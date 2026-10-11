@@ -14,6 +14,20 @@ export async function x11Monitors(): Promise<MonitorInfo[]> {
         const m = line.match(/^\s*\d+:\s+[+*]*\s*(\S+)\s+(\d+)\/\d+x(\d+)\/\d+\+(\d+)\+(\d+)/);
         if (m) out.push({ name: m[1]!, w: Number(m[2]), h: Number(m[3]), x: Number(m[4]), y: Number(m[5]), primary: line.includes("*") });
     });
+    // Refresh rates live in the full `xrandr` dump (a `*` on the current
+    // mode) — enrich in place; geometry stays authoritative from
+    // --listmonitors.
+    const full = await run("xrandr", [], { noThrow: true });
+    if (full.code === 0) {
+        let cur: MonitorInfo | undefined;
+        for (const line of full.stdout.split("\n")) {
+            const con = line.match(/^(\S+)\s+connected/);
+            if (con) { cur = out.find((o) => o.name === con[1]); continue; }
+            // "   3440x1440     60.00*+ 120.00  ..." — * marks current mode
+            const rate = /^\s+\d+x\d+\s/.test(line) ? line.match(/(\d+\.\d+)\*/) : null;
+            if (cur && rate) cur.refresh = Number(rate[1]);
+        }
+    }
     return out;
 }
 

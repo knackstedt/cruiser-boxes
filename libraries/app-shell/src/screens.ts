@@ -311,6 +311,20 @@ function create(s: CruiserState): string {
                 <input data-field="importPath" value="${esc(f.importPath)}" style="width:340px">
                 <div class="opt" data-action="pick-import">Browse…</div></div>
             <div class="hint">Boots an existing disk image in place (qcow2/raw/vmdk/… — format is auto-detected). Use for images you've already installed elsewhere.</div>` : "";
+    const syncSection = `<div class="h2">Host → guest sync</div>
+        <div class="hint" style="margin-left:0">mirrored into the guest while a viewer session is open (and at provision). Turn off per channel.</div>
+        ${checkRow("Dark / light theme", "syncTheme", f.syncTheme, "xdg portal color-scheme — watches host changes live")}
+        ${checkRow("Accent color", "syncAccent", f.syncAccent, "portal accent-color → nearest GNOME accent / KDE AccentColor")}
+        ${checkRow("Contrast", "syncContrast", f.syncContrast, "portal high-contrast preference")}
+        ${checkRow("Timezone", "syncTimezone", f.syncTimezone, "host tz → guest timedatectl — follows laptop travel")}
+        ${checkRow("Locale", "syncLocale", f.syncLocale, "host LANG → guest localectl")}
+        ${checkRow("Keyboard layout", "syncKeyboard", f.syncKeyboard, "host X11 keymap → guest input sources")}
+        ${checkRow("Monitor topology", "syncMonitors", f.syncMonitors, "host layout + scale → guest monitors.xml (GNOME guests)")}
+        ${checkRow("Host wallpaper", "syncHostWallpaper", f.syncHostWallpaper, "host's wallpaper as the composite source — an explicit wallpaper path always wins")}
+        ${checkRow("Git identity", "syncGit", f.syncGit, "pushes host ~/.gitconfig user.name/email into the guest")}
+        ${checkRow("Proxy settings", "syncProxy", f.syncProxy, "pushes host proxy config (gsettings/kioslaverc + /etc/environment) into the guest")}
+        ${checkRow("Custom CA roots", "syncCa", f.syncCa, "pushes host /usr/local/share/ca-certificates + pki anchors into the guest trust store")}
+        ${checkRow("SSH agent", "syncAgent", f.syncAgent, "forwards the host agent socket into the guest via ssh -R — held for the viewer session; guest processes can use your host keys")}`;
     const usbSection = `<div class="h2">USB passthrough</div>
         ${s.usbDevices.length
             ? `<div class="opts wrap">${s.usbDevices.map((d) =>
@@ -349,6 +363,7 @@ function create(s: CruiserState): string {
                  title="${esc(t.desc)}">${esc(t.label)} <span class="meta">${esc(t.desc)}</span></div>`).join("")}</div>
             <div class="hint">installs the selected tooling during guest setup — uncheck what you don't want. "Containers" includes distrobox, which shells into other distros' packages.</div>` : ""}
         <div class="hint">The base bundle — desktop, RDP/audio/GPU stack, flatpak + software store, fonts — is always installed.</div>`}`}
+        ${syncSection}
         ${usbSection}
         ${editing ? "" : `<div class="h2">Credentials</div>
         ${field("Username", "username", f.username)}

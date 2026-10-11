@@ -47,9 +47,11 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   guest-setup).
 - `libraries/host-int` — WmAdapter impls (kde-x11 full; kde-wayland partial;
   gnome-x11; gnome-wayland stub), xfreerdp viewer + ViewerSession.
-  `appearance.ts` — host dark/light hint via the xdg-desktop-portal
-  `org.freedesktop.appearance color-scheme` read (busctl/gdbus) + a
-  dbus-monitor SettingChanged watcher.
+  `appearance.ts` — xdg-desktop-portal settings: `color-scheme`/`accent-color`/
+  `contrast` reads (busctl, gdbus fallback) + one dbus-monitor SettingChanged
+  watcher shared by all portal channels. `hoststate.ts` — the non-portal
+  probes: timezone, LANG, X11 keymap, host wallpaper path, git user.name/
+  email, gsettings/kioslaverc proxy, custom CA roots, SSH_AUTH_SOCK.
 - `libraries/provision` — cloudimg+NoCloud, ISO autoinstall, guest-setup driver
   (QGA), monitors.xml generation. `packages.ts` is the single scoped package
   manifest (entries carry `stages: seed|setup`, `desktops`, `distros`, `when`).
@@ -58,12 +60,25 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   nodejs/npm resolve via provides (versioned nodejsXX pkgs), not `dnf list`;
   `distros.ts` holds the curated release matrix + cloud-image URL resolvers
   (Debian/Fedora resolve filenames by scraping mirror indexes).
-  `theme.ts` — host color-scheme passthrough: `guestThemeScript` bakes into
-  guest-setup (gsettings `color-scheme` / `plasma-apply-colorscheme`, both
-  `command -v`-gated so the spec's desktop guess can't misfire), and
-  `ThemeSync` re-pushes via guestRun on host portal changes for a viewer
-  session's lifetime (wired in service.ensureViewer + cli `vm start|view`).
-  `CRUISER_THEME_SYNC=0` opts out.
+  `theme.ts` — the dark/light channel's guest script + applyColorScheme;
+  `guestThemeScript` bakes into guest-setup (gsettings `color-scheme` /
+  `plasma-apply-colorscheme`, both `command -v`-gated so the spec's desktop
+  guess can't misfire).
+  `sync.ts` — the host→guest sync engine. `spec.sync` gates twelve channels:
+  eight default-on (theme, accentColor, contrast, timezone, locale, keyboard,
+  monitors, hostWallpaper) and four default-off security-sensitive ones
+  (gitIdentity, proxy, caCerts, sshAgent). `SessionSyncs` (viewer lifetime,
+  wired in service.ensureViewer + cli `vm start|view`) runs one shared portal
+  watcher for theme/accent/contrast, an /etc/localtime fs.watch for timezone,
+  session-start one-shots hash-gated via run/sync.state (locale/keyboard/
+  monitors/git/proxy/ca — in-guest drift isn't clobbered unless host input
+  changed), and an `AgentForward` (ssh -N -R host agent socket, respawn with
+  backoff) for sshAgent. `syncEnabled` = spec flag AND env: `CRUISER_HOST_
+  SYNC=0` kills all, `CRUISER_SYNC_<ID>=0` per channel, `CRUISER_THEME_SYNC=0`
+  still honored. Guest scripts all follow the guestThemeScript mold (runuser
+  for user-context, command -v gates, never abort provision).
+  `stage.ts` — shared QGA-writeFile/ssh-scp guest staging extracted from
+  wallpaper (pushFileToGuest).
   `wallpaper.ts` — managed guest wallpaper: jimp composite (lazy `importJimp`
   — its `isWebWorker` misfires under Bun, so `self` is shadowed during the
   import) with luminance-picked light/dark watermark ink, pushed via QGA
@@ -72,7 +87,9 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   exist) + `~/Desktop/VM Shortcuts.md`. `ensureGuestWallpaper` hashes inputs
   to `run/wallpaper.state` (`applied`/`staged`) so in-guest changes aren't
   clobbered and pre-login `staged` retries at the next session.
-  `CRUISER_WALLPAPER=0` opts out.
+  `CRUISER_WALLPAPER=0` opts out. Composite source: `display.wallpaper.source`
+  always wins; else `sync.hostWallpaper` feeds the host's current wallpaper
+  in as the base image (watermark still applied — never the raw host file).
 - `libraries/app-mode` — waypipe over vsock (socat bridge) / ssh fallback.
 - `libraries/app-shell` — UI: zustand store, CruiserService, screens markup.
 - `libraries/sys` — exec helpers (node:child_process — runs under bun AND node).

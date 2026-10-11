@@ -72,7 +72,10 @@ export async function extractCasper(iso: string, outDir: string): Promise<{ kern
  */
 export async function runIsoInstall(
     spec: VmSpec,
-    o: { iso: string; username: string; password: string; sshKeys?: string[]; timezone?: string; timeoutMs?: number },
+    o: {
+        iso: string; username: string; password: string; sshKeys?: string[];
+        timezone?: string; locale?: string; keyboard?: string; timeoutMs?: number;
+    },
 ): Promise<void> {
     const paths = vmPaths(spec.name);
     const tc = await resolveToolchain();
@@ -92,6 +95,7 @@ export async function runIsoInstall(
     const seedOpts: SeedOpts = {
         hostname: spec.name, username: o.username, passwordHash: hash,
         sshAuthorizedKeys: o.sshKeys, timezone: o.timezone,
+        locale: o.locale, keyboard: o.keyboard,
         packages: resolvePackages(profileFromSpec(spec), "seed"),
     };
     const seedIso = await buildSeedIso(join(paths.dir, "seed"), autoinstallUserData(seedOpts), metaData(seedOpts));

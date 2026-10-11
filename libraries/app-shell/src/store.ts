@@ -22,6 +22,7 @@ export interface VmSummary {
     snapshots: string[];
     vd: number;                    // display.virtualDesktop (edit form)
     usbKeys: string[];             // spec.usb.autoAttach as "vid:pid:serial" keys
+    sync?: Record<string, boolean>; // spec.sync.* — feeds the edit form
     hostDiskBytes?: number;        // real size of the disk image on the host fs
     guestUsedBytes?: number;       // guest fs used (QGA root mount / sum)
     guestTotalBytes?: number;      // guest fs total (≈ diskGiB cap)
@@ -48,6 +49,20 @@ export interface CreateForm {
     autologin: boolean;            // DM autologin into the desktop at boot
     preset: string;                // standard|developer — developer reveals the devtools menu
     devtools: string[];            // DevTool ids selected in the developer preset
+    // host → guest sync (spec.sync.*) — the last four are off by default:
+    // they push host credentials/identity/trust into the guest
+    syncTheme: boolean;            // dark/light hint
+    syncAccent: boolean;           // accent color
+    syncContrast: boolean;         // high-contrast preference
+    syncTimezone: boolean;         // host timezone
+    syncLocale: boolean;           // host LANG
+    syncKeyboard: boolean;         // host keymap
+    syncMonitors: boolean;         // host monitor topology (GNOME guests)
+    syncHostWallpaper: boolean;    // host wallpaper as composite source
+    syncGit: boolean;              // ~/.gitconfig user.name/email
+    syncProxy: boolean;            // host proxy config
+    syncCa: boolean;               // host custom CA roots
+    syncAgent: boolean;            // ssh -R agent socket forward
     iso: string;                   // iso path/url
     importPath: string;            // imported: existing disk image (absolute)
     diskDir: string;               // "" = default (vms dir); else disk file's dir
@@ -192,6 +207,9 @@ const defaultCreate = (): CreateForm => ({
     method: "cloudimg", distro: "ubuntu", release: "26.04", desktop: "gnome",
     browser: "none", snap: false, extraFonts: false, autologin: true,
     preset: "standard", devtools: [],
+    syncTheme: true, syncAccent: true, syncContrast: true, syncTimezone: true,
+    syncLocale: true, syncKeyboard: true, syncMonitors: true, syncHostWallpaper: true,
+    syncGit: false, syncProxy: false, syncCa: false, syncAgent: false,
     iso: "", importPath: "", diskDir: "",
     username: "cruiser", password: "",
     memUnit: "GiB", vd: 0, usb: [],

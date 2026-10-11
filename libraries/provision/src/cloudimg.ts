@@ -34,7 +34,10 @@ async function fetchImg(url: string, dst: string): Promise<void> {
 export async function provisionCloudimg(
     spec: VmSpec,
     qemuImg: string,
-    o: { release?: string; username: string; password: string; sshKeys?: string[]; timezone?: string },
+    o: {
+        release?: string; username: string; password: string; sshKeys?: string[];
+        timezone?: string; locale?: string; keyboard?: string;
+    },
 ): Promise<{ disk: string; seedIso: string }> {
     const paths = vmPaths(spec.name);
     const release = o.release ?? (spec.os.release || defaultRelease(spec.os.family));
@@ -54,6 +57,7 @@ export async function provisionCloudimg(
     const opts: SeedOpts = {
         hostname: spec.name, username: o.username, password: o.password,
         passwordHash: hash, sshAuthorizedKeys: o.sshKeys, timezone: o.timezone,
+        locale: o.locale, keyboard: o.keyboard,
         packages: resolvePackages(profileFromSpec(spec), "seed"),
         pkgMgr: profileFromSpec(spec).family === "fedora" ? "dnf" : "apt",
     };

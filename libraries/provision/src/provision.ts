@@ -11,8 +11,7 @@ import { guestLayoutFromHost } from "./monitors";
 import { provisionCloudimg } from "./cloudimg";
 import { ensureIso, runIsoInstall } from "./iso-install";
 import { waitForAgent, runGuestSetup } from "./guest-setup";
-import { themeSyncEnabled, type ColorScheme } from "./theme";
-import { hostColorScheme } from "../../host-int/src/appearance";
+import { gatherHostSync, seedTimezone, syncEnabled, type HostSnapshot } from "./sync";
 import { writePasswordFile } from "./nocloud";
 import { randomBytes } from "node:crypto";
 
@@ -48,16 +47,19 @@ async function ensurePassword(spec: VmSpec, o: ProvisionOpts): Promise<string> {
 }
 
 async function monitorsXml(spec: VmSpec, o: ProvisionOpts): Promise<string | undefined> {
-    if (o.mirrorHostMonitors === false) return undefined;
+    if (o.mirrorHostMonitors === false || !syncEnabled(spec, "monitors")) return undefined;
     const adapter = detectAdapter();
     if (!adapter.caps.monitors) return undefined;
     const host = await adapter.monitors().catch(() => []);
     return host.length ? guestLayoutFromHost(spec.name, host).xml : undefined;
 }
 
-async function hostTheme(o: ProvisionOpts): Promise<ColorScheme | undefined> {
-    if (o.syncHostTheme === false || !themeSyncEnabled()) return undefined;
-    return (await hostColorScheme()) ?? undefined;
+/** Host values for the guest-setup bake — every field channel-gated by
+ *  spec.sync + env. The legacy syncHostTheme opt only strips the scheme. */
+async function hostSnapshot(spec: VmSpec, o: ProvisionOpts): Promise<HostSnapshot> {
+    const s = await gatherHostSync(spec);
+    if (o.syncHostTheme === false) delete s.scheme;
+    return s;
 }
 
 /** Push the managed wallpaper + shortcuts doc after guest setup. Best-effort:
@@ -78,11 +80,13 @@ export async function provisionVmCloudimg(h: VmHandle, o: ProvisionOpts): Promis
     const pw = await ensurePassword(spec, o);
     const { pubText } = await (await import("../../vm-core/src/sshkey")).ensureKeypair();
     const sshKeys = [...(o.sshKeys ?? []), pubText];
+    const snap = await hostSnapshot(spec, o);
     log(h, o, `fetching cloud image (${spec.os.family} ${o.release ?? (spec.os.release || "default")})…`);
     const tc = await (await import("../../vm-core/src/qemu/resolve")).resolveToolchain();
     const { seedIso } = await provisionCloudimg(spec, tc.qemuImg, {
         release: o.release, username: spec.credentials.username, password: pw,
-        sshKeys, timezone: o.timezone,
+        sshKeys, timezone: await seedTimezone(spec, o.timezone),
+        locale: snap.locale, keyboard: snap.keyboard?.layout,
     });
     await h.saveSpec();
 
@@ -94,7 +98,7 @@ export async function provisionVmCloudimg(h: VmHandle, o: ProvisionOpts): Promis
 
     log(h, o, "running guest setup (rdp, autologin, monitors)…");
     const xml = await monitorsXml(spec, o);
-    await runGuestSetup(h, { rdpPassword: pw, monitorsXml: xml, colorScheme: await hostTheme(o), timeoutMs: 20 * 60_000 });
+    await runGuestSetup(h, { rdpPassword: pw, monitorsXml: xml, host: snap, timeoutMs: 20 * 60_000 });
     await wallpaperApply(h, o);
 
     spec.provisioned.completedAt = new Date().toISOString();
@@ -109,9 +113,14 @@ export async function provisionVmIso(h: VmHandle, o: ProvisionOpts): Promise<voi
     const { pubText } = await (await import("../../vm-core/src/sshkey")).ensureKeypair();
     const sshKeys = [...(o.sshKeys ?? []), pubText];
     const iso = o.iso!.startsWith("http") ? await ensureIso(o.iso!) : o.iso!;
+    const snap = await hostSnapshot(spec, o);
 
     log(h, o, "running unattended install (watch: tail -f run/install-serial.log)…");
-    await runIsoInstall(spec, { iso, username: spec.credentials.username, password: pw, sshKeys, timezone: o.timezone });
+    await runIsoInstall(spec, {
+        iso, username: spec.credentials.username, password: pw, sshKeys,
+        timezone: await seedTimezone(spec, o.timezone),
+        locale: snap.locale, keyboard: snap.keyboard?.layout,
+    });
     await h.saveSpec();
 
     log(h, o, "install complete — first normal boot…");
@@ -123,7 +132,7 @@ export async function provisionVmIso(h: VmHandle, o: ProvisionOpts): Promise<voi
 
     log(h, o, "running guest setup…");
     const xml = await monitorsXml(spec, o);
-    await runGuestSetup(h, { rdpPassword: pw, monitorsXml: xml, colorScheme: await hostTheme(o) });
+    await runGuestSetup(h, { rdpPassword: pw, monitorsXml: xml, host: snap });
     await wallpaperApply(h, o);
 
     spec.provisioned.completedAt = new Date().toISOString();
@@ -140,7 +149,7 @@ export async function reprovisionGuest(h: VmHandle, o: ProvisionOpts): Promise<v
     const { rdpPassword } = await import("../../host-int/src/freerdp");
     const password = pw || (await rdpPassword(h.spec))!;
     const xml = await monitorsXml(h.spec, o);
-    await runGuestSetup(h, { rdpPassword: password, monitorsXml: xml, colorScheme: await hostTheme(o) });
+    await runGuestSetup(h, { rdpPassword: password, monitorsXml: xml, host: await hostSnapshot(h.spec, o) });
     await wallpaperApply(h, o);
     log(h, o, "guest setup re-applied");
 }

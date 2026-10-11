@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { DesktopInfo, EscapeActionSpec } from "./types";
+import type { DesktopInfo, EscapeActionSpec, MonitorInfo } from "./types";
 
 async function qdbus(args: string[]): Promise<string> {
     const bin = (await which("qdbus6")) ?? (await which("qdbus"));
@@ -34,6 +34,50 @@ export async function kdeDesktops(): Promise<DesktopInfo[]> {
         if (!out.length) {
             const count = await qdbus(["org.kde.KWin", "/VirtualDesktopManager", "org.freedesktop.DBus.Properties.Get", "org.kde.KWin.VirtualDesktopManager", "count"]).catch(() => "0");
             for (let i = 0; i < Number(count); i++) out.push({ index: i + 1, current: i === 0 });
+        }
+        return out;
+    } catch {
+        return [];
+    }
+}
+
+/**
+ * kscreen-doctor -o json → MonitorInfo[] — the wayland-path monitor probe
+ * (xrandr sees nothing there). Carries real scale + refresh, unlike x11's
+ * best-effort parse. Defensive on key names: kscreen has renamed
+ * primary↔priority across Plasma releases.
+ */
+export async function kdeMonitors(): Promise<MonitorInfo[]> {
+    if (!await which("kscreen-doctor")) return [];
+    const r = await run("kscreen-doctor", ["-o", "json"], { noThrow: true, timeoutMs: 10_000 });
+    if (r.code !== 0 || !r.stdout.trim()) return [];
+    try {
+        const doc = JSON.parse(r.stdout) as {
+            outputs?: {
+                name?: string; enabled?: boolean; primary?: boolean; priority?: number;
+                scale?: number; pos?: { x?: number; y?: number };
+                size?: { width?: number; height?: number };
+                currentModeId?: string;
+                modes?: { id?: string | number; size?: { width?: number; height?: number }; refreshRate?: number }[];
+            }[];
+        };
+        const out: MonitorInfo[] = [];
+        const outputs = doc.outputs ?? [];
+        for (let i = 0; i < outputs.length; i++) {
+            const o = outputs[i]!;
+            if (o.enabled === false || !o.name) continue;
+            const mode = (o.modes ?? []).find((m) => String(m.id) === String(o.currentModeId));
+            const w = o.size?.width ?? mode?.size?.width ?? 0;
+            const h = o.size?.height ?? mode?.size?.height ?? 0;
+            if (!w || !h) continue;
+            out.push({
+                name: o.name,
+                x: o.pos?.x ?? 0, y: o.pos?.y ?? 0,
+                w, h,
+                primary: o.primary ?? (o.priority !== undefined ? o.priority === 1 : false),
+                scale: o.scale,
+                refresh: mode?.refreshRate,
+            });
         }
         return out;
     } catch {

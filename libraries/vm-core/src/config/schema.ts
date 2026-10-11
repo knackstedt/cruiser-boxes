@@ -137,6 +137,39 @@ export const VmSpec = z.object({
 
     usb: z.object({ autoAttach: z.array(UsbDeviceRef).default([]) }).prefault({}),
 
+    /**
+     * Host → guest sync channels. All per-VM; every channel also honors
+     * env kills (CRUISER_HOST_SYNC=0 master, CRUISER_SYNC_<ID>=0 each).
+     * The default-off four push host credentials/identity/trust into the
+     * guest — opt in deliberately.
+     */
+    sync: z.object({
+        /** dark/light hint via the xdg portal (provision bake + live watcher). */
+        theme: z.boolean().default(true),
+        /** portal accent-color → GNOME named accent / KDE AccentColor. */
+        accentColor: z.boolean().default(true),
+        /** portal contrast → high-contrast. */
+        contrast: z.boolean().default(true),
+        /** host timezone → timedatectl (provision default + live watcher). */
+        timezone: z.boolean().default(true),
+        /** host LANG → localectl (seed + guest-setup + session re-push). */
+        locale: z.boolean().default(true),
+        /** host X11 keymap → guest layout (seed + guest-setup + session re-push). */
+        keyboard: z.boolean().default(true),
+        /** host monitor topology → monitors.xml (GNOME guests; provision + session re-push). */
+        monitors: z.boolean().default(true),
+        /** host's own wallpaper as the managed composite's source image. */
+        hostWallpaper: z.boolean().default(true),
+        /** ~/.gitconfig user.name/email → guest git config. */
+        gitIdentity: z.boolean().default(false),
+        /** host proxy config → guest gsettings/kioslaverc + /etc/environment. */
+        proxy: z.boolean().default(false),
+        /** host custom CA roots → guest trust store. */
+        caCerts: z.boolean().default(false),
+        /** host SSH agent socket → guest via a held ssh -R forward. */
+        sshAgent: z.boolean().default(false),
+    }).prefault({}),
+
     shares: z.array(ShareSpec).default([]),
 
     /**

@@ -1,20 +1,16 @@
 // ============================================================================
-// theme.ts — mirror the host's dark/light hint into the guest desktop.
-// guestThemeScript is baked into guest-setup at provision time; ThemeSync
-// re-pushes on host portal changes for a viewer session's lifetime.
+// theme.ts — the dark/light channel's guest script + apply helper.
+// guestThemeScript is baked into guest-setup at provision time and pushed
+// live by SessionSyncs (provision/sync.ts) on host portal changes for a
+// viewer session's lifetime.
 // ============================================================================
 
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { guestRun } from "../../vm-core/src/logs";
-import { hostColorScheme, watchHostColorScheme, type ColorScheme } from "../../host-int/src/appearance";
+import type { ColorScheme } from "../../host-int/src/appearance";
 
 export type { ColorScheme };
-
-/** CRUISER_THEME_SYNC=0 disables both the provision bake and live sync. */
-export function themeSyncEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-    return env.CRUISER_THEME_SYNC !== "0";
-}
 
 const sq = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
 
@@ -61,54 +57,4 @@ export async function applyColorScheme(h: VmHandle, scheme: ColorScheme): Promis
     const r = await guestRun(h, ["/bin/sh", "-c", guestThemeScript(h.spec, scheme)], 30_000);
     if (r.code !== 0)
         throw new Error(`theme apply exited ${r.code} via ${r.transport}: ${(r.stderr || r.stdout).slice(-400)}`);
-}
-
-/**
- * Mirror the host color-scheme into a guest while a viewer session is up:
- * start() pushes the current hint, then a dbus-monitor watcher re-pushes on
- * host changes until dispose(). Scoped to the session so the watcher child
- * dies with the viewer.
- */
-export class ThemeSync {
-    private unwatch: (() => void) | null = null;
-    private last: ColorScheme | null = null;
-    private pushing = false;
-    private queued = false;
-
-    constructor(
-        private readonly h: VmHandle,
-        private readonly log?: (msg: string) => void,
-    ) {}
-
-    start(): void {
-        if (!themeSyncEnabled()) return;
-        void this.push();
-        this.unwatch = watchHostColorScheme(() => void this.push());
-    }
-
-    private async push(): Promise<void> {
-        if (this.pushing) { this.queued = true; return; }
-        this.pushing = true;
-        try {
-            const s = await hostColorScheme();
-            // `last` only advances on success — a failed push retries on the
-            // next host change instead of sticking on the attempted value.
-            if (s && s !== this.last) {
-                await applyColorScheme(this.h, s);
-                this.last = s;
-                this.log?.(`theme synced: guest → ${s}`);
-            }
-        } catch {
-            // agent down or no guest session yet — the next host change
-            // retries; a watcher must never throw.
-        } finally {
-            this.pushing = false;
-        }
-        if (this.queued) { this.queued = false; void this.push(); }
-    }
-
-    dispose(): void {
-        this.unwatch?.();
-        this.unwatch = null;
-    }
 }

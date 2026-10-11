@@ -20,6 +20,8 @@ import { join } from "node:path";
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { guestRun } from "../../vm-core/src/logs";
+import { pushFileToGuest } from "./stage";
+import { hostWallpaperPath } from "../../host-int/src/hoststate";
 
 /** CRUISER_WALLPAPER=0 disables both the render and the push. */
 export function wallpaperEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -182,13 +184,14 @@ export async function importJimp() {
     }
 }
 
-export async function renderWallpaper(spec: VmSpec): Promise<Buffer> {
+export async function renderWallpaper(spec: VmSpec, src?: string | null): Promise<Buffer> {
     const { Jimp, loadFont, measureText, measureTextHeight, JimpMime, F } = await importJimp();
 
     const w = spec.display.wallpaper;
     // jimp's read() and constructor return nominally-different generic
     // instantiations of the same class — `any` sidesteps the mismatch.
-    let img: any = w.source ? await Jimp.read(w.source).catch(() => null) : null;
+    const source = src !== undefined ? src : (w.source ?? null);
+    let img: any = source ? await Jimp.read(source).catch(() => null) : null;
     if (!img) img = defaultBackdrop(Jimp);
 
     if (w.position !== "off") {
@@ -326,42 +329,32 @@ if [ -n "$applied" ]; then echo CRUISER_WP_OK; else echo CRUISER_WP_STAGED; fi
 `;
 }
 
-/** Push the PNG into the guest: QGA guest-file-write first (writes to /tmp —
- *  allowed even under most policy), scp via the seeded key as the confined-
- *  agent fallback. */
-async function stageToGuest(h: VmHandle, png: Buffer): Promise<void> {
-    try {
-        await h.withQga((g) => g.writeFile(GUEST_STAGE, png), 30_000);
-        return;
-    } catch { /* agent down or confined — try ssh */ }
-    const port = h.spec.network.sshPort;
-    if (!port) throw new Error("can't stage wallpaper: guest-file-write failed and no SSH hostfwd is mapped");
-    const { ensureKeypair } = await import("../../vm-core/src/sshkey");
-    const { priv } = await ensureKeypair();
-    const { run } = await import("../../sys/src/exec");
-    const tmp = join(h.paths.run, "wallpaper.push.png");
-    await writeFile(tmp, png);
-    const r = await run("scp", [
-        "-i", priv, "-P", String(port),
-        "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-        "-o", "ConnectTimeout=15",
-        tmp, `${h.spec.credentials.username}@127.0.0.1:${GUEST_STAGE}`,
-    ], { noThrow: true, timeoutMs: 60_000 });
-    if (r.code !== 0)
-        throw new Error(`wallpaper staging failed via qga and scp: ${r.stderr.slice(-300)}`);
+/**
+ * Composite source resolution: explicit display.wallpaper.source always
+ * wins; otherwise sync.hostWallpaper mirrors the host's current wallpaper
+ * (path resolved per call — mtime lands in the hash, so a host change
+ * re-pushes). null = generated gradient.
+ */
+export async function wallpaperSource(spec: VmSpec): Promise<string | null> {
+    const w = spec.display.wallpaper;
+    if (w.source) return w.source;
+    if (!spec.sync.hostWallpaper) return null;
+    const { syncEnabled } = await import("./sync");
+    if (!syncEnabled(spec, "hostWallpaper")) return null;
+    return await hostWallpaperPath();
 }
 
 /** Inputs that make the pushed wallpaper stale — hashed into run/wallpaper.state. */
-async function wallpaperHash(h: VmHandle): Promise<string> {
+async function wallpaperHash(h: VmHandle, source: string | null): Promise<string> {
     const w = h.spec.display.wallpaper;
     let srcMeta = "";
-    if (w.source) {
-        const st = await stat(w.source).catch(() => null);
+    if (source) {
+        const st = await stat(source).catch(() => null);
         srcMeta = st ? `${st.mtimeMs}:${st.size}` : "missing";
     }
     const payload = JSON.stringify({
         v: 1, name: h.spec.name, position: w.position,
-        source: w.source ?? "", srcMeta, doc: shortcutsDoc(h.spec),
+        source: source ?? "", srcMeta, doc: shortcutsDoc(h.spec),
     });
     return createHash("sha256").update(payload).digest("hex").slice(0, 16);
 }
@@ -380,15 +373,16 @@ export async function ensureGuestWallpaper(
 ): Promise<WallpaperSyncResult> {
     const w = h.spec.display.wallpaper;
     if (!w.managed || !wallpaperEnabled()) return "off";
-    const hash = await wallpaperHash(h);
+    const source = await wallpaperSource(h.spec);
+    const hash = await wallpaperHash(h, source);
     const statePath = join(h.paths.run, "wallpaper.state");
     const [prevHash, prevStatus] = (await readFile(statePath, "utf-8").catch(() => "")).trim().split(" ");
     if (!opts.force && prevHash === hash && prevStatus === "applied") return "skipped";
 
-    const png = await renderWallpaper(h.spec);
+    const png = await renderWallpaper(h.spec, source);
     await mkdir(h.paths.run, { recursive: true });
     await writeFile(join(h.paths.run, "wallpaper.png"), png); // host copy — preview/debug
-    await stageToGuest(h, png);
+    await pushFileToGuest(h, GUEST_STAGE, png);
     const r = await guestRun(h, ["/bin/sh", "-c", guestWallpaperScript(h.spec)], 30_000);
     if (r.code !== 0)
         throw new Error(`wallpaper script exited ${r.code} via ${r.transport}: ${(r.stderr || r.stdout).slice(-400)}`);

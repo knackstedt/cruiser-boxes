@@ -7,6 +7,11 @@ export interface MonitorInfo {
     x: number; y: number;
     w: number; h: number;
     primary: boolean;
+    /** Best-effort UI scale factor (1, 1.25, 2…) — absent where the
+     *  session doesn't report one (plain X11 has no real concept). */
+    scale?: number;
+    /** Current refresh rate Hz — absent where probing doesn't report it. */
+    refresh?: number;
 }
 
 export interface DesktopInfo {
