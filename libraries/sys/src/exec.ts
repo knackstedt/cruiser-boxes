@@ -4,6 +4,7 @@
 // ============================================================================
 
 import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { openSync } from "node:fs";
 import { promisify } from "node:util";
 
 const execFileP = promisify(execFile);
@@ -58,11 +59,16 @@ export function spawnChild(
     args: string[],
     opts: { cwd?: string; env?: NodeJS.ProcessEnv; detached?: boolean; stdio?: "ignore" | "inherit" | "pipe"; logFile?: string } = {},
 ): ChildProcess {
+    // logFile: child's stdout+stderr append to the given path (viewer/debug
+    // output we'd otherwise lose with stdio:"ignore").
+    const stdio: import("node:child_process").StdioOptions = opts.logFile
+        ? ["ignore", openSync(opts.logFile, "a"), openSync(opts.logFile, "a")]
+        : (opts.stdio ?? "ignore");
     const child = spawn(cmd, args, {
         cwd: opts.cwd,
         env: opts.env ? { ...process.env, ...opts.env } : process.env,
         detached: opts.detached ?? false,
-        stdio: opts.stdio ?? "ignore",
+        stdio,
     });
     return child;
 }

@@ -24,6 +24,9 @@ export interface BuildOpts {
     virtiofs?: boolean;
     /** iso omitted → seed-only boot (cloudimg first-boot provisioning). */
     install?: { iso?: string; seedIso: string; kernel?: string; initrd?: string; serialLog?: string };
+    /** display.viewer=dmabuf: rendernode QEMU exports scanouts from — must be
+     *  the host display GPU (resolved by the lifecycle, auto-detected). */
+    dbusRenderNode?: string;
     extraArgs?: string[];
 }
 
@@ -79,10 +82,14 @@ export function buildArgs(
             outputs: outs,
         }));
     } else if (spec.gpu.mode === "virgl") {
+        const dd = spec.display.viewer === "dmabuf";
         push("-device", JSON.stringify({
             driver: "virtio-vga-gl", id: "gpu0",
             max_outputs: maxOut, xres: primary.xres, yres: primary.yres,
             outputs: outs,
+            // dmabuf viewer needs host-resident scanouts — blob keeps the
+            // guest's buffers on the virgl rendernode (no per-flip transfer).
+            ...(dd ? { blob: true, hostmem: spec.gpu.hostmemMiB * 1024 * 1024 } : {}),
         }));
     } else {
         push("-device", JSON.stringify({
@@ -91,16 +98,35 @@ export function buildArgs(
         }));
     }
 
-    // SPICE unix console — emergency/alternate viewer + audiodev backend.
-    // gl=on only makes sense with virgl/venus; rendernode must be a mesa node
-    // (NVIDIA EGL dmabuf export is broken — see devvm README).
-    const spiceParts = [`unix=on`, `addr=${paths.spiceSock}`, `disable-ticketing=on`];
-    if (spec.gpu.mode !== "software") {
-        spiceParts.push("gl=on");
-        if (spec.gpu.renderNode) spiceParts.push(`rendernode=${spec.gpu.renderNode}`);
+    // dmabuf viewer: QEMU D-Bus display backend (org.qemu.Display1, p2p).
+    // viewer-dd connects over the QMP monitor socket (getfd + add_client)
+    // and presents exported scanouts zero-copy. The rendernode is the virgl
+    // export device — it must be the HOST DISPLAY GPU's node or the viewer's
+    // EGL can't import the buffers (auto-detected by the lifecycle).
+    if (spec.display.viewer === "dmabuf") {
+        const node = opts.dbusRenderNode ?? spec.gpu.renderNode;
+        push("-display", `dbus,p2p=on,gl=on${node ? `,rendernode=${node}` : ""}`);
     }
-    push("-spice", spiceParts.join(","));
-    push("-device", "intel-hda", "-device", "hda-duplex,audiodev=aud0", "-audiodev", "spice,id=aud0");
+
+    if (spec.display.viewer === "dmabuf") {
+        // SPICE can't attach to a GL-context console at all ("Display spice
+        // is incompatible with the GL context") — drop it entirely. Audio
+        // flows over the dbus display backend instead; the viewer side can
+        // consume it when it implements the audio interfaces (silence until
+        // then — same as no client attached).
+        push("-device", "intel-hda", "-device", "hda-duplex,audiodev=aud0", "-audiodev", "dbus,id=aud0");
+    } else {
+        // SPICE unix console — emergency/alternate viewer + audiodev backend.
+        // gl=on only makes sense with virgl/venus; rendernode must be a mesa
+        // node (NVIDIA EGL dmabuf export is broken — see devvm README).
+        const spiceParts = [`unix=on`, `addr=${paths.spiceSock}`, `disable-ticketing=on`];
+        if (spec.gpu.mode !== "software") {
+            spiceParts.push("gl=on");
+            if (spec.gpu.renderNode) spiceParts.push(`rendernode=${spec.gpu.renderNode}`);
+        }
+        push("-spice", spiceParts.join(","));
+        push("-device", "intel-hda", "-device", "hda-duplex,audiodev=aud0", "-audiodev", "spice,id=aud0");
+    }
 
     // ── network ──
     const fwd = spec.network.hostfwd

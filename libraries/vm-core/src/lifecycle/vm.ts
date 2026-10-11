@@ -125,6 +125,16 @@ export class VmHandle extends EventEmitter {
             this.spec.gpu.renderNode = (await pickRenderNode()) ?? undefined;
             if (this.spec.gpu.renderNode) await this.saveSpec();
         }
+        if (this.spec.display.viewer === "dmabuf") {
+            if (this.spec.gpu.mode === "software")
+                throw new Error("display.viewer=dmabuf needs gpu.mode virgl or venus — QEMU exports no GL scanouts in software mode");
+            // QEMU exports the guest scanout from this node; the viewer's EGL
+            // must import same-vendor dma-bufs → always the display GPU.
+            const { pickDisplayRenderNode } = await import("../gpu/rendernode");
+            opts.dbusRenderNode ??= (await pickDisplayRenderNode()) ?? undefined;
+            if (!opts.dbusRenderNode)
+                throw new Error("display.viewer=dmabuf: no DRM render node found for the host display GPU");
+        }
         return buildArgs(this.spec, this.paths, opts, { ldLibraryPath: this.toolchain.ldLibraryPath });
     }
 

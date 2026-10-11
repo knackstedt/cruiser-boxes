@@ -10,6 +10,7 @@ import type { VmSpec } from "../../vm-core/src/config/schema";
 import type { EscapeActionSpec, WindowHandle, WmAdapter } from "./types";
 import { detectAdapter } from "./detect";
 import { launchFreerdp, waitRdpPort } from "./freerdp";
+import { launchDdViewer, waitMonitorSock } from "./ddviewer";
 import { run } from "../../sys/src/exec";
 
 export interface ViewerSessionOpts {
@@ -34,21 +35,32 @@ export class ViewerSession extends EventEmitter {
         this.adapter = opts.adapter ?? detectAdapter();
     }
 
-    /** Start the viewer: wait for RDP, spawn freerdp, place window, bind escapes. */
+    /** Start the viewer: wait for the display endpoint, spawn the viewer
+     *  (xfreerdp or viewer-dd), place the window, bind escape shortcuts. */
     async open(): Promise<void> {
-        const rdpPort = this.spec.network.rdpPort;
-        if (!rdpPort) throw new Error(`vm '${this.spec.name}' has no rdpPort`);
-        if (!await waitRdpPort(rdpPort, this.opts.rdpWaitMs))
-            throw new Error(`no RDP listener on 127.0.0.1:${rdpPort} — is '${this.spec.name}' running and logged in?`);
+        const dmabuf = this.spec.display.viewer === "dmabuf";
+        const wmClass: string | undefined = dmabuf ? undefined : "xfreerdp";
+        if (dmabuf) {
+            // no guest-side daemon to wait on — QEMU's QMP socket is enough
+            if (!await waitMonitorSock(this.spec))
+                throw new Error(`no QEMU monitor socket for '${this.spec.name}' — is it running?`);
+        } else {
+            const rdpPort = this.spec.network.rdpPort;
+            if (!rdpPort) throw new Error(`vm '${this.spec.name}' has no rdpPort`);
+            if (!await waitRdpPort(rdpPort, this.opts.rdpWaitMs))
+                throw new Error(`no RDP listener on 127.0.0.1:${rdpPort} — is '${this.spec.name}' running and logged in?`);
+        }
 
-        // Reap stale viewers for this VM — an orphaned freerdp (dead UI
+        // Reap stale viewers for this VM — an orphaned viewer (dead UI
         // session, closed cli) would otherwise stay stacked on the target
         // desktop and race our findWindow's title fallback.
-        const stale = await run("pgrep", ["-f", `xfreerdp.*cruiser:${this.spec.name}`], { noThrow: true });
+        const stale = await run("pgrep", ["-f", `(xfreerdp|viewer-dd).*cruiser:${this.spec.name}`], { noThrow: true });
         for (const p of stale.stdout.trim().split("\n").filter(Boolean))
             try { process.kill(Number(p), "SIGTERM"); } catch { /* already gone */ }
 
-        const { child } = await launchFreerdp(this.spec, { rdpPort });
+        const { child } = dmabuf
+            ? await launchDdViewer(this.spec)
+            : await launchFreerdp(this.spec, { rdpPort: this.spec.network.rdpPort! });
         this.child = child;
         child.on("exit", (c) => { this.child = null; this.emit("closed", c); this.cleanupDone = this.cleanup(); });
 
@@ -56,7 +68,7 @@ export class ViewerSession extends EventEmitter {
 
         // Find OUR window by pid — title matching races with other viewers.
         this.window = await this.adapter.findWindow(
-            { pid: child.pid, wmClass: "xfreerdp" },
+            { pid: child.pid, ...(wmClass ? { wmClass } : {}) },
             this.opts.windowWaitMs ?? 15_000,
         ).catch(() => null);
 

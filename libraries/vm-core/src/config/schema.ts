@@ -99,6 +99,13 @@ export const VmSpec = z.object({
     }).prefault({}),
 
     display: z.object({
+        /**
+         * Viewer transport: "rdp" = xfreerdp over the guest's RDP server;
+         * "dmabuf" = QEMU D-Bus display backend + viewer-dd (zero-copy
+         * dma-buf → EGL present — needs gpu.mode virgl/venus and the QEMU
+         * rendernode to match the host display GPU's vendor).
+         */
+        viewer: z.enum(["rdp", "dmabuf"]).default("rdp"),
         headMode: HeadMode.default("virtual-desktop"),
         /** "all" = /multimon; else named monitors for /monitor:<name>. */
         monitors: z.union([z.literal("all"), z.array(z.string())]).default("all"),

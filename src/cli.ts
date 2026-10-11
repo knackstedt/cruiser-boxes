@@ -40,6 +40,7 @@ usage: cruiser <area> <command> [args]
                    [--browser none|firefox|chrome|chromium|vivaldi|brave]
                    [--snap] [--xfonts] [--no-autologin] [--devtools toolchain,python,rust,…]
                    [--sync a,b,c] [--no-sync x,y]     host→guest sync channels (see vm sync)
+                   [--viewer rdp|dmabuf]              dmabuf = direct QEMU dma-buf display (virgl+)
                    [--wallpaper PATH] [--wallpaper-pos POS]
   vm start <name> [--mode <headmode>] [--no-view]         (auto-opens the viewer like the UI)
   vm stop <name>                        vm kill <name>
@@ -153,6 +154,7 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             if (num("--disk")) spec.disk.sizeGiB = num("--disk")!;
             const gpu = flagVal("--gpu"); if (gpu) spec.gpu.mode = gpu as VmSpec["gpu"]["mode"];
             const hm = flagVal("--head-mode"); if (hm) spec.display.headMode = hm as VmSpec["display"]["headMode"];
+            const viewer = flagVal("--viewer"); if (viewer) spec.display.viewer = viewer as VmSpec["display"]["viewer"];
             const persist = flagVal("--persist"); if (persist) spec.persist = persist as VmSpec["persist"];
             const distro = flagVal("--distro"); if (distro) spec.os.family = distro as VmSpec["os"]["family"];
             const desktop = flagVal("--desktop"); if (desktop) spec.os.desktop = desktop as VmSpec["os"]["desktop"];
