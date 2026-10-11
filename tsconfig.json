@@ -12,7 +12,10 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["@webgpu/types", "vite/client", "node"],
     "paths": {
-      "xxh3-ts": ["../downdraft-engine/packages/engine/libraries/persistence/src/xxh3-ts.d.ts"]
+      "xxh3-ts": [
+        "./node_modules/@downdraft/engine/dist/libraries/persistence/src/xxh3-ts.d.ts",
+        "../downdraft-engine/packages/engine/libraries/persistence/src/xxh3-ts.d.ts"
+      ]
     }
   },
   "include": ["src", "libraries", "modules", "toolchain", "*.ts", "*.mts"]

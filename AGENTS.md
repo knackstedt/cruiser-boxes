@@ -29,9 +29,11 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   deb + AppImage uploaded to a GitHub release; `-` in the tag = prerelease).
 - CI does NOT use the sibling `file:` engine checkout —
   `.github/actions/downdraft-deps` rewrites `@downdraft/*` to the published
-  npm version (`^0.2.0` by default). Engine changes must be **published to
+  npm version (`^0.3.0` by default). Engine changes must be **published to
   npm** before cruiser CI can see them; typecheck fails on unreleased APIs
-  (e.g. `PanelSpec.smoothWheel` existed locally long before npm had it).
+  (e.g. `PanelSpec.smoothWheel` existed locally long before npm had it, and
+  `NativeWindowConfig.appId/iconPath` are currently behind a cast in
+  native-entry.ts until the next release).
 
 ## Layout
 
