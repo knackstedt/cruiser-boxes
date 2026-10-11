@@ -48,6 +48,7 @@ Edit while the VM is stopped; the next `vm start` picks changes up.
 | `windowSize` | `{w:1600, h:1000}` | windowed mode size |
 | `escapeShortcuts` | `[{keys:"ctrl+alt+delete", action:"host-desktop:1"}]` | host keybindings while the viewer runs — keys normalized lowercase, action `name` or `name:arg` |
 | `dynamicResolution` | `true` | freerdp dynamic-resolution channel |
+| `wallpaper` | `{managed:true, position:"bottom-right"}` | cruiser-managed guest wallpaper — watermarked with the VM name + escape hints; `position`: corner/`center`/`off` (no watermark); `managed:false` leaves the guest alone; `source` = host image path (default: generated gradient) |
 | `sound` / `microphone` / `clipboard` | `true` | RDP redirection toggles |
 | `grabKeyboard` | `false` | `false` → freerdp `-grab-keyboard` (host keeps global shortcuts — required for escape shortcuts); `true` → `+grab-keyboard` (guest gets all keys) |
 

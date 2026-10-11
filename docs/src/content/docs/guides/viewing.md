@@ -93,6 +93,20 @@ The same hint is baked during provisioning so first login is already
 themed. Host "no preference" is never pushed; `CRUISER_THEME_SYNC=0`
 disables both bake and sync.
 
+## Managed wallpaper + shortcuts cheat sheet
+
+`display.wallpaper` (default `managed: true`) composites a wallpaper
+host-side — your `source` image or a generated gradient — with a faint
+watermark: the VM name, the live escape shortcuts, and the
+`cruiser vm kill <name>` fallback. Watermark ink is picked from the
+luminance of the region it lands in (`position`: a corner, `center`, or
+`off` to drop the watermark). It's pushed into the guest after provisioning
+and re-checked when a viewer session opens — changed inputs re-push, an
+in-guest wallpaper change is left alone. The same step writes
+`~/Desktop/VM Shortcuts.md` in the guest: every shortcut plus the
+host-terminal and TTY escape hatches. `CRUISER_WALLPAPER=0` disables it;
+`cruiser vm wallpaper <name> --source PATH --position POS` reconfigures.
+
 ## Emergency console
 
 Every VM also exposes a **SPICE unix socket** (`run/spice.sock`) — a

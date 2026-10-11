@@ -64,6 +64,15 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   `ThemeSync` re-pushes via guestRun on host portal changes for a viewer
   session's lifetime (wired in service.ensureViewer + cli `vm start|view`).
   `CRUISER_THEME_SYNC=0` opts out.
+  `wallpaper.ts` — managed guest wallpaper: jimp composite (lazy `importJimp`
+  — its `isWebWorker` misfires under Bun, so `self` is shadowed during the
+  import) with luminance-picked light/dark watermark ink, pushed via QGA
+  writeFile (scp fallback for confined agents), applied by a
+  `guestThemeScript`-style script (plasma tools win over gsettings when both
+  exist) + `~/Desktop/VM Shortcuts.md`. `ensureGuestWallpaper` hashes inputs
+  to `run/wallpaper.state` (`applied`/`staged`) so in-guest changes aren't
+  clobbered and pre-login `staged` retries at the next session.
+  `CRUISER_WALLPAPER=0` opts out.
 - `libraries/app-mode` — waypipe over vsock (socat bridge) / ssh fallback.
 - `libraries/app-shell` — UI: zustand store, CruiserService, screens markup.
 - `libraries/sys` — exec helpers (node:child_process — runs under bun AND node).

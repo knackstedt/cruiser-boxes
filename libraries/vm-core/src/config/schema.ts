@@ -109,6 +109,18 @@ export const VmSpec = z.object({
             { keys: "ctrl+alt+delete", action: "host-desktop:1" },
         ]),
         dynamicResolution: z.boolean().default(true),
+        /**
+         * cruiser-managed guest wallpaper — composited host-side with a
+         * watermark (vm name + escape/kill hints) and pushed into the guest.
+         * managed:false → never touch the guest wallpaper. position:"off"
+         * applies the image without the watermark.
+         */
+        wallpaper: z.object({
+            managed: z.boolean().default(true),
+            /** host image path; absent → generated cruiser gradient. */
+            source: z.string().optional(),
+            position: z.enum(["top-left", "top-right", "bottom-left", "bottom-right", "center", "off"]).default("bottom-right"),
+        }).prefault({}),
         sound: z.boolean().default(true),
         microphone: z.boolean().default(true),
         clipboard: z.boolean().default(true),

@@ -60,6 +60,18 @@ async function hostTheme(o: ProvisionOpts): Promise<ColorScheme | undefined> {
     return (await hostColorScheme()) ?? undefined;
 }
 
+/** Push the managed wallpaper + shortcuts doc after guest setup. Best-effort:
+ *  a wallpaper failure must never fail provisioning, and a no-live-session
+ *  guest just records `staged` — the session-start sync retries. */
+async function wallpaperApply(h: VmHandle, o: ProvisionOpts): Promise<void> {
+    try {
+        const { ensureGuestWallpaper } = await import("./wallpaper");
+        await ensureGuestWallpaper(h, (m) => log(h, o, `wallpaper: ${m}`), { force: true });
+    } catch (e) {
+        log(h, o, `wallpaper: ${e instanceof Error ? e.message : e}`);
+    }
+}
+
 /** Cloud image path: fetch img → overlay disk → seed → boot → agent → setup. */
 export async function provisionVmCloudimg(h: VmHandle, o: ProvisionOpts): Promise<void> {
     const spec = h.spec;
@@ -83,6 +95,7 @@ export async function provisionVmCloudimg(h: VmHandle, o: ProvisionOpts): Promis
     log(h, o, "running guest setup (rdp, autologin, monitors)…");
     const xml = await monitorsXml(spec, o);
     await runGuestSetup(h, { rdpPassword: pw, monitorsXml: xml, colorScheme: await hostTheme(o), timeoutMs: 20 * 60_000 });
+    await wallpaperApply(h, o);
 
     spec.provisioned.completedAt = new Date().toISOString();
     await h.saveSpec();
@@ -111,6 +124,7 @@ export async function provisionVmIso(h: VmHandle, o: ProvisionOpts): Promise<voi
     log(h, o, "running guest setup…");
     const xml = await monitorsXml(spec, o);
     await runGuestSetup(h, { rdpPassword: pw, monitorsXml: xml, colorScheme: await hostTheme(o) });
+    await wallpaperApply(h, o);
 
     spec.provisioned.completedAt = new Date().toISOString();
     await h.saveSpec();
@@ -127,5 +141,6 @@ export async function reprovisionGuest(h: VmHandle, o: ProvisionOpts): Promise<v
     const password = pw || (await rdpPassword(h.spec))!;
     const xml = await monitorsXml(h.spec, o);
     await runGuestSetup(h, { rdpPassword: password, monitorsXml: xml, colorScheme: await hostTheme(o) });
+    await wallpaperApply(h, o);
     log(h, o, "guest setup re-applied");
 }

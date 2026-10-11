@@ -17,6 +17,7 @@
   "dependencies": {
     "@downdraft/engine": "file:../downdraft-engine/packages/engine",
     "@downdraft/platform-native": "file:../downdraft-engine/packages/platform-native",
+    "jimp": "^1.6.1",
     "zod": "^4.1.0",
     "zustand": "^5.0.2"
   },

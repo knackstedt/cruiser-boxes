@@ -39,6 +39,7 @@ usage: cruiser <area> <command> [args]
                    [--distro ubuntu|debian|fedora] [--desktop gnome|kde]
                    [--browser none|firefox|chrome|chromium|vivaldi|brave]
                    [--snap] [--xfonts] [--no-autologin] [--devtools toolchain,python,rust,…]
+                   [--wallpaper PATH] [--wallpaper-pos POS]
   vm start <name> [--mode <headmode>] [--no-view]         (auto-opens the viewer like the UI)
   vm stop <name>                        vm kill <name>
   vm status <name>                      vm args <name>   (print QEMU argv)
@@ -46,6 +47,9 @@ usage: cruiser <area> <command> [args]
   vm restore <name> <snapname>          vm snapshot-rm <name> <snapname>
   vm backup <name> <dest.qcow2>         vm resize <name> <newGiB>
   vm rm <name> [--disk]                vm view <name>   launch freerdp viewer + place window
+  vm wallpaper <name> [--source PATH|--no-source] [--position POS] [--managed|--no-managed]
+                                      [--apply]         guest wallpaper + watermark (POS: top-left|top-right|
+                                                        bottom-left|bottom-right|center|off)
   vm logs <name> [--file cruiser|qemu|serial|install-serial] [--lines N]
            [--journal] [--unit U] [--priority P] [--boot N] [--since X] [--grep PAT]
            [--units]                    guest journal via QGA (ssh fallback on confined agents)
@@ -104,6 +108,15 @@ function startThemeSync(h: VmHandle, s: ViewerSession): void {
     }).catch(() => {});
 }
 
+/** Push the managed wallpaper into the guest if inputs changed (or a prior
+ *  apply only staged). Fire-and-forget — same nonblocking rules as
+ *  startThemeSync: nothing here may delay or fail the viewer open. */
+function startWallpaperSync(h: VmHandle): void {
+    void import("../libraries/provision/src/wallpaper").then(({ ensureGuestWallpaper }) =>
+        ensureGuestWallpaper(h, (m) => console.log(`${h.spec.name}: ${m}`))
+    ).catch(() => {});
+}
+
 async function needVm(name?: string): Promise<VmHandle> {
     if (!name) { console.error("missing vm name"); usage(); }
     const h = registry.get(name);
@@ -141,6 +154,8 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             if (has("--no-autologin")) spec.os.autologin = false;
             const devtools = flagVal("--devtools");
             if (devtools) spec.os.devtools = devtools.split(",").map((s) => s.trim()).filter(Boolean) as VmSpec["os"]["devtools"];
+            const wp = flagVal("--wallpaper"); if (wp) spec.display.wallpaper.source = wp;
+            const wpPos = flagVal("--wallpaper-pos"); if (wpPos) spec.display.wallpaper.position = wpPos as VmSpec["display"]["wallpaper"]["position"];
             for (let i = 0; i < argv.length; i++) {
                 if (argv[i] === "--share") {
                     const [p, tag] = (argv[i + 1] ?? "").split(":");
@@ -181,6 +196,7 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
                 try {
                     await s.open();
                     startThemeSync(h, s);
+                    startWallpaperSync(h);
                     console.log("viewer opened — close the window or ctrl+c to end the session");
                     await holdViewer(s);
                 } catch (e) { console.error(`viewer: ${e instanceof Error ? e.message : e}`); }
@@ -238,6 +254,28 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             console.log("unmounted");
             break;
         }
+        case "wallpaper": {
+            const h = await needVm(args[0]);
+            const w = h.spec.display.wallpaper;
+            let changed = false;
+            if (has("--source")) { w.source = flagVal("--source"); changed = true; }
+            if (has("--no-source")) { w.source = undefined; changed = true; }
+            const pos = flagVal("--position");
+            if (pos) { w.position = pos as VmSpec["display"]["wallpaper"]["position"]; changed = true; }
+            if (has("--managed")) { w.managed = true; changed = true; }
+            if (has("--no-managed")) { w.managed = false; changed = true; }
+            if (changed) {
+                VmSpec.parse(h.spec); // bad --position dies here, before saveSpec
+                await h.saveSpec();
+            }
+            if (has("--apply") || (changed && h.isRunning())) {
+                const { ensureGuestWallpaper } = await import("../libraries/provision/src/wallpaper");
+                if (!h.isRunning()) { console.error("vm isn't running — config saved, wallpaper applies at next session"); }
+                else await ensureGuestWallpaper(h, (m) => console.log(m), { force: true });
+            }
+            console.log(`wallpaper: managed=${w.managed} position=${w.position} source=${w.source ?? "(generated default)"}`);
+            break;
+        }
         case "view": {
             const h = await needVm(args[0]);
             if (!h.isRunning()) { console.error(`'${h.spec.name}' is not running`); process.exit(1); }
@@ -246,6 +284,7 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             console.log(`adapter: ${s.adapter.id}`);
             await s.open();
             startThemeSync(h, s);
+            startWallpaperSync(h);
             console.log("viewer launched — close the window or ctrl+c to end the session");
             await holdViewer(s);
             break;

@@ -561,6 +561,11 @@ export class CruiserService {
                 const { ThemeSync } = await import("../../provision/src/theme");
                 const theme = new ThemeSync(h, (m) => this.store.getState().setStatus(`${name}: ${m}`));
                 theme.start();
+                // Wallpaper sync — fire-and-forget like ThemeSync.push; a
+                // dead agent or slow jimp decode mustn't delay the viewer.
+                void import("../../provision/src/wallpaper").then(({ ensureGuestWallpaper }) =>
+                    ensureGuestWallpaper(h, (m) => this.store.getState().setStatus(`${name}: ${m}`))
+                ).catch(() => {});
                 s.on("closed", () => { this.viewers.delete(name); theme.dispose(); });
             } finally {
                 this.viewerPending.delete(name);
