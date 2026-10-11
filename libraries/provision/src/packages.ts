@@ -135,6 +135,21 @@ export const PACKAGES: PkgEntry[] = [
     { id: "gnome-store",   desktops: ["gnome"],
                            pkgs: { ...deb(["gnome-software", "gnome-software-plugin-flatpak"]), fedora: "gnome-software" } },
 
+    // ── Ubuntu GNOME baseline — ubuntu-session pulls ubuntu-settings, whose
+    //    gschema overrides point picture-uri at ubuntu-wallpapers (a hard dep
+    //    of gnome-shell, already installed). Without it the URI defaults to
+    //    the gnome-backgrounds adwaita files (only a Suggests → absent) and
+    //    GNOME renders the solid primary-color fallback = the blue desktop.
+    //    Plus the stock UX extensions: dock, tray, desktop icons, tiling. ──
+    { id: "ubuntu-flavor", desktops: ["gnome"], distros: ["ubuntu"],
+                           pkgs: { ubuntu: ["ubuntu-session", "ubuntu-settings",
+                                            "yaru-theme-gtk", "yaru-theme-icon", "yaru-theme-gnome-shell",
+                                            "gnome-shell-extension-ubuntu-dock",
+                                            "gnome-shell-extension-appindicator",
+                                            "gnome-shell-extension-desktop-icons-ng",
+                                            "gnome-shell-extension-ubuntu-tiling-assistant",
+                                            "xdg-user-dirs", "xdg-user-dirs-gtk"] } },
+
     // ── KDE desktop — only on releases shipping krdp (see distros.ts) ──
     { id: "kde-core",      desktops: ["kde"],
                            // plasma-workspace-wayland was merged into plasma-workspace

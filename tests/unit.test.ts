@@ -86,6 +86,13 @@ describe("packages", () => {
         expect(kde).toContain("plasma-discover");
         expect(kde).not.toContain("gnome-remote-desktop");
     });
+    test("ubuntu gnome gets the ubuntu session baseline", () => {
+        const gnome = resolvePackages(p({}), "setup");
+        expect(gnome).toContain("ubuntu-session");
+        expect(gnome).toContain("gnome-shell-extension-ubuntu-dock");
+        expect(resolvePackages(p({ family: "debian" }), "setup")).not.toContain("ubuntu-session");
+        expect(resolvePackages(p({ desktop: "kde" }), "setup")).not.toContain("ubuntu-session");
+    });
     test("snap + extraFonts + extraPackages are conditional", () => {
         expect(resolvePackages(p({}), "setup")).not.toContain("snapd");
         expect(resolvePackages(p({ snap: true }), "setup")).toContain("snapd");
