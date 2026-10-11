@@ -31,9 +31,7 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   `.github/actions/downdraft-deps` rewrites `@downdraft/*` to the published
   npm version (`^0.3.0` by default). Engine changes must be **published to
   npm** before cruiser CI can see them; typecheck fails on unreleased APIs
-  (e.g. `PanelSpec.smoothWheel` existed locally long before npm had it, and
-  `NativeWindowConfig.appId/iconPath` are currently behind a cast in
-  native-entry.ts until the next release).
+  (e.g. `PanelSpec.smoothWheel` existed locally long before npm had it).
 
 ## Layout
 
@@ -168,13 +166,11 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   main thread) — a full-page vello repaint is ~20ms, so in-process raster
   starves input during scroll/fade animations. `CRUISER_UI_BACKEND=local`
   forces the in-process backend; the settings page shows the live kind.
-  Node-runtime workers (packaged builds): pre-fix `worker-bootstrap.mjs`
-  drops host→worker messages posted before `self.onmessage` is assigned —
-  the mount-time doc "create" lands in that window → blank window. The
-  engine fix (queue until assignment) is committed in ../downdraft-engine;
-  until it ships on npm, `CruiserShell` defers initPanel until the worker's
-  ready handshake flips `host.docCaps` (2s failsafe). Bun/Deno unaffected —
-  their native Workers queue per spec.
+  Node-runtime workers (packaged builds): pre-0.3.1 `worker-bootstrap.mjs`
+  dropped host→worker messages posted before `self.onmessage` was assigned
+  (the mount-time doc "create" → blank window); fixed upstream in
+  @downdraft/platform-native 0.3.1 — bump the downdraft-deps pin if the
+  worker backend ever goes blank again.
 - Escape shortcuts require `-grab-keyboard` (host keeps combos) — the schema
   default `grabKeyboard:false` is load-bearing. `command:<cmd>` actions bind
   via KDE khotkeys (Plasma 5 — a `SIMPLE_ACTION_DATA` entry in khotkeysrc +

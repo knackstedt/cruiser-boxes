@@ -12,7 +12,6 @@
 import { fileURLToPath } from "node:url";
 import { createLogger } from "@downdraft/engine/util/logger";
 import { createNativeHost } from "@downdraft/platform-native/native-host";
-import type { NativeWindowConfig } from "@downdraft/platform-native/window/native-window";
 import { InputBus } from "../libraries/app-shell/src/input-bus";
 import { CruiserShell } from "../libraries/app-shell/src/shell";
 import { CruiserService } from "../libraries/app-shell/src/service";
@@ -35,15 +34,11 @@ process.env.DD_APP_ID ??= "dev.cruiser.app";
 process.env.DD_APP_ICON ??= fileURLToPath(new URL("../assets/icon.png", import.meta.url));
 
 const host = await createNativeHost({
-    // appId/iconPath are post-0.3.0 NativeWindowConfig fields — the cast
-    // keeps CI (npm @downdraft/*) typechecking until the next engine release;
-    // older builds ignore the extra fields at runtime. Drop it once the
-    // fields land on npm.
     window: {
         title: "Cruiser", width: WIDTH, height: HEIGHT,
         appId: "dev.cruiser.app",
         iconPath: fileURLToPath(new URL("../assets/icon.png", import.meta.url)),
-    } as NativeWindowConfig,
+    },
     services: "inline",
     // dev harness knobs: CRUISER_SCREENSHOT=/path.png CRUISER_SHOT_FRAMES=20
     ...(process.env.CRUISER_SCREENSHOT

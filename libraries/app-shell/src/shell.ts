@@ -34,13 +34,12 @@ const isSpinwrap = (html: string) => html.startsWith('<div class="spinwrap"');
 export class CruiserShell {
     private host: HtmlUiHost;
     private panel: UiPanelHandle | null = null;
-    private gate?: RenderGate;
+    private gate: RenderGate;
     private W: number;
     private H: number;
-    private unsub?: () => void;
-    private disposed = false;
+    private unsub: () => void;
     private spinIdx = 0;
-    private spinTimer: ReturnType<typeof setInterval> | null = null;
+    private spinTimer: ReturnType<typeof setInterval>;
     private lastRoute = "";
     private pendingParts: RouteParts | null = null;
     private lastParts: RouteParts | null = null;
@@ -69,40 +68,14 @@ export class CruiserShell {
         svc.uiBackend = this.host.backendKind === "worker" ? "worker" : "local (in-process)";
         mark("html-ui-host");
         this.host.bindInput(bus);
-        // Packaged node-runtime workers drop host→worker messages posted
-        // before the script assigns self.onmessage (worker-bootstrap.mjs
-        // attaches its dispatcher at --import time, and the port drains its
-        // backlog into a null handler). mount()'s "create" lands exactly in
-        // that window → a live worker with no doc and a blank window. The
-        // "ready" emit posts only after the handler is set, so deferring
-        // init until docCaps flips clears the window; the failsafe covers a
-        // wedged/!incrementalDom worker. Remove once @downdraft/platform-
-        // native ships the queueing bootstrap on npm.
-        const start = () => { if (!this.disposed) this.initPanel(); };
-        // Only node's worker_threads shim needs the wait — Bun/Deno implement
-        // web Worker semantics and queue until onmessage is assigned.
-        const dropRisk = this.host.backendKind === "worker"
-            && !this.host.docCaps.incrementalDom
-            && typeof (globalThis as { Bun?: unknown }).Bun === "undefined"
-            && typeof (globalThis as { Deno?: unknown }).Deno === "undefined";
-        if (dropRisk) {
-            const poll = setInterval(() => {
-                if (!this.host.docCaps.incrementalDom) return;
-                clearInterval(poll); clearTimeout(failsafe); start();
-            }, 4);
-            const failsafe = setTimeout(() => { clearInterval(poll); start(); }, 2000);
-        } else start();
-    }
-
-    private initPanel(): void {
-        const store = this.store;
-        // Before mount: resources apply in order, so the first doc resolve
-        // sees the system fonts instead of the embedded DejaVu fallback.
+        // Before mount: the local backend applies resources in order, so the
+        // first doc resolve sees the system fonts instead of the embedded
+        // DejaVu fallback.
         registerUiFonts(this.host);
         mark("fonts");
         const mountParts = renderRouteParts(store.getState());
         this.panel = this.host.mount({
-            rect: { x: 0, y: 0, w: this.W, h: this.H },
+            rect: { x: 0, y: 0, w: width, h: height },
             html: mountParts.html,
             // zoom: layout runs at rect/zoom CSS px → UI renders zoom× bigger.
             // scale=1 keeps the raster at display res so text lands on hard
@@ -263,11 +236,11 @@ export class CruiserShell {
     /** <input data-field="x"> → store.create[x] on every input event. */
     private wireInputs(): void {
         this.panel?.onEvent((ev) => {
-            if (ev.t === "focus") { this.gate?.focus(ev.g); return; }
+            if (ev.t === "focus") { this.gate.focus(ev.g); return; }
             if (ev.t === "blur") {
                 // Queued so a focus event for the next input in the same
                 // batch lands first and keeps the render deferred.
-                if (this.gate?.blur()) queueMicrotask(() => this.pushRender());
+                if (this.gate.blur()) queueMicrotask(() => this.pushRender());
                 return;
             }
             if (ev.t === "scroll") {
@@ -312,7 +285,7 @@ export class CruiserShell {
         // known trigger; the next store change re-pushes either way.
         try {
             this.pendingParts = renderRouteParts(this.store.getState());
-            this.gate?.render(this.pendingParts.html);
+            this.gate.render(this.pendingParts.html);
         } catch (e) {
             log.error("shell", `render failed: ${e instanceof Error ? e.stack ?? e.message : e}`);
         }
@@ -406,11 +379,10 @@ export class CruiserShell {
     }
 
     dispose(): void {
-        this.disposed = true;
-        if (this.spinTimer) clearInterval(this.spinTimer);
+        clearInterval(this.spinTimer);
         if (this.logInputTimer) clearTimeout(this.logInputTimer);
         if (this.confirmTimer) clearTimeout(this.confirmTimer);
-        this.unsub?.();
+        this.unsub();
         this.host.dispose();
         this.panel = null;
     }
