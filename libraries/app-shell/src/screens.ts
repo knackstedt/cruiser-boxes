@@ -29,9 +29,13 @@ body { background:#10141a; color:#e8ecf1; font-family:'Cruiser Sans',sans-serif;
 .vmlist-head { display:flex; align-items:center; justify-content:space-between;
                margin-bottom:14px; }
 .vmlist-head .h1 { margin-bottom:0; }
-.vmrow { display:flex; align-items:center; gap:14px; padding:11px 16px;
+.vmrow { display:flex; align-items:center; flex-wrap:wrap; gap:8px 14px;
+         padding:11px 16px;
          background:#161b23; border:1px solid #2a313c; border-radius:6px; }
-.vmrow .grow { flex:1; min-width:0; }
+/* 240px basis: below that the sparks/pill/buttons wrap to a second line
+   instead of crushing the spec text into one-word-per-line. */
+.vmrow .grow { flex:1 1 240px; min-width:0; }
+.vmbtns { display:flex; align-items:center; flex-wrap:wrap; row-gap:4px; }
 .vmname { font-size:15px; font-weight:bold; }
 .vmspecs { font-size:12px; color:#8a94a3; margin-top:3px; }
 .vmmode { font-size:12px; color:#5d6775; margin-top:2px; }
@@ -229,7 +233,7 @@ function vmRow(vm: VmSummary, s: CruiserState): string {
         </div>
         ${up ? `<div class="sparks">${spark("cpu", vm.cpu)}${spark("mem", vm.mem)}</div>` : ""}
         <div class="pill ${pillClass(vm.state)}">${esc(vm.state)}</div>
-        ${vmBtns(vm, s)}
+        <div class="vmbtns">${vmBtns(vm, s)}</div>
     </div>`;
 }
 

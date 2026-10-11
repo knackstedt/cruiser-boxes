@@ -16,7 +16,7 @@ import type { NativeWindowConfig } from "@downdraft/platform-native/window/nativ
 import { InputBus } from "../libraries/app-shell/src/input-bus";
 import { CruiserShell } from "../libraries/app-shell/src/shell";
 import { CruiserService } from "../libraries/app-shell/src/service";
-import { createCruiserStore } from "../libraries/app-shell/src/store";
+import { createCruiserStore, type VmSummary } from "../libraries/app-shell/src/store";
 import { mark } from "../libraries/app-shell/src/startup-profile";
 
 const log = createLogger("info");
@@ -24,8 +24,9 @@ const log = createLogger("info");
 // Runtime boot + module-graph eval happened before this line ran.
 mark("entry-module");
 
-const WIDTH = 1100;
-const HEIGHT = 720;
+// dev harness knob: CRUISER_WIN_W/CRUISER_WIN_H override the initial size
+const WIDTH = Number(process.env.CRUISER_WIN_W ?? 1100);
+const HEIGHT = Number(process.env.CRUISER_WIN_H ?? 720);
 
 // Desktop-entry identity — env covers launcher-exported vars (packaged
 // node runtime); the window config fields below cover runtimes whose
@@ -62,6 +63,18 @@ const svc = new CruiserService(store);
 const shell = new CruiserShell(device as unknown as GPUDevice, format, surface.width, surface.height, bus, store, svc);
 mark("shell");
 svc.init().then(() => mark("service-init")).catch((e) => store.getState().setStatus(`init failed: ${e}`));
+// dev harness knob: CRUISER_FAKE_VM=1 appends a fake running VM on every
+// refresh — exercises the running vmrow layout (sparks + extra buttons).
+if (process.env.CRUISER_FAKE_VM) {
+    const fake: VmSummary = {
+        name: "fake-runner", state: "running", gpuMode: "venus", headMode: "windowed",
+        cpus: 4, memMiB: 8192, diskGiB: 64, sshPort: 4022, rdpPort: 43389,
+        provisioned: "cloudimg", persist: "daemonize", snapshots: [], vd: 0, usbKeys: [],
+        cpu: [12, 30, 55, 22, 40, 68, 35], mem: [40, 44, 60, 38, 52, 55, 48],
+    };
+    const orig = store.getState().setVms;
+    store.setState({ setVms: (vms) => orig([fake, ...vms.filter((v) => v.name !== fake.name)]) });
+}
 // dev harness knob: CRUISER_ROUTE=create|vm|settings|logs preselects a route for screenshots
 // (CRUISER_VM overrides the vm selected for vm/logs routes)
 if (process.env.CRUISER_ROUTE) {
