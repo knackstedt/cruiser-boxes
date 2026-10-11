@@ -173,6 +173,19 @@ mkdir -p /var/lib/gnome-remote-desktop/tls
     -newkey rsa:2048 -keyout /var/lib/gnome-remote-desktop/tls/key.pem \\
     -out /var/lib/gnome-remote-desktop/tls/cert.pem -days 3650 -nodes -subj ${sq(`/CN=${spec.name}`)}
 chown -R gnome-remote-desktop:gnome-remote-desktop /var/lib/gnome-remote-desktop
+# the stock unit has no ordering on the DM — it starts parallel to gdm, and
+# a failed connect to /org/gnome/DisplayManager/Displays is never retried
+# (the daemon stays alive, so Restart=on-failure can't help either), leaving
+# :3389 unbound forever. gdm is Type=dbus, so ordering after the DM alias
+# defers GRD until gdm owns its bus name. Wants (not Requires) keeps GRD
+# starting on DM-less imported disks.
+mkdir -p /etc/systemd/system/gnome-remote-desktop.service.d
+tee /etc/systemd/system/gnome-remote-desktop.service.d/after-dm.conf <<'GRDDROP' >/dev/null
+[Unit]
+Wants=display-manager.service
+After=display-manager.service
+GRDDROP
+systemctl daemon-reload || true
 systemctl enable --now gnome-remote-desktop.service
 # GRD ≥47: grdctl talks to a separate configuration daemon — it must be up
 # before the grdctl calls or the settings land nowhere.
