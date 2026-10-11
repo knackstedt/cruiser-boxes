@@ -1,5 +1,22 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
-  <rect x="2" y="5" width="28" height="19" rx="3" fill="none" stroke="#4aa3ff" stroke-width="2.4"/>
-  <path d="M6 17c2.5-3 5-3 7.5 0s5 3 7.5 0 5-3 5 0" fill="none" stroke="#4aa3ff" stroke-width="2.2" stroke-linecap="round"/>
-  <path d="M10 28h12" stroke="#4aa3ff" stroke-width="2.4" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#272c38"/>
+      <stop offset="1" stop-color="#15171c"/>
+    </linearGradient>
+    <linearGradient id="water" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7cc4ff"/>
+      <stop offset="1" stop-color="#2a6fd6"/>
+    </linearGradient>
+    <clipPath id="scr"><rect x="122" y="146" width="268" height="172" rx="12"/></clipPath>
+  </defs>
+  <rect width="512" height="512" rx="106" fill="url(#bg)"/>
+  <rect x="1.5" y="1.5" width="509" height="509" rx="104" fill="none" stroke="#8fc7ff" stroke-opacity="0.10" stroke-width="3"/>
+  <rect x="106" y="130" width="300" height="204" rx="26" fill="#0c121c" stroke="#4aa3ff" stroke-width="13"/>
+  <g clip-path="url(#scr)">
+    <path d="M96 244 c40-42 80-42 120 0 s80 42 120 0 80-42 120 0 v90 H96 Z" fill="#4aa3ff" opacity="0.35"/>
+    <path d="M96 272 c40-44 80-44 120 0 s80 44 120 0 80-44 120 0 v80 H96 Z" fill="url(#water)"/>
+  </g>
+  <rect x="246" y="342" width="20" height="38" fill="#3d4761"/>
+  <rect x="196" y="380" width="120" height="16" rx="8" fill="#3d4761"/>
 </svg>

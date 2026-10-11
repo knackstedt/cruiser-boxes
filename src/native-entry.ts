@@ -9,6 +9,7 @@
 // Run: draft dev   (or: bun run src/native-entry.ts)
 // ============================================================================
 
+import { fileURLToPath } from "node:url";
 import { createLogger } from "@downdraft/engine/util/logger";
 import { createNativeHost } from "@downdraft/platform-native/native-host";
 import { InputBus } from "../libraries/app-shell/src/input-bus";
@@ -25,8 +26,18 @@ mark("entry-module");
 const WIDTH = 1100;
 const HEIGHT = 720;
 
+// Desktop-entry identity — env covers launcher-exported vars (packaged
+// node runtime); the window config fields below cover runtimes whose
+// process.env writes never reach the dlopen'd lib (Bun dev).
+process.env.DD_APP_ID ??= "dev.cruiser.app";
+process.env.DD_APP_ICON ??= fileURLToPath(new URL("../assets/icon.png", import.meta.url));
+
 const host = await createNativeHost({
-    window: { title: "Cruiser", width: WIDTH, height: HEIGHT },
+    window: {
+        title: "Cruiser", width: WIDTH, height: HEIGHT,
+        appId: "dev.cruiser.app",
+        iconPath: fileURLToPath(new URL("../assets/icon.png", import.meta.url)),
+    },
     services: "inline",
     // dev harness knobs: CRUISER_SCREENSHOT=/path.png CRUISER_SHOT_FRAMES=20
     ...(process.env.CRUISER_SCREENSHOT
