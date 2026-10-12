@@ -105,7 +105,10 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   `theme.ts` — the dark/light channel's guest script + applyColorScheme;
   `guestThemeScript` bakes into guest-setup (gsettings `color-scheme` /
   `plasma-apply-colorscheme`, both `command -v`-gated so the spec's desktop
-  guess can't misfire).
+  guess can't misfire). plasma-apply-colorscheme REQUIRES
+  `QT_QPA_PLATFORM=offscreen` in the QGA/ssh context — no DISPLAY/
+  WAYLAND_DISPLAY means the Qt xcb plugin aborts and the `|| true` eats it,
+  silently leaving the guest on BreezeLight.
   `sync.ts` — the host→guest sync engine. `spec.sync` gates thirteen channels:
   nine default-on (theme, accentColor, contrast, timezone, locale, keyboard,
   monitors, hostWallpaper, shares) and four default-off security-sensitive ones

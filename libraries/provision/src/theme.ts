@@ -23,6 +23,8 @@ const sq = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
  *                pre-login, so the dbus-run-session fallback covers the
  *                provision bake).
  *   Plasma     → plasma-apply-colorscheme (live apply + kdeglobals persist)
+ *                under QT_QPA_PLATFORM=offscreen — the QGA/ssh context has
+ *                no DISPLAY or WAYLAND_DISPLAY and the Qt xcb plugin aborts;
  *                or a bare kdeglobals write for next login.
  * Light maps to 'default'/'BreezeLight' — 'default' is the "no preference"
  * enum value and renders light in practice, and older gsettings schemas
@@ -42,9 +44,16 @@ if command -v gsettings >/dev/null 2>&1; then
         gsettings set org.gnome.desktop.interface color-scheme '${gs}' 2>/dev/null || true
 fi
 if command -v plasma-apply-colorscheme >/dev/null 2>&1; then
+    # QT_QPA_PLATFORM=offscreen: it aborts without a display env, and a
+    # QGA-issued apply has neither DISPLAY nor WAYLAND_DISPLAY.
     runuser -u "$U" -- env XDG_RUNTIME_DIR=/run/user/"$UUID" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/"$UUID"/bus \\
+        QT_QPA_PLATFORM=offscreen plasma-apply-colorscheme ${breeze} 2>/dev/null || \\
+    runuser -u "$U" -- env XDG_RUNTIME_DIR=/run/user/"$UUID" QT_QPA_PLATFORM=offscreen \\
         plasma-apply-colorscheme ${breeze} 2>/dev/null || \\
-    runuser -u "$U" -- plasma-apply-colorscheme ${breeze} 2>/dev/null || true
+    { mkdir -p "$UHOME/.config" 2>/dev/null; \\
+      command -v kwriteconfig6 >/dev/null 2>&1 && \\
+      kwriteconfig6 --file "$UHOME/.config/kdeglobals" --group General --key ColorScheme ${breeze} 2>/dev/null && \\
+      chown -R "$U:$U" "$UHOME/.config" 2>/dev/null; true; }
 elif command -v kwriteconfig6 >/dev/null 2>&1; then
     mkdir -p "$UHOME/.config" 2>/dev/null || true
     kwriteconfig6 --file "$UHOME/.config/kdeglobals" --group General --key ColorScheme ${breeze} 2>/dev/null || true
