@@ -119,6 +119,9 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   `CRUISER_WALLPAPER=0` opts out. Composite source: `display.wallpaper.source`
   always wins; else `sync.hostWallpaper` feeds the host's current wallpaper
   in as the base image (watermark still applied — never the raw host file).
+  `shellInsets` adds a per-guest-DE edge reserve (KDE bottom panel ~5% of
+  image height, GNOME top bar ~3%) so the watermark isn't parked under the
+  shell's bar — heuristic only, a moved/resized panel isn't tracked.
 - `libraries/app-mode` — waypipe over vsock (socat bridge) / ssh fallback.
 - `libraries/app-shell` — UI: zustand store, CruiserService, screens markup.
   Screen split: the vm detail screen owns everything that acts IMMEDIATELY
@@ -250,8 +253,16 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   flushes in-memory config over pending file edits; trigger `Uuid`s must be
   stable per command because khotkeys registers the grab under them and does
   NOT release it on reread (uninstall calls `KGlobalAccel.unregister`
-  explicitly). `{vm}`/`{cli}` placeholders expand in ViewerSession.open
-  (`{cli}` → `bun run src/cli.ts` in dev, `cruiser` packaged). Default:
+  explicitly). kglobalaccel keeps the FIRST grab registered — install must
+  steal the key (`kdeStealKey`): clear conflicting entries in other
+  components to `none,none,<desc>` (ksmserver "Log Out" owns Ctrl+Alt+Del
+  out of the box; restored on uninstall) and `unregister` [khotkeys] grabs
+  outright. kglobalshortcutsrc rows are `<current>,<default>,<friendly>`
+  with multi-binding slots joined by an ESCAPED `\t`, and khotkeys
+  CommandURL executes the line itself — a `sh -c` argv wrapper must be
+  unwrapped first or the outer shell eats only the first word. `{vm}`/`{cli}`
+  placeholders expand in ViewerSession.open (`{cli}` → `bun run src/cli.ts`
+  in dev, `cruiser` packaged). Default:
   `ctrl+alt+end → command:{cli} vm kill {vm}`.
 - HMR (`draft dev`): `native-entry.ts` is a "blocking entry" — its
   close-wait must release via `__ddSession.onDispose(() => resolve())` and

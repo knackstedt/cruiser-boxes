@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { defaultSpec, parseVmSpec } from "../libraries/vm-core/src/config/schema";
 import {
     escapeActionLabel, escapesActive, watermarkLines, shortcutsDoc,
-    regionLuminance, pickInk, watermarkRect, guestWallpaperScript, renderWallpaper, importJimp,
+    regionLuminance, pickInk, watermarkRect, shellInsets, guestWallpaperScript, renderWallpaper, importJimp,
 } from "../libraries/provision/src/wallpaper";
 
 const spec = () => defaultSpec("testvm");
@@ -90,6 +90,22 @@ describe("luminance", () => {
         expect(r("bottom-left")).toEqual({ x: 20, y: 680, w: 200, h: 100 });
         expect(r("bottom-right")).toEqual({ x: 780, y: 680, w: 200, h: 100 });
         expect(r("center")).toEqual({ x: 400, y: 350, w: 200, h: 100 });
+    });
+    test("watermarkRect adds edge insets on the matching side", () => {
+        const inset = { top: 30, bottom: 60 };
+        const r = (p: Parameters<typeof watermarkRect>[4]) => watermarkRect(1000, 800, 200, 100, p, 20, inset);
+        expect(r("top-left")).toEqual({ x: 20, y: 50, w: 200, h: 100 });
+        expect(r("top-right")).toEqual({ x: 780, y: 50, w: 200, h: 100 });
+        expect(r("bottom-left")).toEqual({ x: 20, y: 620, w: 200, h: 100 });
+        expect(r("bottom-right")).toEqual({ x: 780, y: 620, w: 200, h: 100 });
+        expect(r("center")).toEqual({ x: 400, y: 350, w: 200, h: 100 });
+    });
+    test("shellInsets: kde reserves the bottom panel, gnome the top bar", () => {
+        const s = spec();
+        s.os.desktop = "kde";
+        expect(shellInsets(s, 1080)).toEqual({ top: 0, bottom: 54 });
+        s.os.desktop = "gnome";
+        expect(shellInsets(s, 1080)).toEqual({ top: 32, bottom: 0 });
     });
 });
 

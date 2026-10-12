@@ -113,6 +113,73 @@ function kwinShortcutFor(action: EscapeActionSpec): string | null {
     return null;
 }
 
+const KGLOBAL_RC = () => join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "kglobalshortcutsrc");
+
+export interface KglobalBoundEntry { group: string; key: string; value: string }
+
+/**
+ * Every kglobalshortcutsrc entry holding `kd`. The value shape is
+ * `<current>,<default>,<friendly>` with multi-binding slots joined by an
+ * ESCAPED tab (`display=Display\tMeta+P,...` — literally backslash-t in
+ * the ini). [khotkeys] uuid rows look like `{uuid}=Ctrl+Alt+End,none,
+ * <desc>`, so either of the first two fields may carry the live grab.
+ * Exported for tests.
+ */
+export function kglobalConflicts(src: string, kd: string): KglobalBoundEntry[] {
+    const out: KglobalBoundEntry[] = [];
+    let group = "";
+    src.split("\n").forEach((raw) => {
+        const line = raw.trimEnd();
+        const g = /^\[(.+)\]$/.exec(line);
+        if (g) { group = g[1]!; return; }
+        const eq = line.indexOf("=");
+        if (eq <= 0 || !group) return;
+        const value = line.slice(eq + 1);
+        const bound = value.split(",").slice(0, 2)
+            .some((f) => f.split(/\\t|\t/).some((b) => b.trim().toLowerCase() === kd.toLowerCase()));
+        if (bound) out.push({ group, key: line.slice(0, eq), value });
+    });
+    return out;
+}
+
+/** "a][b" nested group headers → repeated kwriteconfig --group args. */
+const groupArgs = (g: string) => g.split("][").flatMap((p) => ["--group", p]);
+
+/**
+ * Steal `kd` from whatever already holds it — kglobalaccel keeps the first
+ * grab registered, so our rebind never fires while another component owns
+ * the key (ksmserver's "Log Out" takes Ctrl+Alt+Del out of the box). Each
+ * conflicting entry is rewritten `none,none,<desc>` and returned for the
+ * uninstaller to restore. [khotkeys] grabs are unregistered over dbus
+ * instead — a file edit doesn't release the daemon-side grab, and their
+ * khotkeysrc entries re-arm themselves on the next reread.
+ */
+async function kdeStealKey(kd: string, kc: string, skip?: { group: string; key: string }): Promise<KglobalBoundEntry[]> {
+    const src = await readFile(KGLOBAL_RC(), "utf8").catch(() => "");
+    const hits = kglobalConflicts(src, kd).filter((h) => !(skip && h.group === skip.group && h.key === skip.key));
+    const stolen: KglobalBoundEntry[] = [];
+    for (let i = 0; i < hits.length; i++) {
+        const h = hits[i]!;
+        if (h.group === "khotkeys") {
+            const svcs = ["org.kde.kglobalaccel", "org.kde.KGlobalAccel"];
+            for (let j = 0; j < svcs.length; j++)
+                if (await qdbus([svcs[j]!, "/kglobalaccel", "org.kde.KGlobalAccel.unregister", "khotkeys", h.key]).then(() => true).catch(() => false)) break;
+            continue;
+        }
+        const desc = h.value.split(",").slice(2).join(",");
+        const r = await run(kc, ["--file", "kglobalshortcutsrc", ...groupArgs(h.group), "--key", h.key, `none,none,${desc || h.key}`], { noThrow: true });
+        if (r.code === 0) stolen.push(h);
+    }
+    return stolen;
+}
+
+async function kdeRestoreKeys(kc: string, entries: KglobalBoundEntry[]): Promise<void> {
+    for (let i = 0; i < entries.length; i++) {
+        const e = entries[i]!;
+        await run(kc, ["--file", "kglobalshortcutsrc", ...groupArgs(e.group), "--key", e.key, e.value], { noThrow: true });
+    }
+}
+
 /**
  * Install a global escape shortcut by editing kglobalshortcutsrc + reloading
  * kglobalaccel. Only meaningful when the viewer does NOT grab the keyboard
@@ -136,12 +203,16 @@ export async function kdeInstallEscapeShortcut(keys: string, action: EscapeActio
         return r.code === 0 && v && !v.startsWith("Usage:") && !v.includes("\n") ? v : "";
     };
     const prev = await read();
+    const stolen = await kdeStealKey(kd, kc, { group: "kwin", key: shortcut });
     await run(kc, ["--file", "kglobalshortcutsrc", "--group", "kwin", "--key", shortcut, `${kd},${kd},${shortcut}`]);
     // kglobalaccel watches the file on Wayland; reconfigure nudges X11.
     await qdbus(["org.kde.KWin", "/KWin", "reconfigure"]).catch(() => {});
+    await reloadKglobalaccel();
     return async () => {
         await run(kc, ["--file", "kglobalshortcutsrc", "--group", "kwin", "--key", shortcut, prev || "none"]);
+        await kdeRestoreKeys(kc, stolen);
         await qdbus(["org.kde.KWin", "/KWin", "reconfigure"]).catch(() => {});
+        await reloadKglobalaccel();
     };
 }
 
@@ -161,6 +232,14 @@ function desktopExec(argv: string[]): string {
     return argv.map(esc).join(" ").replaceAll("%", "%%");
 }
 
+/** khotkeys' CommandURL is executed as a command line by the launcher
+ *  itself — a literal "sh -c" prefix makes the outer shell consume only
+ *  the first word ("bun"), never the real cmdline. Unwrap the sh -c
+ *  packaging parseEscapeAction adds; other argv shapes join verbatim. */
+export function unwrapShC(argv: string[]): string {
+    return argv[0] === "sh" && argv[1] === "-c" && argv.length === 3 ? argv[2]! : argv.join(" ");
+}
+
 /**
  * Command actions dispatch through whichever backend the session actually
  * runs — verified live on Plasma 5.27 (X11): a `[services]` launcher entry
@@ -170,8 +249,19 @@ function desktopExec(argv: string[]): string {
  */
 async function kdeInstallCommandShortcut(keys: string, argv: string[]): Promise<() => Promise<void>> {
     const idhash = createHash("sha256").update(argv.join("\0")).digest("hex").slice(0, 8);
-    if (await khotkeysAvailable()) return khotkeysInstall(idhash, kdeKeys(keys), argv);
-    return kglobalaccelInstallCommand(idhash, kdeKeys(keys), argv);
+    const kd = kdeKeys(keys);
+    const kc = (await which("kwriteconfig6")) ?? (await which("kwriteconfig5")) ?? (await which("kwriteconfig"));
+    // Same first-grab-wins conflict — a stray binding (including one of ours
+    // orphaned in [khotkeys] by a dead session) refuses the new grab.
+    const stolen = kc ? await kdeStealKey(kd, kc) : [];
+    const uninstall = await (await khotkeysAvailable()
+        ? khotkeysInstall(idhash, kd, unwrapShC(argv))
+        : kglobalaccelInstallCommand(idhash, kd, argv));
+    return async () => {
+        await uninstall();
+        if (kc) await kdeRestoreKeys(kc, stolen);
+        await reloadKglobalaccel();
+    };
 }
 
 /** Plasma 6 path: NoDisplay .desktop + [services][<id>.desktop] _launch. */
@@ -252,7 +342,7 @@ export function khotkeysUuid(idhash: string): string {
  * Comment keys the entry by argv so repeat installs update in place instead
  * of accumulating duplicates.
  */
-async function khotkeysInstall(idhash: string, kd: string, argv: string[]): Promise<() => Promise<void>> {
+async function khotkeysInstall(idhash: string, kd: string, cmd: string): Promise<() => Promise<void>> {
     const kc = (await which("kwriteconfig6")) ?? (await which("kwriteconfig5")) ?? (await which("kwriteconfig"));
     if (!kc) throw new Error("kwriteconfig not found");
     const marker = `${KHOTKEYS_MARKER}${idhash}`;
@@ -271,10 +361,10 @@ async function khotkeysInstall(idhash: string, kd: string, argv: string[]): Prom
         run(kc, ["--file", "khotkeysrc", "--group", group, "--key", key, value]);
     await w(base, "Comment", marker);
     await w(base, "Enabled", "true");
-    await w(base, "Name", `cruiser: ${argv.join(" ").slice(0, 60)}`);
+    await w(base, "Name", `cruiser: ${cmd.slice(0, 60)}`);
     await w(base, "Type", "SIMPLE_ACTION_DATA");
     await w(`${base}Actions`, "ActionsCount", "1");
-    await w(`${base}Actions0`, "CommandURL", argv.join(" "));
+    await w(`${base}Actions0`, "CommandURL", cmd);
     await w(`${base}Actions0`, "Type", "COMMAND_URL");
     await w(`${base}Conditions`, "Comment", "");
     await w(`${base}Conditions`, "ConditionsCount", "0");

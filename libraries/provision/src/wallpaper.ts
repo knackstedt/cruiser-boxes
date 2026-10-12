@@ -147,15 +147,31 @@ export function pickInk(luma: number): "light" | "dark" {
     return luma >= 140 ? "dark" : "light";
 }
 
-export function watermarkRect(imgW: number, imgH: number, w: number, h: number, position: WatermarkPos, margin: number): Rect {
+/**
+ * Fixed guest-shell chrome along a screen edge, in image px — a watermark
+ * parked under the panel/taskbar reads as cut off. Fractions of image
+ * height approximate the bar under the wallpaper's fill-scaling: Plasma's
+ * default bottom panel is ~44px @1080p (~4%), GNOME's top bar ~28px
+ * (~2.6%). Heuristic only — crop-scaling a mismatched-aspect source eats
+ * more, and a moved/resized panel isn't tracked.
+ */
+export function shellInsets(spec: VmSpec, imgH: number): { top: number; bottom: number } {
+    if (spec.os.desktop === "kde") return { top: 0, bottom: Math.round(imgH * 0.05) };
+    if (spec.os.desktop === "gnome") return { top: Math.round(imgH * 0.03), bottom: 0 };
+    return { top: 0, bottom: 0 };
+}
+
+export function watermarkRect(imgW: number, imgH: number, w: number, h: number, position: WatermarkPos, margin: number, inset: { top?: number; bottom?: number } = {}): Rect {
+    const top = margin + (inset.top ?? 0);
+    const bot = margin + (inset.bottom ?? 0);
     switch (position) {
-        case "top-left": return { x: margin, y: margin, w, h };
-        case "top-right": return { x: imgW - w - margin, y: margin, w, h };
-        case "bottom-left": return { x: margin, y: imgH - h - margin, w, h };
+        case "top-left": return { x: margin, y: top, w, h };
+        case "top-right": return { x: imgW - w - margin, y: top, w, h };
+        case "bottom-left": return { x: margin, y: imgH - h - bot, w, h };
         case "center": return { x: (imgW - w) >> 1, y: (imgH - h) >> 1, w, h };
         case "off":
         case "bottom-right":
-        default: return { x: imgW - w - margin, y: imgH - h - margin, w, h };
+        default: return { x: imgW - w - margin, y: imgH - h - bot, w, h };
     }
 }
 
@@ -215,7 +231,7 @@ export async function renderWallpaper(spec: VmSpec, src?: string | null): Promis
             blockH += measureTextHeight(f, lines[i]!.text, W);
         }
         blockH += gap * (lines.length - 1);
-        const rect = watermarkRect(W, H, blockW + pad * 2, blockH + pad * 2, w.position, margin);
+        const rect = watermarkRect(W, H, blockW + pad * 2, blockH + pad * 2, w.position, margin, shellInsets(spec, H));
         const ink = pickInk(regionLuminance(img.bitmap, rect));
         const fname = (sz: 16 | 32 | 64, white: boolean) =>
             F[`SANS_${sz}_${white ? "WHITE" : "BLACK"}` as keyof typeof F];
@@ -353,7 +369,7 @@ async function wallpaperHash(h: VmHandle, source: string | null): Promise<string
         srcMeta = st ? `${st.mtimeMs}:${st.size}` : "missing";
     }
     const payload = JSON.stringify({
-        v: 1, name: h.spec.name, position: w.position,
+        v: 2, name: h.spec.name, position: w.position, desktop: h.spec.os.desktop,
         source: source ?? "", srcMeta, doc: shortcutsDoc(h.spec),
     });
     return createHash("sha256").update(payload).digest("hex").slice(0, 16);

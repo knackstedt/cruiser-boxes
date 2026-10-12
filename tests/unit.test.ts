@@ -13,7 +13,7 @@ import { guestThemeScript } from "../libraries/provision/src/theme";
 import { pickImageFromIndex, supportsKrdp, defaultRelease } from "../libraries/provision/src/distros";
 import { freerdpArgs } from "../libraries/host-int/src/freerdp";
 import { parseEscapeAction } from "../libraries/host-int/src/session";
-import { kdeKeys, khotkeysDataGroups, khotkeysDropGroups, khotkeysUuid } from "../libraries/host-int/src/kde";
+import { kdeKeys, kglobalConflicts, khotkeysDataGroups, khotkeysDropGroups, khotkeysUuid, unwrapShC } from "../libraries/host-int/src/kde";
 
 // ── schema ──
 
@@ -426,6 +426,26 @@ describe("escape shortcuts", () => {
         expect(kdeKeys("meta+ctrl+left")).toBe("Meta+Ctrl+Left");
         expect(kdeKeys("ctrl+alt+end")).toBe("Ctrl+Alt+End");
         expect(kdeKeys("ctrl+shift+f4")).toBe("Ctrl+Shift+F4");
+    });
+    test("kglobalConflicts finds current-binding holders incl. tab alternates", () => {
+        const src = [
+            "[ksmserver]",
+            "Log Out=Ctrl+Alt+Del,Ctrl+Alt+Del,Log Out",
+            "Halt Without Confirmation=none,,Halt Without Confirmation",
+            "[kded5]",
+            "display=Display\\tMeta+P,Display\\tMeta+P,Switch Display", // real file escapes tabs
+            "[kwin]",
+            "Switch to Desktop 1=Ctrl+F1,Ctrl+F1,Switch to Desktop 1",
+        ].join("\n");
+        expect(kglobalConflicts(src, "Ctrl+Alt+Del")).toEqual([
+            { group: "ksmserver", key: "Log Out", value: "Ctrl+Alt+Del,Ctrl+Alt+Del,Log Out" },
+        ]);
+        expect(kglobalConflicts(src, "Meta+P").map((x) => `${x.group}/${x.key}`)).toEqual(["kded5/display"]);
+        expect(kglobalConflicts(src, "Ctrl+Alt+End")).toEqual([]);
+    });
+    test("unwrapShC unwraps parseEscapeAction's sh -c packaging", () => {
+        expect(unwrapShC(["sh", "-c", "bun run /x/cli.ts vm kill v"])).toBe("bun run /x/cli.ts vm kill v");
+        expect(unwrapShC(["cruiser", "vm", "kill", "v"])).toBe("cruiser vm kill v");
     });
     test("default spec carries the kill escape hatch", () => {
         const esc = defaultSpec("abc").display.escapeShortcuts;
