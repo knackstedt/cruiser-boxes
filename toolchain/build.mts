@@ -29,7 +29,9 @@ interface Component {
     sha256?: string | null;
     kind: "tool" | "meson" | "qemu" | "cmake";
     prefix?: string;
+    dir?: string;
     mesonArgs?: string[];
+    cmakeArgs?: string[];
     configureArgs?: string[];
     pkgConfigPath?: string[];
     optional?: boolean;
@@ -131,7 +133,7 @@ async function sha256File(p: string): Promise<string> {
 }
 
 async function ensureSource(name: string, c: Component): Promise<string> {
-    const dirName = `${name === "spice-server" ? "spice" : name}-${c.version}`;
+    const dirName = c.dir ?? `${name === "spice-server" ? "spice" : name}-${c.version}`;
     const dst = join(SRC_DIR, dirName);
     if (existsSync(dst) && !FORCE) return dst;
     await mkdir(SRC_DIR, { recursive: true });
@@ -199,7 +201,7 @@ async function build(): Promise<number> {
                 await run(meson[0], [meson[1], "install", "-C", buildDir], { env });
             } else {
                 await mkdir(buildDir, { recursive: true });
-                await run("cmake", ["-S", src, "-B", buildDir, `-DCMAKE_INSTALL_PREFIX=${prefix}`, "-DCMAKE_BUILD_TYPE=Release"], { env });
+                await run("cmake", ["-S", src, "-B", buildDir, `-DCMAKE_INSTALL_PREFIX=${prefix}`, "-DCMAKE_BUILD_TYPE=Release", ...(c.cmakeArgs ?? [])], { env });
                 await run("cmake", ["--build", buildDir, "-j"], { env });
                 await run("cmake", ["--install", buildDir], { env });
             }

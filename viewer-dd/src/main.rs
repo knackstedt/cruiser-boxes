@@ -17,7 +17,6 @@ use anyhow::{Context, Result};
 use std::io::{IoSlice, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 mod egl;
 use zbus::connection;
@@ -25,7 +24,20 @@ use zvariant::{Fd, OwnedFd as ZOwnedFd};
 
 static DM_BUFS: AtomicU64 = AtomicU64::new(0);
 static UPDATES: AtomicU64 = AtomicU64::new(0);
-static XJOB: once_cell::sync::OnceCell<std::sync::mpsc::Sender<XJob>> = once_cell::sync::OnceCell::new();
+static MOUSE_VERBOSE: AtomicU64 = AtomicU64::new(0);
+
+/// Per-console scanout dims — the window thread's input map needs them.
+struct Dims { w: AtomicU64, h: AtomicU64 }
+
+/// Shared head table: per-console scanout dims + that console's offset in
+/// the guest's desktop composite (normalized host-monitor layout). The
+/// virtio tablet has ONE absolute range mapped over the whole composite —
+/// QEMU adds no console offset — so console-local px must be rescaled to
+/// composite fraction × console size before SetAbsPosition.
+struct Heads {
+    dims: Vec<std::sync::Arc<Dims>>,
+    offsets: Vec<(u32, u32)>,
+}
 
 enum XJob {
     Fd(std::os::fd::OwnedFd, u32, u32, u32, u32, u64, bool),
@@ -54,21 +66,30 @@ fn qmp(mon: &mut UnixStream, cmd: &str, fd: Option<RawFd>) -> Result<String> {
 }
 
 /// Open a new p2p "@dbus-display" channel over the QMP monitor socket.
+/// Each channel needs a unique QMP fdname — getfd names live in QEMU's
+/// global monitor namespace, so concurrent opens under a shared "vdd" wire
+/// the loser onto a stale fd (EPIPE at the p2p handshake).
 fn open_dbus_channel(monitor: &str) -> Result<UnixStream> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let fdname = format!("vdd{}", SEQ.fetch_add(1, Ordering::Relaxed));
     let (s, p) = UnixStream::pair()?;
     let mut mon = UnixStream::connect(monitor)?;
     let mut g = vec![0u8; 512];
     let _ = mon.read(&mut g); // greeting
     qmp(&mut mon, r#"{"execute":"qmp_capabilities"}"#, None)?;
-    qmp(&mut mon, r#"{"execute":"getfd","arguments":{"fdname":"vdd"}}"#, Some(p.as_raw_fd()))?;
-    qmp(&mut mon, r#"{"execute":"add_client","arguments":{"protocol":"@dbus-display","fdname":"vdd"}}"#, None)?;
+    let r = qmp(&mut mon, &format!(
+        r#"{{"execute":"getfd","arguments":{{"fdname":"{fdname}"}}}}"#), Some(p.as_raw_fd()))?;
+    anyhow::ensure!(!r.contains("\"error\""), "qmp getfd: {r}");
+    let r = qmp(&mut mon, &format!(
+        r#"{{"execute":"add_client","arguments":{{"protocol":"@dbus-display","fdname":"{fdname}"}}}}"#), None)?;
+    anyhow::ensure!(!r.contains("\"error\""), "qmp add_client: {r}");
     drop(mon);
     Ok(s)
 }
 
 // ── D-Bus listener objects QEMU calls into ──
 
-struct Listener;
+struct Listener { tx: std::sync::mpsc::Sender<XJob>, id: u32 }
 #[zbus::interface(name = "org.qemu.Display1.Listener")]
 impl Listener {
     fn scanout(&mut self, _w: u32, _h: u32, _stride: u32, _fmt: u32, _data: Vec<u8>) {}
@@ -80,10 +101,16 @@ impl Listener {
     fn update_dmabuf(&mut self, _x: i32, _y: i32, _w: i32, _h: i32) {
         UPDATES.fetch_add(1, Ordering::Relaxed);
         // reply fast — QEMU gl-blocks the guest until this returns
-        if let Some(tx) = XJOB.get() { let _ = tx.send(XJob::Nudge); }
+        let _ = self.tx.send(XJob::Nudge);
     }
     fn disable(&mut self) { eprintln!("[listener] Disable"); }
-    fn mouse_set(&mut self, _x: i32, _y: i32, _on: i32) {}
+    fn mouse_set(&mut self, x: i32, y: i32, on: i32) {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+        if MOUSE_VERBOSE.load(Ordering::Relaxed) != 0 || n % 20 == 1 {
+            eprintln!("[listener:{}] mouse_set {x},{y} on={on}", self.id);
+        }
+    }
     fn cursor_define(&mut self, _w: i32, _h: i32, _hx: i32, _hy: i32, _data: Vec<u8>) {}
     #[zbus(property)]
     fn interfaces(&self) -> Vec<String> {
@@ -91,7 +118,7 @@ impl Listener {
     }
 }
 
-struct UnixDmabuf2;
+struct UnixDmabuf2 { tx: std::sync::mpsc::Sender<XJob>, dims: std::sync::Arc<Dims>, id: u32 }
 #[zbus::interface(name = "org.qemu.Display1.Listener.Unix.ScanoutDMABUF2")]
 impl UnixDmabuf2 {
     #[zbus(name = "ScanoutDMABUF2")]
@@ -100,9 +127,11 @@ impl UnixDmabuf2 {
                        offsets: Vec<u32>, strides: Vec<u32>, num_planes: u32, fourcc: u32,
                        backing_width: u32, backing_height: u32, modifier: u64, y0_top: bool) {
         let n = DM_BUFS.fetch_add(1, Ordering::Relaxed) + 1;
-        if n % 120 == 1 {
-            eprintln!("[listener] ScanoutDMABUF2#{n} planes={num_planes} {width}x{height} strides={strides:?} fourcc={} modifier=0x{modifier:x} backing={backing_width}x{backing_height} y0_top={y0_top}",
-                fourcc_str(fourcc));
+        let resized = self.dims.w.swap(width as u64, Ordering::Relaxed) != width as u64
+            || self.dims.h.swap(height as u64, Ordering::Relaxed) != height as u64;
+        if n % 120 == 1 || resized {
+            eprintln!("[listener:{}] ScanoutDMABUF2#{n} planes={num_planes} {width}x{height} strides={strides:?} fourcc={} modifier=0x{modifier:x} backing={backing_width}x{backing_height} y0_top={y0_top}",
+                self.id, fourcc_str(fourcc));
         }
         if dmabufs.is_empty() || num_planes == 0 { return; }
         // hand the fd to the GL worker while it's live — QEMU fds can lose
@@ -110,9 +139,7 @@ impl UnixDmabuf2 {
         let d = unsafe { std::os::fd::OwnedFd::from_raw_fd(libc::dup(dmabufs[0].as_raw_fd())) };
         let off = offsets.first().copied().unwrap_or(0);
         if off != 0 && num_planes > 1 { return; } // multi-plane not supported
-        if let Some(tx) = XJOB.get() {
-            let _ = tx.send(XJob::Fd(d, width, height, strides[0], fourcc, modifier, y0_top));
-        }
+        let _ = self.tx.send(XJob::Fd(d, width, height, strides[0], fourcc, modifier, y0_top));
     }
 }
 
@@ -140,30 +167,64 @@ fn qnum_for(k: minifb::Key) -> Option<u32> {
         Escape => 0x01,
         RightCtrl => 0x9d, RightAlt => 0xb8, Home => 0xc7, Up => 0xc8, PageUp => 0xc9,
         Left => 0xcb, Right => 0xcd, End => 0xcf, Down => 0xd0, PageDown => 0xd1,
-        Insert => 0xd2, Delete => 0xd3, LeftMeta => 0xdb, RightMeta => 0xdc,
+        Insert => 0xd2, Delete => 0xd3, LeftSuper => 0xdb, RightSuper => 0xdc,
         _ => return None,
     })
 }
 
-fn input_worker(s: UnixStream, path: String, rx: std::sync::mpsc::Receiver<In>) {
-    let conn = zbus::blocking::connection::Builder::async_io_unix_stream(s)
-        .p2p().build().expect("input conn");
+/// (pid, /proc starttime) of the QEMU that owns this display — None when the
+/// pidfile is absent/unreadable or the process is gone.
+fn qemu_boot_id(pidfile: &std::path::Path) -> Option<(u64, u64)> {
+    let pid: u64 = std::fs::read_to_string(pidfile).ok()?.trim().parse().ok()?;
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // field 22 is starttime; comm (field 2) can contain spaces/parens — split
+    // after the last ')' instead of naive whitespace splitting.
+    let start: u64 = stat.rsplit(')').next()?.split_whitespace()
+        .nth(19)?.parse().ok()?;
+    Some((pid, start))
+}
+
+fn input_worker(conn: std::sync::Arc<zbus::blocking::Connection>,
+                path: String, rx: std::sync::mpsc::Receiver<In>) {
     let kbd = zbus::blocking::Proxy::new(&conn, "org.qemu", path.as_str(),
         "org.qemu.Display1.Keyboard").expect("kbd proxy");
     let mouse = zbus::blocking::Proxy::new(&conn, "org.qemu", path.as_str(),
         "org.qemu.Display1.Mouse").expect("mouse proxy");
+    let mut moves = 0u64;
     while let Ok(ev) = rx.recv() {
         let r: Result<(), zbus::Error> = (|| match ev {
-            In::Move(x, y) => mouse.call::<_, _, ()>("SetAbsPosition", &(x, y)),
+            In::Move(x, y) => {
+                moves += 1;
+                if moves % 100 == 1 { eprintln!("[input] move#{moves} guest={x},{y}"); }
+                mouse.call::<_, _, ()>("SetAbsPosition", &(x, y))
+            }
             In::Btn(b, d) => mouse.call::<_, _, ()>(if d { "Press" } else { "Release" }, &(b as u32,)),
             In::Key(k, d) => kbd.call::<_, _, ()>(if d { "Press" } else { "Release" }, &(k,)),
         })();
-        if let Err(e) = r { eprintln!("[input] {e}"); }
+        if let Err(e) = r {
+            match &e {
+                // connection-level death (VM exit/restart) — the frozen
+                // window outlives nothing; die rather than sit zombie.
+                zbus::Error::InputOutput(_) | zbus::Error::Connection(..) => {
+                    eprintln!("[input] channel lost ({e}) — exiting");
+                    std::process::exit(1);
+                }
+                // transient call errors (e.g. "Mouse is not absolute" while
+                // the BIOS owns the console) — drop the event, keep going.
+                _ => {
+                    static IN_ERRS: AtomicU64 = AtomicU64::new(0);
+                    let n = IN_ERRS.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n % 50 == 1 { eprintln!("[input] call failed x{n}: {e}"); }
+                }
+            }
+        }
     }
 }
 
-fn present_window(monitor: &str, console_path: &str, title: &str, w: usize, h: usize,
-                  jrx: std::sync::mpsc::Receiver<XJob>) -> Result<()> {
+fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
+                  console_path: &str, console_idx: usize, title: &str, w: usize, h: usize,
+                  jrx: std::sync::mpsc::Receiver<XJob>, dims: std::sync::Arc<Dims>,
+                  heads: std::sync::Arc<Heads>) -> Result<()> {
     use minifb::{Window, WindowOptions};
     let mut win = Window::new(title, w, h, WindowOptions { resize: true, ..WindowOptions::default() })?;
     win.limit_update_rate(Some(std::time::Duration::from_micros(2000)));
@@ -174,13 +235,21 @@ fn present_window(monitor: &str, console_path: &str, title: &str, w: usize, h: u
         let wh = win.window_handle().unwrap();
         if let RawWindowHandle::Xlib(xw) = wh.as_raw() {
             let xid = xw.window;
+            let t = title.to_string();
             std::thread::spawn(move || {
-                if let Err(e) = egl::x11_present_init(xid, w as i32, h as i32) {
-                    eprintln!("[xegl] init failed: {e:#}");
-                    return;
-                }
-                eprintln!("[xegl] worker ready");
+                let mut xegl = match egl::x11_present_init(xid, w as i32, h as i32) {
+                    Ok(e) => e,
+                    Err(e) => { eprintln!("[xegl] init failed: {e:#}"); return; }
+                };
+                eprintln!("[xegl] worker ready ({t})");
+                let mut fps_n = 0u64;
+                let mut fps_t = std::time::Instant::now();
                 while let Ok(first) = jrx.recv() {
+                    fps_n += 1;
+                    if fps_t.elapsed().as_secs() >= 5 {
+                        eprintln!("[fps] {t}: {} frames/{:.0}s", fps_n, fps_t.elapsed().as_secs_f32());
+                        fps_n = 0; fps_t = std::time::Instant::now();
+                    }
                     // coalesce: newest fd wins, collapse nudges
                     let mut latest: Option<(std::os::fd::OwnedFd, u32, u32, u32, u32, u64, bool)> = None;
                     let mut dirty = false;
@@ -191,13 +260,13 @@ fn present_window(monitor: &str, console_path: &str, title: &str, w: usize, h: u
                         }
                     }
                     if let Some((fd, w2, h2, stride, fourcc, modifier, y0)) = latest {
-                        if let Err(e) = egl::x11_import_and_present(fd.as_raw_fd(), w2, h2, stride, fourcc, modifier, y0) {
+                        if let Err(e) = egl::x11_import_and_present(&mut xegl, fd.as_raw_fd(), w2, h2, stride, fourcc, modifier, y0) {
                             static XF: AtomicU64 = AtomicU64::new(0);
                             let n = XF.fetch_add(1, Ordering::Relaxed) + 1;
                             if n % 120 == 1 { eprintln!("[xegl] import failed x{n}: {e:#}"); }
                         }
                     } else if dirty {
-                        if let Err(e) = egl::x11_redraw() {
+                        if let Err(e) = egl::x11_redraw(&xegl) {
                             static XF2: AtomicU64 = AtomicU64::new(0);
                             let n = XF2.fetch_add(1, Ordering::Relaxed) + 1;
                             if n % 120 == 1 { eprintln!("[xegl] redraw failed x{n}: {e:#}"); }
@@ -210,17 +279,48 @@ fn present_window(monitor: &str, console_path: &str, title: &str, w: usize, h: u
         }
     }
 
-    // dedicated input channel
-    let s3 = open_dbus_channel(monitor)?;
+    // input events ride the shared channel — QEMU's @dbus-display only
+    // keeps one client connection alive, extra add_client channels get
+    // EPIPE'd at the p2p handshake
     let (itx, irx) = std::sync::mpsc::channel::<In>();
     let cp = console_path.to_string();
-    std::thread::spawn(move || input_worker(s3, cp, irx));
+    std::thread::spawn(move || input_worker(iconn, cp, irx));
 
     let mut mouse = (-1.0f32, -1.0f32);
     let mut btns = [false; 3];
     let mut last_pos_send = std::time::Instant::now() - std::time::Duration::from_secs(1);
-    let mut pending_abs: Option<(u32, u32)> = None;
-    let (sw, sh) = (w as f32, h as f32);
+    let mut pending_abs: Option<(f32, f32)> = None;
+
+    // window px → guest scanout px through the same letterbox viewport the
+    // renderer uses — then console-local → composite fraction → rescaled
+    // into console units: qemu scales SetAbsPosition over the console's
+    // surface, but the guest maps the single virtio tablet's 0..0x7fff
+    // range over the WHOLE composite, so sending (ox+lx)*cw/W makes the
+    // emitted fraction land on the right composite point.
+    let to_guest = |win: &minifb::Window, mx: f32, my: f32| -> (u32, u32) {
+        let (ww, wh) = win.get_size();
+        let iw = dims.w.load(Ordering::Relaxed) as i32;
+        let ih = dims.h.load(Ordering::Relaxed) as i32;
+        let (vx, vy, vw, vh) = egl::fit_viewport(ww as u32, wh as u32, iw, ih);
+        let lx = ((mx - vx as f32) / vw as f32 * iw as f32).clamp(0.0, iw as f32 - 1.0);
+        let ly = ((my - vy as f32) / vh as f32 * ih as f32).clamp(0.0, ih as f32 - 1.0);
+        if heads.offsets.is_empty() || console_idx >= heads.offsets.len() {
+            return (lx as u32, ly as u32);
+        }
+        let (ox, oy) = heads.offsets[console_idx];
+        let mut cw_total = 0u64;
+        let mut ch_total = 0u64;
+        for (i, d) in heads.dims.iter().enumerate() {
+            let (xo, yo) = heads.offsets.get(i).copied().unwrap_or((0, 0));
+            cw_total = cw_total.max(xo as u64 + d.w.load(Ordering::Relaxed));
+            ch_total = ch_total.max(yo as u64 + d.h.load(Ordering::Relaxed));
+        }
+        let gx = ((ox as f32 + lx) * iw as f32 / cw_total as f32)
+            .clamp(0.0, iw as f32 - 1.0);
+        let gy = ((oy as f32 + ly) * ih as f32 / ch_total as f32)
+            .clamp(0.0, ih as f32 - 1.0);
+        (gx as u32, gy as u32)
+    };
 
     let itx2 = itx.clone();
     struct KbCb(std::sync::mpsc::Sender<In>);
@@ -235,10 +335,11 @@ fn present_window(monitor: &str, console_path: &str, title: &str, w: usize, h: u
     while win.is_open() {
         win.update(); // events only — EGL renders into this window directly
         if let Some((mx, my)) = win.get_mouse_pos(minifb::MouseMode::Pass) {
-            let inb = mx >= 0.0 && my >= 0.0 && mx < sw && my < sh;
+            let (ww, wh) = win.get_size();
+            let inb = mx >= 0.0 && my >= 0.0 && mx < ww as f32 && my < wh as f32;
             if inb && (mx, my) != mouse {
                 mouse = (mx, my);
-                pending_abs = Some((mx as u32, my as u32));
+                pending_abs = Some((mx, my));
             }
         }
         for (i, b) in [minifb::MouseButton::Left, minifb::MouseButton::Middle,
@@ -247,31 +348,35 @@ fn present_window(monitor: &str, console_path: &str, title: &str, w: usize, h: u
             if d != btns[i] {
                 btns[i] = d;
                 if let Some((ax, ay)) = pending_abs.take() {
-                    let _ = itx.send(In::Move(ax, ay));
+                    let (gx, gy) = to_guest(&win, ax, ay);
+                    let _ = itx.send(In::Move(gx, gy));
                     last_pos_send = std::time::Instant::now();
                 }
                 let _ = itx.send(In::Btn(i as u8, d));
             }
         }
-        // coalesce position events — ~30Hz is enough for absolute pointer
+        // coalesce position events — ~120Hz is enough for absolute pointer
         if let Some((ax, ay)) = pending_abs {
-            if last_pos_send.elapsed().as_millis() > 33 {
+            if last_pos_send.elapsed().as_millis() > 8 {
                 pending_abs = None;
                 last_pos_send = std::time::Instant::now();
-                let _ = itx.send(In::Move(ax, ay));
+                let (gx, gy) = to_guest(&win, ax, ay);
+                let _ = itx.send(In::Move(gx, gy));
             }
         }
     }
     Ok(())
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 1)]
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let monitor = args.next().context("usage: viewer-dd <monitor.sock> [--title T] [--size WxH]")?;
     let mut title = "cruiser-dd".to_string();
     let mut w = 1920usize;
     let mut h = 1080usize;
+    let mut offsets: Vec<(u32, u32)> = Vec::new();
+    let mut probes: Vec<String> = Vec::new();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--title" => title = args.next().unwrap_or(title),
@@ -280,6 +385,22 @@ async fn main() -> Result<()> {
                     if let Some((x, y)) = s.split_once('x') {
                         w = x.parse().unwrap_or(w);
                         h = y.parse().unwrap_or(h);
+                    }
+                }
+            }
+            // per-console position in the guest composite, console order:
+            // --offsets "x0,y0 x1,y1 x2,y2"
+            // --probe "ci,x,y" — inject one raw SetAbsPosition on console ci
+            // at startup (input-mapping diagnostics; watch mouse_set logs).
+            "--probe" => probes.extend(args.next().into_iter().collect::<Vec<_>>()),
+            "--offsets" => {
+                if let Some(s) = args.next() {
+                    for part in s.split_whitespace() {
+                        if let Some((x, y)) = part.split_once(',') {
+                            if let (Ok(x), Ok(y)) = (x.parse::<u32>(), y.parse::<u32>()) {
+                                offsets.push((x, y));
+                            }
+                        }
                     }
                 }
             }
@@ -299,22 +420,120 @@ async fn main() -> Result<()> {
     let consoles: Vec<u32> = vm.get_property("ConsoleIDs").await?;
     eprintln!("[*] VM name={name} consoles={consoles:?}");
 
-    // channel #2: our listener end → RegisterListener
-    let cpath = zbus::zvariant::ObjectPath::try_from(format!("/org/qemu/Display1/Console_{}", consoles[0]))?;
-    let console = zbus::Proxy::new(&conn, "org.qemu", cpath.clone(), "org.qemu.Display1.Console").await?;
-    let (jtx, jrx) = std::sync::mpsc::channel::<XJob>();
-    let _ = XJOB.set(jtx);
-    let (s2, p2) = UnixStream::pair()?;
-    console.call::<_, _, ()>("RegisterListener", &(Fd::from(p2.as_fd()),)).await?;
-    drop(p2);
-    eprintln!("[*] RegisterListener ok");
+    // Log the kill reason — the window-close path and a silent SIGTERM/SIGINT
+    // are otherwise indistinguishable in the viewer log.
+    tokio::spawn(async {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate()).expect("sigterm handler");
+        let mut int = signal(SignalKind::interrupt()).expect("sigint handler");
+        tokio::select! {
+            _ = term.recv() => eprintln!("[*] SIGTERM — exiting"),
+            _ = int.recv() => eprintln!("[*] SIGINT — exiting"),
+        }
+        std::process::exit(0);
+    });
 
-    s2.set_nonblocking(true)?;
-    let _lconn = connection::Builder::unix_stream(tokio::net::UnixStream::from_std(s2)?)
-        .serve_at("/org/qemu/Display1/Listener", Listener)?
-        .serve_at("/org/qemu/Display1/Listener", UnixDmabuf2)?
-        .p2p().build().await?;
-    eprintln!("[*] listener served — waiting for frames");
+    // Dead-QEMU watchdog: the control channel is transient (QEMU closes it
+    // after listener registration), so liveness is the QEMU process itself —
+    // qemu.pid sits beside monitor.sock. Match pid + /proc starttime so a VM
+    // restart (new pid, or a reused one) counts as dead too: without this the
+    // windows freeze on the last frame and a later `view` adopts a zombie.
+    {
+        let pidfile = std::path::Path::new(&monitor)
+            .parent().unwrap_or(std::path::Path::new(".")).join("qemu.pid");
+        let boot = qemu_boot_id(&pidfile);
+        if let Some((pid, start)) = boot {
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    if qemu_boot_id(&pidfile) != Some((pid, start)) {
+                        eprintln!("[*] qemu display channel lost — exiting");
+                        std::process::exit(1);
+                    }
+                }
+            });
+        }
+    }
 
-    present_window(&monitor, &cpath.to_string(), &title, w, h, jrx)
+    // One window thread per guest console — multi-head guests (virtio
+    // outputs[]) span host monitors. The console id rides in the title
+    // ("cruiser:<vm>:<i>") so the session can correlate window → monitor.
+    let multi = consoles.len() > 1;
+    // Register every listener on the control conn BEFORE opening the input
+    // channel — QEMU's @dbus-display drops the enumeration conn once
+    // listeners are attached, and extra client channels get EPIPE'd, so the
+    // single input conn must be opened last and shared by all consoles.
+    struct Pending { cpath: String, jrx: std::sync::mpsc::Receiver<XJob>,
+                     dims: std::sync::Arc<Dims> }
+    let mut pending = Vec::new();
+    let mut _lconns = Vec::new();
+    for &ci in &consoles {
+        let cpath = zbus::zvariant::ObjectPath::try_from(format!("/org/qemu/Display1/Console_{ci}"))?;
+        let console = zbus::Proxy::new(&conn, "org.qemu", cpath.clone(), "org.qemu.Display1.Console").await?;
+        let (jtx, jrx) = std::sync::mpsc::channel::<XJob>();
+        let dims = std::sync::Arc::new(Dims { w: AtomicU64::new(w as u64), h: AtomicU64::new(h as u64) });
+        let (s2, p2) = UnixStream::pair()?;
+        console.call::<_, _, ()>("RegisterListener", &(Fd::from(p2.as_fd()),)).await?;
+        drop(p2);
+        s2.set_nonblocking(true)?;
+        let lc = connection::Builder::unix_stream(tokio::net::UnixStream::from_std(s2)?)
+            .serve_at("/org/qemu/Display1/Listener", Listener { tx: jtx.clone(), id: ci })?
+            .serve_at("/org/qemu/Display1/Listener", UnixDmabuf2 { tx: jtx, dims: dims.clone(), id: ci })?
+            .p2p().build().await?;
+        _lconns.push(lc);
+        pending.push(Pending { cpath: cpath.to_string(), jrx, dims });
+    }
+
+    // One shared conn for every console's Keyboard/Mouse calls — built async
+    // (blocking::build() would block_on inside the tokio runtime and panic),
+    // then wrapped for the sync input workers.
+    let si = open_dbus_channel(&monitor).context("input dbus channel")?;
+    si.set_nonblocking(true)?;
+    let ia = connection::Builder::unix_stream(tokio::net::UnixStream::from_std(si)?)
+        .p2p().build().await.context("input p2p conn")?;
+    let iconn = std::sync::Arc::new(zbus::blocking::Connection::from(ia));
+
+    // --probe diagnostics: fire raw SetAbsPosition calls after startup so the
+    // guest's answer (listener mouse_set) reveals the real coordinate space.
+    if !probes.is_empty() {
+        MOUSE_VERBOSE.store(1, Ordering::Relaxed);
+        let ic = iconn.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            for p in probes {
+                let parts: Vec<&str> = p.split(',').collect();
+                if parts.len() != 3 { continue; }
+                let (ci, x, y) = (parts[0], parts[1], parts[2]);
+                if let (Ok(x), Ok(y)) = (x.parse::<u32>(), y.parse::<u32>()) {
+                    let path = format!("/org/qemu/Display1/Console_{ci}");
+                    let m = zbus::blocking::Proxy::new(&ic, "org.qemu", path.as_str(),
+                        "org.qemu.Display1.Mouse").expect("probe mouse proxy");
+                    let r: Result<(), zbus::Error> = m.call("SetAbsPosition", &(x, y));
+                    eprintln!("[probe] console {ci} SetAbsPosition({x},{y}) → {r:?}");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        });
+    }
+
+    let heads = std::sync::Arc::new(Heads {
+        dims: pending.iter().map(|p| p.dims.clone()).collect(),
+        offsets,
+    });
+
+    let mut joins = Vec::new();
+    for (i, p) in pending.into_iter().enumerate() {
+        let ci = p.cpath.rsplit('_').next().unwrap_or("0").to_string();
+        let t = if multi { format!("{title}:{ci}") } else { title.clone() };
+        let ic = iconn.clone();
+        let hd = heads.clone();
+        joins.push(std::thread::spawn(move || {
+            let r = present_window(ic, &p.cpath, i, &t, w, h, p.jrx, p.dims, hd);
+            eprintln!("[*] window closed ({t}) — {r:?}");
+        }));
+    }
+    eprintln!("[*] {} console(s) registered — windows spawned", _lconns.len());
+    for j in joins { let _ = j.join(); }
+    eprintln!("[*] all windows closed — exiting");
+    Ok(())
 }

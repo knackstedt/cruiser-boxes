@@ -77,11 +77,18 @@ export class CruiserService {
         }, 3000);
     }
 
-    async dispose(): Promise<void> {
+    /** sessionRestart: dev-shell module swap — skip VM stops/deletes too
+     *  (an HMR restart must not take down running guests). */
+    async dispose(opts: { sessionRestart?: boolean } = {}): Promise<void> {
         if (this.pollTimer) clearInterval(this.pollTimer);
         if (this.logTimer) clearInterval(this.logTimer);
-        this.viewers.forEach((v) => v.close().catch(() => {}));
+        // Viewers are detached/unref'd processes that outlive us — never
+        // SIGTERM them on teardown (closing the manager must not close the
+        // user's console). open()'s stale-viewer reaper cleans orphans.
+        this.viewers.forEach((v) => v.detach().catch(() => {}));
+        this.viewers.clear();
         // owned = stops with the app; ephemeral = stops AND deletes the vm dir.
+        if (opts.sessionRestart) return;
         for (const h of this.handles.values()) {
             if (h.spec.persist === "daemonize") continue;
             const out = await h.stop(4_000).catch(() => "timeout" as const);
@@ -574,9 +581,15 @@ export class CruiserService {
     async view(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
         if (this.viewers.has(name)) {
-            void this.viewers.get(name)!.focus();
-            this.store.getState().setStatus(`${name} viewer raised`);
-            return;
+            const s = this.viewers.get(name)!;
+            // Adopted sessions track no child — if their window died, drop
+            // the stale entry and relaunch instead of focusing a ghost.
+            if (await s.windowGone()) { this.viewers.delete(name); void s.close(); }
+            else {
+                void s.focus();
+                this.store.getState().setStatus(`${name} viewer raised`);
+                return;
+            }
         }
         void this.autoView(h);
     }

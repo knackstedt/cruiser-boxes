@@ -5,11 +5,13 @@
 
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type { VmSpec } from "../../vm-core/src/config/schema";
+import { vmPaths } from "../../vm-core/src/paths";
 import type { EscapeActionSpec, WindowHandle, WmAdapter } from "./types";
 import { detectAdapter } from "./detect";
-import { launchFreerdp, waitRdpPort } from "./freerdp";
+import { launchFreerdp, rdpTlsOnly, waitRdpPort } from "./freerdp";
 import { launchDdViewer, waitMonitorSock } from "./ddviewer";
 import { run } from "../../sys/src/exec";
 
@@ -25,6 +27,8 @@ export class ViewerSession extends EventEmitter {
     private opts: ViewerSessionOpts;
     private child: ChildProcess | null = null;
     private window: WindowHandle | null = null;
+    /** All head windows (multi-head dmabuf: one per guest console). */
+    private windows: WindowHandle[] = [];
     private uninstallers: (() => Promise<void>)[] = [];
     private cleanupDone: Promise<void> = Promise.resolve();
 
@@ -51,32 +55,93 @@ export class ViewerSession extends EventEmitter {
                 throw new Error(`no RDP listener on 127.0.0.1:${rdpPort} — is '${this.spec.name}' running and logged in?`);
         }
 
-        // Reap stale viewers for this VM — an orphaned viewer (dead UI
-        // session, closed cli) would otherwise stay stacked on the target
-        // desktop and race our findWindow's title fallback.
-        const stale = await run("pgrep", ["-f", `(xfreerdp|viewer-dd).*cruiser:${this.spec.name}`], { noThrow: true });
-        for (const p of stale.stdout.trim().split("\n").filter(Boolean))
-            try { process.kill(Number(p), "SIGTERM"); } catch { /* already gone */ }
-
-        const { child } = dmabuf
-            ? await launchDdViewer(this.spec)
-            : await launchFreerdp(this.spec, { rdpPort: this.spec.network.rdpPort! });
-        this.child = child;
-        child.on("exit", (c) => { this.child = null; this.emit("closed", c); this.cleanupDone = this.cleanup(); });
-
         const d = this.spec.display;
+        const logFile = join(vmPaths(this.spec.name).run, dmabuf ? "viewer-dd.log" : "freerdp.log");
 
-        // Find OUR window by pid — title matching races with other viewers.
-        this.window = await this.adapter.findWindow(
-            { pid: child.pid, ...(wmClass ? { wmClass } : {}) },
-            this.opts.windowWaitMs ?? 15_000,
-        ).catch(() => null);
-
-        if (!this.window) {
-            // Wayland findWindow is limited — retry on the viewer title
-            // ("cruiser:<vm>"), then give up gracefully.
-            this.window = await this.adapter.findWindow({ title: `cruiser:${this.spec.name}` }, 5_000).catch(() => null);
+        // Guest composite layout for the virtio tablet: the guest maps the
+        // single absolute pointer over the whole composite and QEMU scales
+        // per-console, so the viewer needs each console's composite offset
+        // (host-mirror positions, normalized — same shape guestKdeMonitorsScript
+        // pushes). Console order = picked monitor order = virtio outputs[].
+        let ddOffsets: string | undefined;
+        if (dmabuf && this.adapter.caps.monitors) {
+            const host = await this.adapter.monitors().catch(() => []);
+            const picked = d.monitors === "all" ? host : host.filter((m) => d.monitors.includes(m.name));
+            if (picked.length > 1) {
+                const ox = Math.min(...picked.map((m) => m.x));
+                const oy = Math.min(...picked.map((m) => m.y));
+                ddOffsets = picked.map((m) => `${m.x - ox},${m.y - oy}`).join(" ");
+            }
         }
+
+        // Adopt a live viewer for this VM when its window exists — killing a
+        // healthy console because a different session owns it reads as a
+        // "viewer crash" on every fresh session's view click. Zombies
+        // (process up, window gone) still fall through to the reaper.
+        if (!this.window)
+            this.window = await this.adapter.findWindow({ title: `cruiser:${this.spec.name}` }, 1_500).catch(() => null);
+        if (!this.window) {
+            // Reap stale viewers for this VM — an orphaned viewer (dead UI
+            // session, closed cli) would otherwise stay stacked on the target
+            // desktop and race our findWindow's title fallback.
+            const stale = await run("pgrep", ["-f", `(xfreerdp|viewer-dd).*cruiser:${this.spec.name}`], { noThrow: true });
+            for (const p of stale.stdout.trim().split("\n").filter(Boolean))
+                try { process.kill(Number(p), "SIGTERM"); } catch { /* already gone */ }
+
+            // Newer krdp (Plasma ≥6.5) negotiates NLA but has no CredSSP
+            // credentials — the connection dies in negotiation. Probe the
+            // security layer up front (TLS-only → /sec:tls immediately), and
+            // still retry a dead attempt-0 with /sec:tls in case the probe lied.
+            const tlsOnly = !dmabuf && await rdpTlsOnly(this.spec.network.rdpPort!).catch(() => false);
+            for (let attempt = 0; ; attempt++) {
+                const { child } = dmabuf
+                    ? await launchDdViewer(this.spec, ddOffsets)
+                    : await launchFreerdp(this.spec, { rdpPort: this.spec.network.rdpPort!, logFile, tlsOnly: tlsOnly || attempt > 0 });
+                this.child = child;
+                child.on("exit", (c) => { this.child = null; this.emit("closed", c); this.cleanupDone = this.cleanup(); });
+                const exited = new Promise<null>((r) => child.once("exit", () => r(null)));
+
+                // Find OUR window by pid — title matching races with other viewers.
+                // Racing against child exit keeps a dead viewer from burning the
+                // whole window-wait timeout.
+                this.window = await Promise.race([
+                    this.adapter.findWindow(
+                        { pid: child.pid, ...(wmClass ? { wmClass } : {}) },
+                        this.opts.windowWaitMs ?? 15_000,
+                    ).catch(() => null),
+                    exited,
+                ]);
+
+                if (!this.window && this.child) {
+                    // Wayland findWindow is limited — retry on the viewer title
+                    // ("cruiser:<vm>"), then give up gracefully.
+                    this.window = await Promise.race([
+                        this.adapter.findWindow({ title: `cruiser:${this.spec.name}` }, 5_000).catch(() => null),
+                        exited,
+                    ]);
+                }
+
+                if (this.child) break;   // viewer alive (window may be unplaced)
+                if (dmabuf || tlsOnly || attempt > 0 || this.window) {
+                    await this.cleanup();
+                    const why = child.exitCode !== null ? `code ${child.exitCode}` : (child.signalCode ?? "signal");
+                    throw new Error(`viewer for '${this.spec.name}' exited (${why})${this.window ? " after the window mapped" : " before a window appeared"} — see ${logFile}`);
+                }
+                // fall through: rdp attempt 0 died — retry with /sec:tls
+            }
+        }
+
+        // Multi-head dmabuf: viewer-dd opens one window per guest console,
+        // titled "cruiser:<vm>:<i>" — collect every head for placement.
+        // Title matching works for both owned (all heads share the child pid
+        // anyway) and adopted windows.
+        if (dmabuf && this.window && this.adapter.findWindows) {
+            const hostMons0 = await this.adapter.monitors().catch(() => []);
+            const want = d.monitors === "all" ? hostMons0.length : Math.max(1, d.monitors.length);
+            const all = await this.adapter.findWindows({ title: `cruiser:${this.spec.name}` }, 6_000, Math.max(1, want)).catch(() => []);
+            if (all.length) this.windows = all;
+        }
+        if (!this.windows.length && this.window) this.windows = [this.window];
 
         if (this.window && this.adapter.caps.placeWindows) {
             if (d.headMode === "windowed") {
@@ -84,8 +149,25 @@ export class ViewerSession extends EventEmitter {
                 // pull it onto the user's current desktop and raise it so it
                 // is actually visible.
                 const cur = (await this.adapter.desktops().catch(() => [])).find((x) => x.current)?.index;
-                if (cur !== undefined) await this.adapter.moveToDesktop(this.window, cur).catch(() => {});
+                for (let i = 0; i < this.windows.length; i++)
+                    if (cur !== undefined) await this.adapter.moveToDesktop(this.windows[i]!, cur).catch(() => {});
                 await this.adapter.focus(this.window).catch(() => {});
+            } else if (dmabuf) {
+                // Per-head placement: window ":i" ↔ guest output i ↔ host
+                // monitor i (the outputs[] mirror order built into QEMU).
+                const hostMons = await this.adapter.monitors().catch(() => []);
+                const sel = d.monitors === "all" ? hostMons : hostMons.filter((m) => (d.monitors as string[]).includes(m.name));
+                for (let i = 0; i < this.windows.length; i++) {
+                    const w = this.windows[i]!;
+                    const idx = Number(w.title.match(/:(\d+)$/)?.[1] ?? 0);
+                    const mon = sel[idx] ?? sel[0];
+                    if (mon) await this.adapter.moveToMonitor(w, mon.name).catch(() => {});
+                    if (d.headMode === "virtual-desktop")
+                        await this.adapter.moveToDesktop(w, d.virtualDesktop).catch(() => {});
+                    if (d.headMode === "fullscreen-monitor" && d.sticky)
+                        await this.adapter.moveToDesktop(w, "all").catch(() => {});
+                    await this.adapter.setFullscreen(w, true).catch(() => {});
+                }
             } else {
                 if (d.headMode === "virtual-desktop")
                     await this.adapter.moveToDesktop(this.window, d.virtualDesktop).catch(() => {});
@@ -119,8 +201,27 @@ export class ViewerSession extends EventEmitter {
         if (this.window) await this.adapter.focus(this.window).catch(() => {});
     }
 
+    /** Adopted sessions hold no child handle — recheck the window instead.
+     *  True when an adopted viewer's window is gone (caller should drop the
+     *  entry and relaunch). */
+    async windowGone(): Promise<boolean> {
+        if (this.child || !this.window) return false;
+        return !await this.adapter.findWindow({ title: `cruiser:${this.spec.name}` }, 1_000).catch(() => null);
+    }
+
     async close(): Promise<void> {
         this.child?.kill("SIGTERM");
+        await (this.cleanupDone = this.cleanup());
+    }
+
+    /** Release ownership without killing — the viewer child is spawned
+     *  detached+unref'd and outlives the owning session/process. Shortcut
+     *  uninstallers still run (the orphan window survives without escape
+     *  bindings; open()'s stale-viewer reaper cleans it on next launch). */
+    async detach(): Promise<void> {
+        this.child = null;
+        this.window = null;
+        this.windows = [];
         await (this.cleanupDone = this.cleanup());
     }
 

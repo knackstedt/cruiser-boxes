@@ -46,7 +46,23 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   ssh+sudo when `guestAgentContext` reports a confined agent (also used by
   guest-setup).
 - `libraries/host-int` — WmAdapter impls (kde-x11 full; kde-wayland partial;
-  gnome-x11; gnome-wayland stub), xfreerdp viewer + ViewerSession.
+  gnome-x11; gnome-wayland stub), xfreerdp viewer + ViewerSession. Viewer
+  stdout/stderr lands in `run/freerdp.log` / `run/viewer-dd.log` — a dead
+  viewer with stdio ignored is undiagnosable; open() throws the log path.
+  `x11MoveToDesktop` verify-retries `_NET_WM_DESKTOP` — KWin applies initial
+  placement after map and silently overwrites an early `-t`.
+  viewer-dd (dmabuf): QEMU's @dbus-display keeps effectively ONE client
+  channel — the enumeration conn dies after RegisterListener and extra
+  add_client channels EPIPE at the p2p handshake, so all per-console
+  Keyboard/Mouse calls share a single conn opened after listener
+  registration. QMP `getfd` fdnames are global-namespace — unique per
+  channel or concurrent opens collide onto a stale fd. Dead-QEMU watchdog =
+  qemu.pid pid + /proc starttime beside monitor.sock (detects restart too);
+  don't ping the control conn, QEMU closes it by design. Multi-head:
+  virtio `outputs[]` mirrors adapter.monitors() order (window title
+  `cruiser:<vm>:<i>` ↔ guest output i ↔ host monitor i); guest scanouts are
+  per-console dims — letterbox fit_viewport math is shared by render AND
+  input (SetAbsPosition wants scanout px).
   `appearance.ts` — xdg-desktop-portal settings: `color-scheme`/`accent-color`/
   `contrast` reads (busctl, gdbus fallback) + one dbus-monitor SettingChanged
   watcher shared by all portal channels. `hoststate.ts` — the non-portal
@@ -105,6 +121,12 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   in as the base image (watermark still applied — never the raw host file).
 - `libraries/app-mode` — waypipe over vsock (socat bridge) / ssh fallback.
 - `libraries/app-shell` — UI: zustand store, CruiserService, screens markup.
+  Screen split: the vm detail screen owns everything that acts IMMEDIATELY
+  (lifecycle buttons, shares add/remove/toggle, portable-config
+  export/push/pull, snapshots — all call saveSpec directly); the create
+  wizard's edit mode owns only fields buffered into Save (description,
+  resources, display, persist, sync channels, usb). Don't render
+  instant-effect widgets inside the Save-gated form.
   `metrics.ts` — the running-VM sparklines (cpu/mem %; disk iops via QMP
   query-blockstats — no agent needed; net bytes/s via QGA /proc/net/dev;
   gpu util+mem via host `/proc/<qemu>/fdinfo` DRM client stats, absent in
@@ -127,6 +149,14 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 - `toolchain/` — versions.json pins + build.mts (fetch/build into `opt/`).
 - `src-tarballs/` — adopted/downloaded source trees (gitignored, may be
   symlinks into ~/devvm/src).
+  **Local QEMU patch**: `ui/dbus-listener.c` calls
+  `qemu_console_listener_set_refresh(&ddl->dcl, 10)` after
+  `qemu_console_register_listener` — upstream dbus listeners are pinned to
+  GUI_REFRESH_INTERVAL_DEFAULT (30ms ≈ 33fps), which caps the dmabuf viewer
+  at ~33fps; 10ms lifts the cap to ~100fps. Rebuild: `ninja -C
+  ~/devvm/src/qemu-11.1.1/build qemu-system-x86_64 && ninja -C ... install`.
+  Keep this patch when refreshing the QEMU tree — a plain tarball re-extract
+  silently drops it.
 
 ## Rules
 
@@ -139,7 +169,15 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   extraFonts). KDE guests use krdpserver (user-session, plasma-workspace.target)
   — Ubuntu 24.04 has no krdp; `supportsKrdp()` gates the UI. guest-setup
   re-detects the distro via /etc/os-release, so imported disks self-correct.
-  KRDP offers TLS/RDP security but NOT NLA — don't pass `/sec:nla` to freerdp.
+  KRDP ≥6.5 (Plasma PAM-auth rework) is TLS-security-only — `User`/`Password`/
+  `Port` in krdpserverrc are dead keys; auth is `Users`+KWallet or
+  `SystemUserEnabled`→PAM against the unix password. krdp still *negotiates*
+  NLA with no CredSSP creds (client dies `ERRCONNECT_LOGON_FAILURE`) —
+  `rdpTlsOnly()` probes the nego response and `freerdpArgs` passes `/sec:tls`.
+  KRDP also requires client-side H.264 (RDPGFX AVC420/444): distro freerdp3
+  builds `WITH_GFX_H264=OFF` — use `opt/freerdp` (toolchain cmake build,
+  ffmpeg backend); `freerdpSupportsH264` gates and `launchFreerdp` throws a
+  clear error for KDE guests without it.
 - Fedora confines qemu-ga under SELinux (`virt_qemu_ga_t`): guest-exec is
   uid-0 but can't usermod/write /var/lib/daemon-reload — even reading
   ~user/.ssh fails. `runGuestSetup` probes /proc/self/attr/current and falls
@@ -220,7 +258,14 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   skip `host.destroy()` on session end (the host is persistent-layer; the
   supervisor owns it). Without this the entry import never settles, the
   supervisor's reimport queue jams after the first Tier-3 restart, and the
-  window stays open with dead rendering.
+  window stays open with dead rendering. `svc.dispose()` NEVER kills viewer
+  children — they're detached/unref'd processes that outlive the app
+  (closing the manager must not close the console); `ViewerSession.detach()`
+  drops ownership and still runs the escape-shortcut uninstallers, and the
+  stale-viewer reaper in `open()` cleans orphans on the next launch. On a
+  session restart the entry calls `svc.dispose({ sessionRestart: true })`,
+  which additionally skips VM stops — an HMR swap must not take down
+  running guests.
 - Text quality: `PanelSpec.scale` = raster px per display px (supersample;
   1 = hard edges, 2 = smooth-but-soft). `PanelSpec.zoom` (added in
   ../downdraft-engine) = display px per CSS px — the UI scale knob; pointer

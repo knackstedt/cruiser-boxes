@@ -135,6 +135,20 @@ export class VmHandle extends EventEmitter {
             if (!opts.dbusRenderNode)
                 throw new Error("display.viewer=dmabuf: no DRM render node found for the host display GPU");
         }
+        // Mirror host monitor topology into virtio-gpu outputs[] so the guest
+        // gets one head per selected host display (dmabuf viewer spawns one
+        // window per console; RDP viewers use them via /multimon). Lazy
+        // imports keep the headless/cli path free of host-int.
+        if (opts.guestMonitors === undefined) {
+            const sel = this.spec.display.monitors;
+            const host = await import("../../../host-int/src/detect")
+                .then((m) => m.detectAdapter().monitors()).catch(() => [] as { name: string; x: number; y: number; w: number; h: number; primary: boolean }[]);
+            const picked = sel === "all" ? host : host.filter((m) => sel.includes(m.name));
+            if (picked.length) {
+                const { guestLayoutFromHost } = await import("../../../provision/src/monitors");
+                opts.guestMonitors = guestLayoutFromHost(this.spec.name, picked).monitors;
+            }
+        }
         return buildArgs(this.spec, this.paths, opts, { ldLibraryPath: this.toolchain.ldLibraryPath });
     }
 

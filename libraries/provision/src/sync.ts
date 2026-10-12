@@ -328,6 +328,47 @@ if [ -f /tmp/cruiser-monitors.xml ]; then
 fi`;
 }
 
+/** KDE guests — arrange virtio outputs to mirror host topology via
+ *  kscreen-doctor (monitors.xml is GNOME/mutter-only). Output i (Virtual-N)
+ *  maps to host monitor i — the same order buildArgs writes outputs[] in.
+ *  Positions are normalized to the composite's top-left. */
+export function guestKdeMonitorsScript(spec: VmSpec, host: { x: number; y: number; w: number; h: number; primary: boolean }[]): string {
+    const ox = Math.min(...host.map((m) => m.x));
+    const oy = Math.min(...host.map((m) => m.y));
+    const args: string[] = [];
+    host.forEach((m, i) => {
+        const o = `output.Virtual-${i + 1}`;
+        // No .mode — QEMU's per-output xres/yres already makes the mirrored
+        // resolution the EDID-preferred mode; only positions need pushing.
+        args.push(`${o}.enable`, `${o}.position.${m.x - ox},${m.y - oy}`);
+        if (m.primary) args.push(`${o}.priority.1`);
+    });
+    return `# host monitor topology → guest kscreen layout (KDE)
+${preamble(spec)}
+if command -v kscreen-doctor >/dev/null 2>&1; then
+    # kscreen-doctor needs a Qt platform plugin just to init QApplication —
+    # pick it from the session's sockets (wayland socket → wayland QPA,
+    # X socket → xcb); RUNU supplies the session bus + runtime dir.
+    # Retry until a session socket exists AND the apply succeeds — the sync
+    # can run before login while outputs already exist, and a silent
+    # no-op would leave the guest auto-layout diverged from --offsets for
+    # the whole boot. kscreen-doctor also persists the per-setup config, so
+    # later boots with the same output set self-correct.
+    i=0; ok=
+    while [ $i -lt 60 ]; do
+        if [ -S "/run/user/$UUID/wayland-0" ]; then
+            RUNU env QT_QPA_PLATFORM=wayland WAYLAND_DISPLAY=wayland-0 \\
+                kscreen-doctor ${args.map(sq).join(" ")} 2>/dev/null && ok=1 && break
+        elif [ -S /tmp/.X11-unix/X0 ]; then
+            RUNU env QT_QPA_PLATFORM=xcb DISPLAY=:0 \\
+                kscreen-doctor ${args.map(sq).join(" ")} 2>/dev/null && ok=1 && break
+        fi
+        i=$((i + 1)); sleep 3
+    done
+    [ -n "$ok" ]
+fi`;
+}
+
 /**
  * SSH agent: /etc/environment + profile.d point at the forwarded socket.
  * Idempotent — runs from AgentForward.start each session, so enabling
@@ -681,17 +722,27 @@ export class SessionSyncs {
             jobs.push(tryChan("shares", mounts, () =>
                 pushScript(this.h, guestSharesScript(spec), "shares")));
         }
-        if (syncEnabled(spec, "monitors") && spec.os.desktop === "gnome") {
+        if (syncEnabled(spec, "monitors") && (spec.os.desktop === "gnome" || spec.os.desktop === "kde")) {
             jobs.push((async () => {
                 const adapter = detectAdapter();
                 if (!adapter.caps.monitors) return;
                 const host = await adapter.monitors().catch(() => []);
                 if (!host.length) return;
-                const xml = guestLayoutFromHost(spec.name, host).xml;
-                await tryChan("monitors", xml, async () => {
-                    await pushFileToGuest(this.h, "/tmp/cruiser-monitors.xml", xml);
-                    await pushScript(this.h, guestMonitorScript(spec), "monitors");
-                });
+                if (spec.os.desktop === "kde") {
+                    // hash includes the QEMU pid — the guest re-derives its
+                    // output layout at every boot (kscreen auto-arrange), so
+                    // this channel must re-apply once per boot, not just when
+                    // the host topology changes.
+                    await tryChan("monitors",
+                        [...host.map((m) => `${m.name}@${m.x},${m.y} ${m.w}x${m.h}`), `boot:${this.h.pid()}`],
+                        () => pushScript(this.h, guestKdeMonitorsScript(spec, host), "monitors (kscreen)", 200_000));
+                } else {
+                    const xml = guestLayoutFromHost(spec.name, host).xml;
+                    await tryChan("monitors", xml, async () => {
+                        await pushFileToGuest(this.h, "/tmp/cruiser-monitors.xml", xml);
+                        await pushScript(this.h, guestMonitorScript(spec), "monitors");
+                    });
+                }
             })());
         }
 

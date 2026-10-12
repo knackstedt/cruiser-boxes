@@ -265,10 +265,14 @@ await new Promise<void>((resolve) => {
 });
 
 shell.dispose();
-await svc.dispose();
 if (windowClosed || !tracker) {
+    await svc.dispose();
     host.destroy();
 } else {
+    // Session restart — viewers are detached processes; leaving them (and
+    // any owned VMs) running keeps an HMR swap from killing the user's
+    // session. Only the service's in-process state is discarded.
+    await svc.dispose({ sessionRestart: true });
     // Session restart — the host is persistent-layer (the supervisor owns
     // its lifecycle); join the in-flight teardown and finish.
     try { await tracker.teardown?.({ destroyDevices: false }); } catch { /* already down */ }

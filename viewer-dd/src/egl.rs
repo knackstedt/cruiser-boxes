@@ -32,12 +32,33 @@ extern "C" {
     fn glViewport(x: i32, y: i32, w: i32, h: i32);
     fn glDrawArrays(mode: u32, first: i32, count: i32);
     fn glTexParameteri(t: u32, n: u32, v: i32);
+    fn glClearColor(r: f32, g: f32, b: f32, a: f32);
+    fn glClear(mask: u32);
+}
+
+#[link(name = "X11")]
+extern "C" {
+    fn XGetGeometry(d: *mut c_void, w: u64, root: *mut u64, x: *mut i32, y: *mut i32,
+                    wd: *mut u32, ht: *mut u32, bw: *mut u32, depth: *mut u32) -> i32;
+}
+
+/// Aspect-fit viewport of an `iw x ih` scanout inside a `ww x wh` drawable —
+/// shared by the GL viewport and the mouse coordinate map so they always
+/// agree (letterbox offset + scale).
+pub fn fit_viewport(ww: u32, wh: u32, iw: i32, ih: i32) -> (i32, i32, i32, i32) {
+    let (iw, ih) = (iw.max(1) as f32, ih.max(1) as f32);
+    let sc = (ww as f32 / iw).min(wh as f32 / ih).max(0.001);
+    let vw = (iw * sc).round().max(1.0) as i32;
+    let vh = (ih * sc).round().max(1.0) as i32;
+    ((ww as i32 - vw) / 2, (wh as i32 - vh) / 2, vw, vh)
 }
 
 type ImgTargetFn = unsafe extern "C" fn(u32, *mut c_void);
 static mut IMG_TARGET: Option<ImgTargetFn> = None;
 
-struct XEgl {
+/// Per-window EGL state — one instance per console head (multi-head guests
+/// spawn a window + GL worker each).
+pub struct XEgl {
     xdisp: *mut c_void,
     xwin: u64,
     inst: egl::DynamicInstance<egl::EGL1_5>,
@@ -51,12 +72,10 @@ struct XEgl {
     w: i32,
     h: i32,
 }
-unsafe impl Send for XEgl {}
-static XEGL: std::sync::Mutex<Option<XEgl>> = std::sync::Mutex::new(None);
 
 /// Create the EGL X11 display/context/window-surface. `window` is the XID of
 /// an already-created X window (the minifb window). Runs on the GL thread.
-pub fn x11_present_init(window: u64, w: i32, h: i32) -> Result<()> {
+pub fn x11_present_init(window: u64, w: i32, h: i32) -> Result<XEgl> {
     // own X connection — the window's owning Display* isn't safe across threads
     #[link(name = "X11")]
     extern "C" {
@@ -112,21 +131,18 @@ pub fn x11_present_init(window: u64, w: i32, h: i32) -> Result<()> {
         let mut tex = 0u32; glGenTextures(1, &mut tex);
         let f = inst.get_proc_address("glEGLImageTargetTexture2DOES").context("glEGLImageTargetTexture2DOES")?;
         IMG_TARGET = Some(std::mem::transmute(f));
-        *XEGL.lock().unwrap() = Some(XEgl {
+        Ok(XEgl {
             xdisp: display, xwin: window,
             inst, dpy, ctx, surf, prog, tex,
             img: None, img_y0: true, w, h,
-        });
+        })
     }
-    Ok(())
 }
 
 /// Import a dmabuf → EGLImage, bind it, draw + swap. The EGLImage is kept
 /// alive (it refs the GEM) until the next import replaces it.
 /// Must be called from the GL thread.
-pub fn x11_import_and_present(fd: RawFd, w: u32, h: u32, stride: u32, fourcc: u32, modifier: u64, y0_top: bool) -> Result<()> {
-    let mut g = XEGL.lock().unwrap();
-    let e = g.as_mut().context("xegl not init")?;
+pub fn x11_import_and_present(e: &mut XEgl, fd: RawFd, w: u32, h: u32, stride: u32, fourcc: u32, modifier: u64, y0_top: bool) -> Result<()> {
     unsafe {
         const EGL_LINUX_DMA_BUF_EXT: u32 = 0x3270;
         const EGL_WIDTH: i32 = 0x3057;
@@ -166,18 +182,24 @@ pub fn x11_import_and_present(fd: RawFd, w: u32, h: u32, stride: u32, fourcc: u3
         e.h = h as i32;
         let old = e.img.replace(img);
         if let Some(oi) = old { let _ = e.inst.destroy_image(e.dpy, oi); }
-        drop(g);
-        x11_redraw()
+        x11_redraw(e)
     }
 }
 
 /// Redraw + swap the currently bound scanout texture (damage-only updates).
 /// Must be called from the GL thread.
-pub fn x11_redraw() -> Result<()> {
-    let g = XEGL.lock().unwrap();
-    let e = g.as_ref().context("xegl not init")?;
+pub fn x11_redraw(e: &XEgl) -> Result<()> {
     unsafe {
-        glViewport(0, 0, e.w, e.h);
+        // Fit the scanout inside whatever size the window is NOW — fullscreen
+        // moves/resizes change the drawable with no new scanout, and a
+        // scanout-sized viewport leaves the rest unpainted.
+        let mut root = 0u64; let mut x = 0i32; let mut y = 0i32;
+        let mut ww = 0u32; let mut wh = 0u32; let mut bw = 0u32; let mut depth = 0u32;
+        XGetGeometry(e.xdisp, e.xwin, &mut root, &mut x, &mut y, &mut ww, &mut wh, &mut bw, &mut depth);
+        let (vx, vy, vw, vh) = fit_viewport(ww, wh, e.w, e.h);
+        glClearColor(0.0, 0.0, 0.0, 1.0);
+        glClear(0x4000); // GL_COLOR_BUFFER_BIT
+        glViewport(vx, vy, vw, vh);
         glUseProgram(e.prog);
         let (u0, u1) = if e.img_y0 { (0f32, 1f32) } else { (1f32, 0f32) };
         let quad: [f32; 16] = [

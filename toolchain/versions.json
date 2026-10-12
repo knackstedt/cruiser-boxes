@@ -62,10 +62,20 @@
       "url": "https://github.com/FreeRDP/FreeRDP/archive/refs/tags/3.32.1.tar.gz",
       "kind": "cmake",
       "prefix": "freerdp",
+      "dir": "FreeRDP-3.32.1",
+      "sha256": "8803dd26ec9660550252f255cf2d672a785ddd8f544bb475834993e96807c87f",
       "optional": true,
       "aptAlternative": "freerdp3-x11",
       "systemFloor": "3.5.0",
-      "why": "viewer for all desktop head modes; only built if system freerdp3 < floor"
+      "cmakeArgs": [
+        "-DWITH_SERVER=OFF", "-DWITH_SAMPLE=OFF", "-DWITH_MANPAGES=OFF",
+        "-DWITH_CLIENT_SDL=OFF", "-DWITH_KRB5=OFF", "-DWITH_CUPS=OFF", "-DWITH_FUSE=OFF",
+        "-DCHANNEL_URBDRC=OFF",
+        "-DWITH_GFX_H264=ON",
+        "-DWITH_FFMPEG=ON", "-DWITH_DSP_FFMPEG=ON", "-DWITH_VIDEO_FFMPEG=ON",
+        "-DWITH_SWSCALE=ON"
+      ],
+      "why": "viewer for all desktop head modes; distro freerdp3 has no H.264, which krdp (KDE guests) requires — build even when the system floor is met"
     }
   },
   "systemTools": {
@@ -84,6 +94,12 @@
     "libdrm-dev", "libvulkan-dev", "libgtk-3-dev", "libseccomp-dev", "libcapstone-dev",
     "libcap-ng-dev", "libzstd-dev", "zlib1g-dev", "libaio-dev", "liburing-dev",
     "libgstreamer1.0-dev", "libgstreamer-plugins-base1.0-dev",
-    "ovmf", "virt-viewer"
+    "ovmf", "virt-viewer",
+    "cmake", "libssl-dev", "libx11-dev", "libxext-dev", "libxinerama-dev",
+    "libxrandr-dev", "libxi-dev", "libxfixes-dev", "libxcursor-dev",
+    "libxkbfile-dev", "libxrender-dev", "libxtst-dev", "libxss-dev",
+    "libasound2-dev", "libpulse-dev", "libcups2-dev", "libpcsclite-dev",
+    "libusb-1.0-0-dev", "libavcodec-dev", "libavutil-dev", "libswscale-dev",
+    "libswresample-dev"
   ]
 }

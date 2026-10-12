@@ -54,30 +54,56 @@ export async function x11Windows(): Promise<WindowHandle[]> {
     return out;
 }
 
+function x11Match(m: WindowMatcher, w: WindowHandle): boolean {
+    if (m.pid !== undefined && w.pid !== m.pid) return false;
+    // wmctrl -x gives "instance.class" (e.g. "xfreerdp.xfreerdp") —
+    // match against either part, case-insensitively.
+    if (m.wmClass && !w.wmClass?.toLowerCase().split(".").includes(m.wmClass.toLowerCase())) return false;
+    if (m.title !== undefined) {
+        const t = typeof m.title === "string" ? w.title.includes(m.title) : m.title.test(w.title);
+        if (!t) return false;
+    }
+    return true;
+}
+
 export async function x11FindWindow(m: WindowMatcher, timeoutMs = 15_000): Promise<WindowHandle | null> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-        const wins = await x11Windows();
-        for (let i = 0; i < wins.length; i++) {
-            const w = wins[i]!;
-            if (m.pid !== undefined && w.pid !== m.pid) continue;
-            // wmctrl -x gives "instance.class" (e.g. "xfreerdp.xfreerdp") —
-            // match against either part, case-insensitively.
-            if (m.wmClass && !w.wmClass?.toLowerCase().split(".").includes(m.wmClass.toLowerCase())) continue;
-            if (m.title !== undefined) {
-                const t = typeof m.title === "string" ? w.title.includes(m.title) : m.title.test(w.title);
-                if (!t) continue;
-            }
-            return w;
-        }
+        const w = (await x11Windows()).find((x) => x11Match(m, x));
+        if (w) return w;
         if (Date.now() > deadline) return null;
+        await new Promise((r) => setTimeout(r, 250));
+    }
+}
+
+/** All matching windows — resolves early at `want`, or when the count
+ *  plateaus (~500ms; a single-head VM shouldn't burn the whole timeout). */
+export async function x11FindWindows(m: WindowMatcher, timeoutMs = 15_000, want = 1): Promise<WindowHandle[]> {
+    const deadline = Date.now() + timeoutMs;
+    let prev = 0, stable = 0;
+    for (;;) {
+        const wins = (await x11Windows()).filter((x) => x11Match(m, x));
+        if (wins.length >= want) return wins;
+        if (wins.length && wins.length === prev) { if (++stable >= 2) return wins; }
+        else stable = 0;
+        prev = wins.length;
+        if (Date.now() > deadline) return wins;
         await new Promise((r) => setTimeout(r, 250));
     }
 }
 
 export async function x11MoveToDesktop(w: WindowHandle, desktop: number | "all"): Promise<void> {
     const target = desktop === "all" ? "-1" : String(desktop - 1);
-    await run("wmctrl", ["-i", "-r", w.id, "-t", target], { noThrow: true });
+    // KWin applies initial placement AFTER the window maps — a -t sent in that
+    // gap is silently overwritten. Re-issue until _NET_WM_DESKTOP sticks.
+    for (let i = 0; i < 10; i++) {
+        await run("wmctrl", ["-i", "-r", w.id, "-t", target], { noThrow: true });
+        const cur = await run("xprop", ["-id", w.id, "_NET_WM_DESKTOP"], { noThrow: true });
+        const v = cur.stdout.split("=")[1]?.trim();
+        const ok = desktop === "all" ? v === "4294967295" : v === target;
+        if (ok) break;
+        await new Promise((r) => setTimeout(r, 200));
+    }
     // KWin re-resolves fullscreen geometry on a desktop move and collapses a
     // multi-monitor fullscreen to the single containing monitor. The window's
     // _NET_WM_FULLSCREEN_MONITORS hint survives — toggling fullscreen off/on

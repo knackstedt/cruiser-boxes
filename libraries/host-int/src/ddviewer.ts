@@ -31,13 +31,20 @@ export async function ddViewerPath(): Promise<string | null> {
     return null;
 }
 
-/** Launch the dmabuf viewer process; returns immediately (caller waits for window). */
-export async function launchDdViewer(spec: VmSpec): Promise<ViewerLaunch> {
+/**
+ * Launch the dmabuf viewer process; returns immediately (caller waits for
+ * window). `offsets` = each guest console's position in the composite
+ * desktop (console order = virtio outputs[] order = picked monitor order),
+ * needed because the guest's single virtio tablet maps over the whole
+ * composite — QEMU does NOT add per-console offsets for us.
+ */
+export async function launchDdViewer(spec: VmSpec, offsets?: string): Promise<ViewerLaunch> {
     const bin = await ddViewerPath();
     if (!bin) throw new Error("viewer-dd not found — cargo build --release in viewer-dd/ (or install it on PATH)");
     const monitorSock = vmPaths(spec.name).monitorSock;
     const { w, h } = spec.display.windowSize;
     const argv = [monitorSock, "--title", `cruiser:${spec.name}`, "--size", `${w}x${h}`];
+    if (offsets) argv.push("--offsets", offsets);
     const child = spawnChild(bin, argv, {
         detached: true,
         logFile: join(vmPaths(spec.name).run, "viewer-dd.log"),
