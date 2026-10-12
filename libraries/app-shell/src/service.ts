@@ -769,16 +769,6 @@ export class CruiserService {
         });
     }
 
-    /** Save the vm-detail description edit buffer into the spec. */
-    async saveDescription(name: string): Promise<void> {
-        const h = this.handles.get(name); if (!h) return;
-        const st = this.store.getState();
-        await this.run(`save description`, async () => {
-            h.spec.description = st.vmDesc.trim();
-            await h.saveSpec();
-        }, { vm: name, verb: "saving" });
-    }
-
     /** Browse for the share's host directory. */
     async pickShareDir(): Promise<void> {
         const p = await this.pickPath("dir", "Choose host folder to share", homedir());
@@ -809,7 +799,7 @@ export class CruiserService {
             });
             h.spec = VmSpec.parse(next);
             await h.saveSpec();
-            st.setShareForm({ hostPath: "", guestPath: "" });
+            st.setShareForm({ hostPath: "", guestPath: "", open: false });
             return f.mode;
         }, {
             done: (m) => m === "copy"

@@ -191,7 +191,7 @@ export interface CruiserState {
     /** Name of the VM being edited in the create wizard (edit mode), or null. */
     editVm: string | null;
     logs: LogsState;
-    /** Description edit buffer on the vm detail screen (loaded on nav). */
+    /** Description edit buffer on the vm edit screen (loaded by vm-edit). */
     vmDesc: string;
     /** The share-add form on the vm detail screen. */
     shareForm: ShareForm;
@@ -202,6 +202,7 @@ export interface ShareForm {
     guestPath: string;
     mode: "mount" | "copy";
     direction: "both" | "host-to-guest";
+    open: boolean;               // the add form is collapsed behind "+ Add share"
 }
 
 export interface CruiserActions {
@@ -269,7 +270,7 @@ export function createCruiserStore() {
         editVm: null,
         logs: defaultLogs(),
         vmDesc: "",
-        shareForm: { hostPath: "", guestPath: "", mode: "mount", direction: "both" },
+        shareForm: { hostPath: "", guestPath: "", mode: "mount", direction: "both", open: false },
         setRoute: (route, vm = null) => set({ route, selectedVm: vm, confirm: null, editVm: null }),
         setVms: (vms) => set({ vms }),
         setStatus: (status) => set({ status }),

@@ -89,6 +89,10 @@ input:focus { border-color:#4fc2f7; outline:none; }
    the label onto a transparent backdrop where LCD subpixel blending leaves
    colored fringes. */
 .opt.dim { background:#161b23; color:#4a515d; border-color:#1f252e; }
+.opt.sm { padding:4px 9px; font-size:12px; }
+.crumb { display:inline-block; font-size:12px; color:#7fd0ff; margin-bottom:10px; }
+.sharebox { background:#161b23; border:1px solid #2a313c; border-radius:6px;
+            padding:10px 14px 2px; margin-top:10px; }
 .hint { font-size:12px; color:#5d6775; margin:-4px 0 10px 156px; max-width:560px; line-height:1.45; }
 .hostsum { font-size:13px; color:#8a94a3; background:#161b23; border:1px solid #2a313c;
            border-radius:6px; padding:9px 12px; margin-bottom:14px; }
@@ -402,12 +406,7 @@ function create(s: CruiserState): string {
             ? `<div class="row"><div class="lbl">Name</div><div class="meta" style="color:#e8ecf1">${esc(s.editVm ?? "")}</div></div>
         <div class="row"><div class="lbl">Description</div>
             <input data-field="vm-desc" value="${esc(s.vmDesc)}" style="width:320px"></div>
-        <div class="hint">exported with the config — a one-liner like "work dev box, cuda testing".</div>
-        <div class="row"><div class="lbl">Portable config</div>
-            ${btn("Export (yaml)", "vm-export", attr("vm", s.editVm ?? ""), "btn sm")}
-            ${btn("Push to gist", "vm-gist-push", attr("vm", s.editVm ?? ""), "btn sm")}
-            ${editTarget?.origin ? btn("Pull", "vm-gist-pull", attr("vm", s.editVm ?? ""), "btn sm") : ""}
-            <div class="meta">${editTarget?.origin ? esc(editTarget.origin) : "gist/file origin set on push or import"}</div></div>`
+        <div class="hint">exported with the config — a one-liner like "work dev box, cuda testing".</div>`
             : field("Name", "name", f.name)}
         <div class="h2">Resources</div>
         ${field("vCPUs", "cpus", f.cpus, 80)}
@@ -438,7 +437,6 @@ function create(s: CruiserState): string {
         <div class="hint">The base bundle — desktop, RDP/audio/GPU stack, flatpak + software store, fonts — is always installed.</div>`}`}
         ${syncSection}
         ${usbSection}
-        ${editing && editTarget ? shareSection(editTarget, s, editTarget.state === "running") : ""}
         ${editing ? "" : `<div class="h2">Credentials</div>
         ${field("Username", "username", f.username)}
         ${field("Password", "password", f.password)}`}
@@ -471,7 +469,9 @@ function vmDetail(s: CruiserState): string {
         vm.hostDiskBytes !== undefined ? `${fmtBytes(vm.hostDiskBytes)} file` : "",
         guestDiskStr(vm) ?? "",
     ].filter(Boolean).join(" · ");
-    return `<div class="h1">${esc(vm.name)} <span class="pill ${pillClass(vm.state)}">${esc(vm.state)}</span></div>
+    return `<div class="crumb" data-action="nav" data-route="home">‹ VMs</div>
+        <div class="h1">${esc(vm.name)} <span class="pill ${pillClass(vm.state)}">${esc(vm.state)}</span></div>
+        ${vm.description ? `<div class="meta" style="margin:-8px 0 12px">${esc(vm.description)}</div>` : ""}
         <div class="kv">
             <div class="k">resources</div><div>${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB · ${vm.diskGiB} GiB disk</div>
             ${diskDetail ? `<div class="k">disk usage</div><div>${esc(diskDetail)}</div>` : ""}
@@ -484,20 +484,16 @@ function vmDetail(s: CruiserState): string {
         <div style="margin:10px 0 18px">
             ${vmBtns(vm, s, true)}
         </div>
-        <div class="h2">Config</div>
-        <div class="row"><div class="lbl">Description</div>
-            <input data-field="vm-desc" value="${esc(s.vmDesc)}" style="width:320px">
-            <div class="opt" data-action="vm-desc-save" data-vm="${esc(vm.name)}">Save</div></div>
-        <div class="hint">exported with the config — a one-liner like "work dev box, cuda testing".</div>
-        <div class="row"><div class="lbl">Portable config</div>
+        <div class="h2">Portable config</div>
+        <div class="row"><div class="lbl">Export / pull</div>
             ${btn("Export (yaml)", "vm-export", attr("vm", vm.name), "btn sm")}
             ${btn("Push to gist", "vm-gist-push", attr("vm", vm.name), "btn sm")}
             ${vm.origin ? btn("Pull", "vm-gist-pull", attr("vm", vm.name), "btn sm") : ""}
             <div class="meta">${vm.origin ? esc(vm.origin) : "gist/file origin set on push or import"}</div></div>
+        <div class="hint">a *.cruiser.{yaml,toml,json} doc captures the whole spec — import one from the New VM screen</div>
         ${shareSection(vm, s, up)}
         <div class="h2">Snapshots</div>
-        ${snapSection}
-        <div style="margin-top:24px">${btn("‹ VMs", "nav", attr("route", "home"), "btn dim")}</div>`;
+        ${snapSection}`;
 }
 
 /** The shares list + add form on the vm detail screen. */
@@ -510,36 +506,49 @@ function shareSection(vm: VmSummary, s: CruiserState, up: boolean): string {
             ? `~/cruiser-sync/${sh.hostPath.replace(/\/+$/, "").split("/").pop() ?? sh.tag}`
             : `/mnt/${sh.tag}`);
         const chip = (field: string, value: string, label: string, on: boolean) =>
-            `<div class="opt${on ? " on" : ""}" data-action="share-attr" data-vm="${esc(vm.name)}" data-idx="${sh.idx}" data-field="${field}" data-value="${value}">${esc(label)}</div>`;
-        return `<div class="docrow">
+            `<div class="opt sm${on ? " on" : ""}" data-action="share-attr" data-vm="${esc(vm.name)}" data-idx="${sh.idx}" data-field="${field}" data-value="${value}">${esc(label)}</div>`;
+        const armed = s.confirm === `share-rm:${vm.name}:${sh.idx}`;
+        return `<div class="vmrow">
             ${chip("enabled", String(!sh.enabled), sh.enabled ? "on" : "off", sh.enabled)}
-            <div style="flex:1;min-width:0">${esc(sh.hostPath)} → ${esc(mp)}
-                <div class="fix">${esc(sh.tag)} · ${sh.mode === "copy" ? "copy (rsync)" : "mount (virtiofs/9p)"}${sh.deletions ? " · --delete" : ""}</div></div>
-            ${chip("direction", "both", "h↔g", sh.direction === "both")}
-            ${chip("direction", "host-to-guest", "h→g", sh.direction === "host-to-guest")}
-            ${chip("mode", "mount", "mount", sh.mode === "mount")}
-            ${chip("mode", "copy", "copy", sh.mode === "copy")}
-            <div class="opt" data-action="share-rm" data-vm="${esc(vm.name)}" data-idx="${sh.idx}">✕</div>
+            <div class="grow">${esc(sh.hostPath)} → ${esc(mp)}
+                <div class="vmmode">${esc(sh.tag)} · ${sh.mode === "copy" ? "copy (rsync)" : "mount (virtiofs/9p)"}${sh.deletions ? " · --delete" : ""}</div></div>
+            <div class="opts">
+                ${chip("direction", "both", "two-way", sh.direction === "both")}
+                ${chip("direction", "host-to-guest", "host→guest", sh.direction === "host-to-guest")}
+            </div>
+            <div class="opts">
+                ${chip("mode", "mount", "mount", sh.mode === "mount")}
+                ${chip("mode", "copy", "copy", sh.mode === "copy")}
+            </div>
+            <div class="opt sm${armed ? " on" : ""}" data-action="share-rm" data-vm="${esc(vm.name)}" data-idx="${sh.idx}">${armed ? "remove?" : "✕"}</div>
         </div>`;
     }).join("") : `<div class="meta">no shares yet</div>`;
-    return `<div class="h2">Shared folders &amp; file sync</div>
-        <div class="hint" style="margin-left:0"><b>mount</b> shows the real host folder inside the guest
-            (virtiofs/9p — applied at boot; fstab reconciles on each session). <b>copy</b> rsyncs real
-            copies — works for single files too, and applies live with no restart.</div>
-        ${rows}
-        <div class="row" style="margin-top:10px"><div class="lbl">Host path</div>
+    const syncNow = vm.shares.some((x) => x.mode === "copy" && x.enabled) && up
+        ? btn("Sync now", "filesync-now", attr("vm", vm.name), "btn sm dim") : "";
+    const form = `<div class="sharebox">
+        <div class="row"><div class="lbl">Host path</div>
             <input data-field="share-hostPath" value="${esc(sf.hostPath)}" style="width:280px">
             <div class="opt" data-action="share-pick">Browse…</div></div>
         <div class="row"><div class="lbl">Guest path</div>
             <input data-field="share-guestPath" value="${esc(sf.guestPath)}" style="width:280px">
             <div class="meta">${sf.mode === "mount" ? "mountpoint — default /mnt/<tag>" : "destination dir — default ~/cruiser-sync/<name>"}</div></div>
         <div class="row"><div class="lbl">Mode</div><div class="opts">
-            ${opt("mode", "mount", "mount", sf.mode)}${opt("mode", "copy", "copy", sf.mode)}</div></div>
+            ${opt("mode", "mount", "mount", sf.mode)}${opt("mode", "copy", "copy", sf.mode)}</div>
+            <div class="meta">${sf.mode === "mount" ? "real host folder in the guest — attaches at boot" : "rsync'd copies — applies live, single files work"}</div></div>
         <div class="row"><div class="lbl">Direction</div><div class="opts">
-            ${opt("direction", "both", "h↔g both", sf.direction)}${opt("direction", "host-to-guest", "host→guest only", sf.direction)}</div></div>
-        <div style="margin:8px 0 18px">${btn("Add share", "share-add", attr("vm", vm.name))}
-            ${vm.shares.some((x) => x.mode === "copy" && x.enabled) && up
-                ? btn("Sync now", "filesync-now", attr("vm", vm.name), "btn dim") : ""}</div>`;
+            ${opt("direction", "both", "two-way", sf.direction)}${opt("direction", "host-to-guest", "host→guest only", sf.direction)}</div></div>
+        <div class="row"><div class="lbl"></div>
+            ${btn("Add share", "share-add", attr("vm", vm.name), "btn sm")}
+            ${btn("Cancel", "share-form", attr("field", "open") + attr("value", "false"), "btn sm dim")}</div>
+    </div>`;
+    return `<div class="h2">Shared folders &amp; file sync</div>
+        <div class="hint" style="margin-left:0"><b>mount</b> shows the real host folder inside the guest
+            (virtiofs/9p — applied at boot; fstab reconciles on each session). <b>copy</b> rsyncs real
+            copies — works for single files too, and applies live with no restart.</div>
+        ${rows}
+        ${sf.open ? form
+            : `<div style="margin-top:10px">${btn("+ Add share", "share-form", attr("field", "open") + attr("value", "true"), "btn sm")}</div>`}
+        ${syncNow ? `<div style="margin-top:8px">${syncNow}</div>` : ""}`;
 }
 
 // ── logs ──
@@ -587,11 +596,11 @@ function logsView(s: CruiserState): string {
     // .logpre is NOT emitted here — it's a sibling of .content patched
     // through the RouteParts.log region so the scrollport node survives
     // content patches (see applyHtml).
-    return `<div class="h1">${esc(name)} logs <span class="pill ${pillClass(vm?.state ?? "")}">${esc(vm?.state ?? "?")}</span></div>
+    return `<div class="crumb" data-action="nav" data-route="vm" data-vm="${esc(name)}">‹ ${esc(name)}</div>
+        <div class="h1">${esc(name)} logs <span class="pill ${pillClass(vm?.state ?? "")}">${esc(vm?.state ?? "?")}</span></div>
         <div class="logbar">${srcTabs}<span class="meta">lines</span>${linesSel}${follow}${btn("Refresh", "log-refresh", "", "btn sm")}</div>
         ${controls}
-        <div class="logmeta" style="margin-bottom:6px">${esc(meta)}</div>
-        <div style="margin-top:16px">${btn(`‹ ${name}`, "nav", attr("route", "vm") + attr("vm", name), "btn dim")}</div>`;
+        <div class="logmeta" style="margin-bottom:6px">${esc(meta)}</div>`;
 }
 
 /** Inner markup of the logs scrollpane — patched into .logpre directly so
@@ -677,8 +686,8 @@ export interface RouteParts {
 }
 
 export function renderRouteParts(s: CruiserState): RouteParts {
-    const nav = (r: string, label: string) =>
-        `<div class="item${s.route === r ? " on" : ""}" data-action="nav" data-route="${r}">${label}</div>`;
+    const nav = (r: string, label: string, on = s.route === r) =>
+        `<div class="item${on ? " on" : ""}" data-action="nav" data-route="${r}">${label}</div>`;
     const spinner = `<div class="spinwrap"><div class="spinglyph" data-spin>◐</div>
         <div class="spinlbl">${esc(s.status)}</div>
         ${s.route === "create" ? `<div class="meta">provisioning can take a few minutes — the image download is cached for future VMs</div>` : ""}</div>`;
@@ -693,7 +702,7 @@ export function renderRouteParts(s: CruiserState): RouteParts {
         s.route === "vm" ? vmDetail(s) :
         s.route === "logs" ? logsView(s) : settings(s);
     const topbar = `<div class="brand">cruiser</div>
-        <div class="nav">${nav("home", "VMs")}${nav("settings", "Settings")}</div>
+        <div class="nav">${nav("home", "VMs", ["home", "create", "vm", "logs"].includes(s.route))}${nav("settings", "Settings")}</div>
         <div style="flex:1"></div>`;
     const footer = esc(s.status);
     const log = s.route === "logs" ? logPaneInner(s) : null;
