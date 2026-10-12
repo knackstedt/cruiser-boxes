@@ -4,6 +4,7 @@
 // ============================================================================
 
 import { z } from "zod";
+import { SYNC_CHANNELS } from "./sync-channels";
 
 export const HeadMode = z.enum(["fullscreen-monitor", "windowed", "virtual-desktop", "app"]);
 export type HeadMode = z.infer<typeof HeadMode>;
@@ -190,39 +191,16 @@ export const VmSpec = z.object({
     /**
      * Host → guest sync channels. All per-VM; every channel also honors
      * env kills (CRUISER_HOST_SYNC=0 master, CRUISER_SYNC_<ID>=0 each).
-     * The default-off four push host credentials/identity/trust into the
-     * guest — opt in deliberately.
+     * The credential:true channels push host credentials/identity/trust
+     * into the guest — opt in deliberately.
+     * Keys + defaults come from sync-channels.ts — the single registry
+     * that also drives the create form and cli `vm sync`.
      */
-    sync: z.object({
-        /** dark/light hint via the xdg portal (provision bake + live watcher). */
-        theme: z.boolean().default(true),
-        /** portal accent-color → GNOME named accent / KDE AccentColor. */
-        accentColor: z.boolean().default(true),
-        /** portal contrast → high-contrast. */
-        contrast: z.boolean().default(true),
-        /** host timezone → timedatectl (provision default + live watcher). */
-        timezone: z.boolean().default(true),
-        /** host LANG → localectl (seed + guest-setup + session re-push). */
-        locale: z.boolean().default(true),
-        /** host X11 keymap → guest layout (seed + guest-setup + session re-push). */
-        keyboard: z.boolean().default(true),
-        /** host monitor topology → monitors.xml (GNOME guests; provision + session re-push). */
-        monitors: z.boolean().default(true),
-        /** host's own wallpaper as the managed composite's source image. */
-        hostWallpaper: z.boolean().default(true),
-        /** ~/.gitconfig user.name/email → guest git config. */
-        gitIdentity: z.boolean().default(false),
-        /** host proxy config → guest gsettings/kioslaverc + /etc/environment. */
-        proxy: z.boolean().default(false),
-        /** host custom CA roots → guest trust store. */
-        caCerts: z.boolean().default(false),
-        /** host SSH agent socket → guest via a held ssh -R forward. */
-        sshAgent: z.boolean().default(false),
-        /** reconcile spec.shares mounts inside the guest (fstab + mount) —
-         *  makes shares added while a VM was stopped work on the next boot
-         *  without a re-provision. */
-        shares: z.boolean().default(true),
-    }).prefault({}),
+    sync: z.object(
+        Object.fromEntries(SYNC_CHANNELS.map((c) => [c.id, z.boolean().default(c.def)])) as {
+            [C in (typeof SYNC_CHANNELS)[number] as C["id"]]: z.ZodDefault<z.ZodBoolean>;
+        },
+    ).prefault({}),
 
     shares: z.array(ShareSpec).default([]),
 

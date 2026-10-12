@@ -1,0 +1,20 @@
+cruiser: lift the D-Bus display listener's refresh cap to ~100fps.
+
+Upstream dbus listeners are pinned to GUI_REFRESH_INTERVAL_DEFAULT (30ms ≈
+33fps) — fine for a GUI menu bar, but it caps the dmabuf viewer (viewer-dd)
+at ~33fps. 10ms lifts the cap to ~100fps. Applied by build.mts after
+extract; without it the dmabuf viewer still works, just slower.
+
+--- a/ui/dbus-listener.c
++++ b/ui/dbus-listener.c
+@@ -1281,6 +1281,10 @@
+     }
+ #endif
+     qemu_console_register_listener(con, &ddl->dcl, ops);
++    /* cruiser: local dmabuf listeners want tighter pacing than the
++     * 30ms default (33fps) — the dbus display is a dedicated local
++     * viewer, so cap at 100fps rather than the shared-GUI default. */
++    qemu_console_listener_set_refresh(&ddl->dcl, 10);
+ 
+     return ddl;
+ }

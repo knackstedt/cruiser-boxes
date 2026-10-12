@@ -6,7 +6,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, writeFile, readFile, copyFile, rm } from "node:fs/promises";
 import type { ChildProcess } from "node:child_process";
-import { EventEmitter } from "node:events";
 
 import type { VmSpec } from "../config/schema";
 import { parseVmSpec } from "../config/schema";
@@ -38,7 +37,7 @@ function qemuHasVdagent(qemu: string, ldLibraryPath: string): Promise<boolean> {
     return p;
 }
 
-export class VmHandle extends EventEmitter {
+export class VmHandle {
     spec: VmSpec;
     readonly paths: VmPaths;
     private toolchain: Toolchain | null = null;
@@ -49,7 +48,6 @@ export class VmHandle extends EventEmitter {
     private lastError: string | null = null;
 
     private constructor(spec: VmSpec, paths: VmPaths) {
-        super();
         this.spec = spec;
         this.paths = paths;
     }
@@ -70,7 +68,6 @@ export class VmHandle extends EventEmitter {
 
     async saveSpec(): Promise<void> {
         await writeFile(this.paths.spec, JSON.stringify(this.spec, null, 2) + "\n");
-        this.emit("spec", this.spec);
     }
 
     // ── state probing ──
@@ -159,20 +156,6 @@ export class VmHandle extends EventEmitter {
                     void appendVmLog(this.paths, "clipboard: qemu lacks the qemu-vdagent chardev — guest clipboard sync disabled");
             }
         }
-        // Mirror host monitor topology into virtio-gpu outputs[] so the guest
-        // gets one head per selected host display (dmabuf viewer spawns one
-        // window per console; RDP viewers use them via /multimon). Lazy
-        // imports keep the headless/cli path free of host-int.
-        if (opts.guestMonitors === undefined) {
-            const sel = this.spec.display.monitors;
-            const host = await import("../../../host-int/src/detect")
-                .then((m) => m.detectAdapter().monitors()).catch(() => [] as { name: string; x: number; y: number; w: number; h: number; primary: boolean }[]);
-            const picked = sel === "all" ? host : host.filter((m) => sel.includes(m.name));
-            if (picked.length) {
-                const { guestLayoutFromHost } = await import("../../../provision/src/monitors");
-                opts.guestMonitors = guestLayoutFromHost(this.spec.name, picked).monitors;
-            }
-        }
         return buildArgs(this.spec, this.paths, opts, { ldLibraryPath: this.toolchain.ldLibraryPath });
     }
 
@@ -207,7 +190,6 @@ export class VmHandle extends EventEmitter {
             this.qemuChild.on("exit", (code) => {
                 this.qemuChild = null;
                 void appendVmLog(this.paths, `qemu exited (code ${code})`);
-                this.emit("exit", code);
             });
             this.qemuChild.unref();
         }

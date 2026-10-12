@@ -45,41 +45,19 @@ import {
 export type { ColorScheme };
 
 // ── channel gating ──
+// The channel table itself lives in vm-core's sync-channels registry —
+// schema.ts, the create form, and the cli all derive from it.
 
-export type SyncId =
-    | "theme" | "accentColor" | "contrast" | "timezone" | "locale" | "keyboard"
-    | "monitors" | "hostWallpaper"
-    | "gitIdentity" | "proxy" | "caCerts" | "sshAgent" | "shares";
+export { SYNC_IDS, type SyncId } from "../../vm-core/src/config/sync-channels";
+import { SYNC_CHANNELS, type SyncChannelDef, type SyncId } from "../../vm-core/src/config/sync-channels";
 
-/** Ordered for display (cli `vm sync`) — provision/session order is the same. */
-export const SYNC_IDS: SyncId[] = [
-    "theme", "accentColor", "contrast", "timezone", "locale", "keyboard",
-    "monitors", "hostWallpaper",
-    "gitIdentity", "proxy", "caCerts", "sshAgent", "shares",
-];
-
-const ENV_KEYS: Record<SyncId, string> = {
-    theme: "CRUISER_SYNC_THEME",
-    accentColor: "CRUISER_SYNC_ACCENT",
-    contrast: "CRUISER_SYNC_CONTRAST",
-    timezone: "CRUISER_SYNC_TIMEZONE",
-    locale: "CRUISER_SYNC_LOCALE",
-    keyboard: "CRUISER_SYNC_KEYBOARD",
-    monitors: "CRUISER_SYNC_MONITORS",
-    hostWallpaper: "CRUISER_SYNC_HOST_WALLPAPER",
-    gitIdentity: "CRUISER_SYNC_GIT",
-    proxy: "CRUISER_SYNC_PROXY",
-    caCerts: "CRUISER_SYNC_CA_CERTS",
-    sshAgent: "CRUISER_SYNC_SSH_AGENT",
-    shares: "CRUISER_SYNC_SHARES",
-};
-
-/** spec.sync[id] AND env: CRUISER_HOST_SYNC=0 kills all, CRUISER_SYNC_<ID>=0
- *  per channel; CRUISER_THEME_SYNC=0 still honored for back-compat. */
+/** spec.sync[id] AND env: CRUISER_HOST_SYNC=0 kills all, the channel's own
+ *  env key kills it (CRUISER_SYNC_<ID>=0); legacyEnv still honored. */
 export function syncEnabled(spec: VmSpec, id: SyncId, env: NodeJS.ProcessEnv = process.env): boolean {
     if (env.CRUISER_HOST_SYNC === "0") return false;
-    if (env[ENV_KEYS[id]] === "0") return false;
-    if (id === "theme" && env.CRUISER_THEME_SYNC === "0") return false;
+    const c: SyncChannelDef = SYNC_CHANNELS.find((x) => x.id === id)!;
+    if (env[c.env] === "0") return false;
+    if (c.legacyEnv && env[c.legacyEnv] === "0") return false;
     return spec.sync[id];
 }
 
@@ -253,6 +231,10 @@ export function guestGitScript(spec: VmSpec, id: GitIdentity): string {
 /** host proxy → guest: DE settings (manual/none/auto) + /etc/environment
  *  block + a profile.d line for shells that bypass pam_env. */
 export function guestProxyScript(spec: VmSpec, px: HostProxy): string {
+    // Values come from host gsettings — sq() for command args; the profile.d
+    // heredoc is shell-parsed so values need "…" escaping; /etc/environment
+    // is literal (no shell eval) so values stay raw.
+    const dq = (s: string) => `"${s.replace(/["\\$`]/g, "\\$&")}"`;
     const env: string[] = [];
     if (px.mode === "manual") {
         if (px.http) env.push(`http_proxy=http://${px.http}`, `HTTP_PROXY=http://${px.http}`);
@@ -262,7 +244,7 @@ export function guestProxyScript(spec: VmSpec, px: HostProxy): string {
     if (px.noProxy.length) env.push(`no_proxy=${px.noProxy.join(",")}`, `NO_PROXY=${px.noProxy.join(",")}`);
     const envBlock = env.length
         ? `cat > /etc/profile.d/cruiser-proxy.sh <<'PROXYENV'
-${env.map((e) => `export ${e}`).join("\n")}
+${env.map((e) => `export ${e.split("=")[0]}=${dq(e.split("=").slice(1).join("="))}`).join("\n")}
 PROXYENV
 { grep -v '^# cruiser-proxy' /etc/environment 2>/dev/null | grep -vE '^(http_proxy|https_proxy|no_proxy|HTTP_PROXY|HTTPS_PROXY|NO_PROXY)=' || true; } > /etc/environment.new
 echo '# cruiser-proxy' >> /etc/environment.new
@@ -278,18 +260,18 @@ mv /etc/environment.new /etc/environment`;
 ${preamble(spec)}
 ${envBlock}
 if command -v gsettings >/dev/null 2>&1; then
-    RUNU gsettings set org.gnome.system.proxy mode '${px.mode}' 2>/dev/null || true
-${px.mode === "manual" && px.http ? `    RUNU gsettings set org.gnome.system.proxy.http host '${px.http.split(":")[0]}' 2>/dev/null || true
+    RUNU gsettings set org.gnome.system.proxy mode ${sq(px.mode)} 2>/dev/null || true
+${px.mode === "manual" && px.http ? `    RUNU gsettings set org.gnome.system.proxy.http host ${sq(px.http.split(":")[0]!)} 2>/dev/null || true
     RUNU gsettings set org.gnome.system.proxy.http port ${Number(px.http.split(":")[1] ?? 0)} 2>/dev/null || true` : ""}
-${px.mode === "manual" && px.https ? `    RUNU gsettings set org.gnome.system.proxy.https host '${px.https.split(":")[0]}' 2>/dev/null || true
+${px.mode === "manual" && px.https ? `    RUNU gsettings set org.gnome.system.proxy.https host ${sq(px.https.split(":")[0]!)} 2>/dev/null || true
     RUNU gsettings set org.gnome.system.proxy.https port ${Number(px.https.split(":")[1] ?? 0)} 2>/dev/null || true` : ""}
 ${px.mode === "auto" && px.pacUrl ? `    RUNU gsettings set org.gnome.system.proxy autoconfig-url ${sq(px.pacUrl)} 2>/dev/null || true` : ""}
-    RUNU gsettings set org.gnome.system.proxy ignore-hosts "[${px.noProxy.map((h) => `'${h.replace(/'/g, "")}'`).join(", ")}]" 2>/dev/null || true
+    RUNU gsettings set org.gnome.system.proxy ignore-hosts "[${px.noProxy.map(sq).join(", ")}]" 2>/dev/null || true
 fi
 if command -v kwriteconfig6 >/dev/null 2>&1; then
     RUNU kwriteconfig6 --file kioslaverc --group "Proxy Settings" --key ProxyType ${kdeType} 2>/dev/null || true
-${px.mode === "manual" && px.http ? `    RUNU kwriteconfig6 --file kioslaverc --group "Proxy Settings" --key httpProxy "http://${px.http}" 2>/dev/null || true` : ""}
-${px.mode === "manual" && px.https ? `    RUNU kwriteconfig6 --file kioslaverc --group "Proxy Settings" --key httpsProxy "http://${px.https}" 2>/dev/null || true` : ""}
+${px.mode === "manual" && px.http ? `    RUNU kwriteconfig6 --file kioslaverc --group "Proxy Settings" --key httpProxy ${sq(`http://${px.http}`)} 2>/dev/null || true` : ""}
+${px.mode === "manual" && px.https ? `    RUNU kwriteconfig6 --file kioslaverc --group "Proxy Settings" --key httpsProxy ${sq(`http://${px.https}`)} 2>/dev/null || true` : ""}
 ${px.mode === "auto" && px.pacUrl ? `    RUNU kwriteconfig6 --file kioslaverc --group "Proxy Settings" --key "Proxy Config Script" ${sq(px.pacUrl)} 2>/dev/null || true` : ""}
     RUNU kwriteconfig6 --file kioslaverc --group "Proxy Settings" --key NoProxyFor ${sq(px.noProxy.join(","))} 2>/dev/null || true
 fi`;

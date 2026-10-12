@@ -27,3 +27,15 @@ jobs:
       - name: Test
         # Scoped to tests/ — bare `bun test` recurses into src-tarballs/.
         run: bun test tests/
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: viewer-dd cargo check
+        run: cargo check --locked
+        working-directory: viewer-dd
+
+      - name: viewer-dd cargo clippy
+        run: cargo clippy --locked
+        working-directory: viewer-dd

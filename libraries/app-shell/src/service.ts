@@ -6,9 +6,10 @@
 import { VmRegistry } from "../../vm-core/src/lifecycle/registry";
 import { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import { defaultSpec, DevTool, VmSpec } from "../../vm-core/src/config/schema";
+import { makeShare } from "../../vm-core/src/config/shares";
 import { CACHE_DIR, CLOUDIMG_DIR, CONFIG_DIR, DATA_DIR, ISO_DIR, VMS_DIR } from "../../vm-core/src/paths";
 import { detectAdapter, detectSession } from "../../host-int/src/detect";
-import { ViewerSession } from "../../host-int/src/session";
+import type { VmSession } from "../../provision/src/session";
 import { listUsbDevices } from "../../vm-core/src/usb/usb";
 import { runnerLogFiles, tailFile, guestJournal, guestJournalUnits } from "../../vm-core/src/logs";
 import { run, which } from "../../sys/src/exec";
@@ -18,18 +19,15 @@ import { readFile } from "node:fs/promises";
 import { mark } from "./startup-profile";
 import { VmMetricsSampler } from "./metrics";
 import type { ActionState, CreateForm, DoctorRow, HostInfo, Store, VmSummary } from "./store";
+import { SYNC_CHANNELS, type SyncId } from "../../vm-core/src/config/sync-channels";
+import type { SyncFormKey } from "./store";
 
-/** create/edit form sync fields → spec.sync keys. */
-const SYNC_FORM: [keyof CreateForm, keyof VmSpec["sync"]][] = [
-    ["syncTheme", "theme"], ["syncAccent", "accentColor"], ["syncContrast", "contrast"],
-    ["syncTimezone", "timezone"], ["syncLocale", "locale"], ["syncKeyboard", "keyboard"],
-    ["syncMonitors", "monitors"], ["syncHostWallpaper", "hostWallpaper"],
-    ["syncGit", "gitIdentity"], ["syncProxy", "proxy"], ["syncCa", "caCerts"],
-    ["syncAgent", "sshAgent"], ["syncShares", "shares"],
-];
+/** create/edit form sync fields → spec.sync keys — derived from the
+ *  channel registry so a new channel needs no edit here. */
+const SYNC_FORM: [SyncFormKey, SyncId][] = SYNC_CHANNELS.map((c) => [c.formKey, c.id]);
 
 function applySyncForm(spec: VmSpec, f: CreateForm): void {
-    SYNC_FORM.forEach(([fk, sk]) => { spec.sync[sk] = f[fk] as boolean; });
+    SYNC_FORM.forEach(([fk, sk]) => { spec.sync[sk] = f[fk]; });
 }
 
 export class CruiserService {
@@ -39,8 +37,12 @@ export class CruiserService {
     private handles = new Map<string, VmHandle>();
     private pollTimer: ReturnType<typeof setInterval> | null = null;
     private logTimer: ReturnType<typeof setInterval> | null = null;
-    private viewers = new Map<string, ViewerSession>();
+    private viewers = new Map<string, VmSession>();
     private viewerPending = new Map<string, Promise<void>>();
+    /** Per-VM action locks — ops on different VMs run concurrently; the
+     *  global `busy` flag is only for VM-agnostic actions (create/import/
+     *  doctor) and no longer freezes the whole UI during one VM's drain. */
+    private busyVms = new Set<string>();
     private metrics = new VmMetricsSampler();
     private refreshing = false;
     private snapCache = new Map<string, { names: string[]; at: number }>();
@@ -85,7 +87,7 @@ export class CruiserService {
         // Viewers are detached/unref'd processes that outlive us — never
         // SIGTERM them on teardown (closing the manager must not close the
         // user's console). open()'s stale-viewer reaper cleans orphans.
-        this.viewers.forEach((v) => v.detach().catch(() => {}));
+        this.viewers.forEach((v) => { v.disposeSyncs(); v.viewer.detach().catch(() => {}); });
         this.viewers.clear();
         // owned = stops with the app; ephemeral = stops AND deletes the vm dir.
         if (opts.sessionRestart) return;
@@ -161,8 +163,15 @@ export class CruiserService {
         opts: { done?: (r: T) => string; vm?: string; verb?: string } = {},
     ): Promise<T | undefined> {
         const st = this.store.getState();
-        if (st.busy) { st.setStatus(`${label} ignored — another action is still running`); return undefined; }
-        st.setBusy(true); st.setStatus(`${label}…`);
+        // Lock classes: opts.vm → serialized per VM (other VMs' ops still
+        // run); no vm → a "global" action serialized only against other
+        // globals. Global busy never blocks a per-VM action.
+        if (opts.vm ? this.busyVms.has(opts.vm) : st.busy) {
+            st.setStatus(`${label} ignored — another action is still running`);
+            return undefined;
+        }
+        if (opts.vm) this.busyVms.add(opts.vm); else st.setBusy(true);
+        st.setStatus(`${label}…`);
         if (opts.verb) st.setAction({ vm: opts.vm ?? null, verb: opts.verb, at: Date.now() });
         try {
             const r = await fn();
@@ -172,7 +181,7 @@ export class CruiserService {
             st.setStatus(`${label} failed: ${e instanceof Error ? e.message : e}`);
             return undefined;
         } finally {
-            st.setBusy(false);
+            if (opts.vm) this.busyVms.delete(opts.vm); else st.setBusy(false);
             st.setAction(null);
             this.refresh().catch(() => {});
         }
@@ -488,7 +497,10 @@ export class CruiserService {
 
     async start(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
-        await this.run(`start ${name}`, () => h.start(), { vm: name, verb: "starting" });
+        await this.run(`start ${name}`, async () => {
+            const { hostMirroredGuestMonitors } = await import("../../provision/src/monitors");
+            return h.start({ guestMonitors: await hostMirroredGuestMonitors(h.spec) });
+        }, { vm: name, verb: "starting" });
         // Boot → autologin → gnome-remote-desktop takes a while; open()'s
         // waitRdpPort polls for it in the background instead of holding
         // `busy`. headMode "app" has no freerdp viewer (waypipe is explicit).
@@ -584,9 +596,12 @@ export class CruiserService {
             const s = this.viewers.get(name)!;
             // Adopted sessions track no child — if their window died, drop
             // the stale entry and relaunch instead of focusing a ghost.
-            if (await s.windowGone()) { this.viewers.delete(name); void s.close(); }
-            else {
-                void s.focus();
+            if (await s.viewer.windowGone()) {
+                this.viewers.delete(name);
+                s.disposeSyncs();
+                void s.viewer.close();
+            } else {
+                void s.viewer.focus();
                 this.store.getState().setStatus(`${name} viewer raised`);
                 return;
             }
@@ -602,23 +617,12 @@ export class CruiserService {
         if (inflight) return inflight;
         const p = (async () => {
             try {
-                const s = new ViewerSession(h.spec);
-                await s.open();
-                if (this.viewers.has(name)) { await s.close(); return; }
+                const { openVmSession } = await import("../../provision/src/session");
+                const s = await openVmSession(h,
+                    { log: (m) => this.store.getState().setStatus(`${name}: ${m}`) });
+                if (this.viewers.has(name)) { s.disposeSyncs(); await s.viewer.close(); return; }
                 this.viewers.set(name, s);
-                const { SessionSyncs } = await import("../../provision/src/sync");
-                const syncs = new SessionSyncs(h, (m) => this.store.getState().setStatus(`${name}: ${m}`));
-                syncs.start();
-                const { FileSyncs } = await import("../../provision/src/filesync");
-                const fs = new FileSyncs(h, (m) => this.store.getState().setStatus(`${name}: ${m}`));
-                fs.start();
-                s.on("closed", () => fs.dispose());
-                // Wallpaper sync — fire-and-forget like a session one-shot; a
-                // dead agent or slow jimp decode mustn't delay the viewer.
-                void import("../../provision/src/wallpaper").then(({ ensureGuestWallpaper }) =>
-                    ensureGuestWallpaper(h, (m) => this.store.getState().setStatus(`${name}: ${m}`))
-                ).catch(() => {});
-                s.on("closed", () => { this.viewers.delete(name); syncs.dispose(); });
+                s.viewer.on("closed", () => { this.viewers.delete(name); });
             } finally {
                 this.viewerPending.delete(name);
             }
@@ -685,20 +689,8 @@ export class CruiserService {
         const ref = st.create.importRef.trim();
         if (!ref) { st.setStatus("paste a gist url/id or a config file path first"); return; }
         await this.run(`import ${ref}`, async () => {
-            const { existsSync } = await import("node:fs");
             const P = await import("../../vm-core/src/config/portable");
-            let doc, origin: VmSpec["origin"];
-            if (existsSync(ref)) {
-                doc = P.parsePortable(await readFile(ref, "utf-8"), undefined, ref);
-                origin = { kind: "file" as const, url: ref };
-            } else {
-                const { readGist } = await import("../../sys/src/gist");
-                const g = await readGist(ref);
-                const f = P.pickConfigFile(g.files);
-                doc = P.parsePortable(f.content, undefined, f.filename);
-                if (!doc.description && g.description) doc.description = g.description;
-                origin = { kind: "gist" as const, id: g.id, url: g.url };
-            }
+            const { doc, origin } = await P.loadPortableRef(ref);
             let name = doc.spec.name;
             for (let n = 1; this.handles.has(name); n++) name = `${doc.spec.name}-${n}`;
             const spec = doc.spec;
@@ -760,22 +752,8 @@ export class CruiserService {
             return;
         }
         await this.run(`pull config for ${name}`, async () => {
-            const o = h.spec.origin!;
             const P = await import("../../vm-core/src/config/portable");
-            let doc;
-            if (o.kind === "gist") {
-                const { readGist } = await import("../../sys/src/gist");
-                const g = await readGist(o.id ?? o.url ?? "");
-                const f = P.pickConfigFile(g.files);
-                doc = P.parsePortable(f.content, undefined, f.filename);
-                h.spec.origin = { kind: "gist", id: g.id, url: g.url };
-            } else {
-                doc = P.parsePortable(await readFile(o.url ?? "", "utf-8"), undefined, o.url);
-            }
-            const { spec, needsRestart } = P.mergePulledSpec(h.spec, doc.spec);
-            h.spec = VmSpec.parse(spec);
-            await h.saveSpec();
-            return needsRestart;
+            return (await P.pullConfigFromOrigin(h)).needsRestart;
         }, {
             done: (nr) => nr.length ? `pulled — applies at next boot: ${nr.join(", ")}` : "pulled — nothing boot-relevant changed",
             vm: name, verb: "pulling",
@@ -788,12 +766,6 @@ export class CruiserService {
         if (p) this.store.getState().setShareForm({ hostPath: p });
     }
 
-    private unusedShareTag(spec: VmSpec): string {
-        let i = 0;
-        while (spec.shares.some((s) => s.tag === `share${i}`)) i++;
-        return `share${i}`;
-    }
-
     async shareAdd(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
         const st = this.store.getState();
@@ -801,15 +773,12 @@ export class CruiserService {
         if (!f.hostPath.trim()) { st.setStatus("set a host path for the share first"); return; }
         await this.run(`add share`, async () => {
             const next = JSON.parse(JSON.stringify(h.spec)) as VmSpec;
-            next.shares.push({
+            next.shares.push(makeShare(next, {
                 hostPath: f.hostPath.trim(),
-                tag: this.unusedShareTag(next),
                 guestPath: f.guestPath.trim() || undefined,
                 mode: f.mode,
                 direction: f.direction,
-                readOnly: f.direction === "host-to-guest",
-                enabled: true, deletions: false,
-            });
+            }));
             h.spec = VmSpec.parse(next);
             await h.saveSpec();
             st.setShareForm({ hostPath: "", guestPath: "", open: false });

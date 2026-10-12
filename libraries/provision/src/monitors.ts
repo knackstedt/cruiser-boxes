@@ -8,6 +8,8 @@
 
 import type { MonitorInfo } from "../../host-int/src/types";
 import type { GuestMonitor } from "../../vm-core/src/qemu/args";
+import type { VmSpec } from "../../vm-core/src/config/schema";
+import { detectAdapter } from "../../host-int/src/detect";
 
 export interface GuestLayout {
     /** gpu outputs[] entries for the QEMU argv builder. */
@@ -18,6 +20,24 @@ export interface GuestLayout {
 
 /** Escape xml attr text. */
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+
+/**
+ * Guest virtio-gpu outputs[] for a spec — the host monitors selected by
+ * spec.display.monitors ("all" or a name list), mirrored into the guest so
+ * it gets one head per selected host display (dmabuf spawns one window per
+ * console; RDP viewers use them via /multimon). Best-effort: headless hosts
+ * or a failed probe yield undefined → buildArgs' single 1920x1080 output.
+ *
+ * This lives in provision (not vm-core's args builder) deliberately: the
+ * argv builder stays free of host-int so headless/CLI use never touches the
+ * display stack. Callers of h.start()/buildArgv() pass it via guestMonitors.
+ */
+export async function hostMirroredGuestMonitors(spec: VmSpec): Promise<GuestMonitor[] | undefined> {
+    const host = await detectAdapter().monitors().catch(() => [] as MonitorInfo[]);
+    const sel = spec.display.monitors;
+    const picked = sel === "all" ? host : host.filter((m) => sel.includes(m.name));
+    return picked.length ? guestLayoutFromHost(spec.name, picked).monitors : undefined;
+}
 
 /**
  * Build the guest layout mirroring `host` monitors (in xrandr order).

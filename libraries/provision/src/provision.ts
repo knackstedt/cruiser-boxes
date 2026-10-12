@@ -7,7 +7,7 @@ import { VmSpec } from "../../vm-core/src/config/schema";
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import { appendVmLog } from "../../vm-core/src/logs";
 import { detectAdapter } from "../../host-int/src/detect";
-import { guestLayoutFromHost } from "./monitors";
+import { guestLayoutFromHost, hostMirroredGuestMonitors } from "./monitors";
 import { provisionCloudimg } from "./cloudimg";
 import { ensureIso, runIsoInstall } from "./iso-install";
 import { waitForAgent, runGuestSetup } from "./guest-setup";
@@ -91,7 +91,7 @@ export async function provisionVmCloudimg(h: VmHandle, o: ProvisionOpts): Promis
     await h.saveSpec();
 
     log(h, o, "first boot with NoCloud seed (cloud-init provisioning)…");
-    await h.start({ mode: "install", install: { seedIso } });
+    await h.start({ mode: "install", install: { seedIso }, guestMonitors: await hostMirroredGuestMonitors(spec) });
 
     log(h, o, "waiting for guest agent (cloud-init is installing the desktop stack — first boot is slow)…");
     await waitForAgent(h, 25 * 60_000);
@@ -124,7 +124,7 @@ export async function provisionVmIso(h: VmHandle, o: ProvisionOpts): Promise<voi
     await h.saveSpec();
 
     log(h, o, "install complete — first normal boot…");
-    await h.start();
+    await h.start({ guestMonitors: await hostMirroredGuestMonitors(spec) });
     log(h, o, "waiting for guest agent…");
     // first boot of a fully installed desktop is slow (gdm/snap/agent init) —
     // the 26.04 desktop ISO took ~9min to a live agent
@@ -142,7 +142,7 @@ export async function provisionVmIso(h: VmHandle, o: ProvisionOpts): Promise<voi
 
 /** Re-run just the in-guest setup on an already-provisioned VM. */
 export async function reprovisionGuest(h: VmHandle, o: ProvisionOpts): Promise<void> {
-    if (!h.isRunning()) await h.start();
+    if (!h.isRunning()) await h.start({ guestMonitors: await hostMirroredGuestMonitors(h.spec) });
     await waitForAgent(h);
     const pw = o.password ?? "";
     if (!pw && !h.spec.credentials.passwordFile) throw new Error("no password on record — pass --password");

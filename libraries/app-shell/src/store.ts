@@ -4,8 +4,14 @@
 
 import { createStore } from "zustand/vanilla";
 import type { VmState } from "../../vm-core/src/lifecycle/vm";
+import { syncFormDefaults, type SyncFormKey } from "../../vm-core/src/config/sync-channels";
 
 export type { VmState };
+export type { SyncFormKey };
+
+/** The flat sync* fields — keys derive from SYNC_CHANNELS.formKey, so the
+ *  create form and spec.sync can never drift apart. */
+export type SyncFormFields = { [K in SyncFormKey]: boolean };
 
 /** A spec.shares entry as rendered on the vm detail screen. */
 export interface ShareRow {
@@ -50,7 +56,7 @@ export interface VmSummary {
     error?: string;
 }
 
-export interface CreateForm {
+export type CreateForm = SyncFormFields & {
     name: string;
     cpus: number;
     memMiB: number;
@@ -68,21 +74,8 @@ export interface CreateForm {
     autologin: boolean;            // DM autologin into the desktop at boot
     preset: string;                // standard|developer — developer reveals the devtools menu
     devtools: string[];            // DevTool ids selected in the developer preset
-    // host → guest sync (spec.sync.*) — the last four are off by default:
-    // they push host credentials/identity/trust into the guest
-    syncTheme: boolean;            // dark/light hint
-    syncAccent: boolean;           // accent color
-    syncContrast: boolean;         // high-contrast preference
-    syncTimezone: boolean;         // host timezone
-    syncLocale: boolean;           // host LANG
-    syncKeyboard: boolean;         // host keymap
-    syncMonitors: boolean;         // host monitor topology (GNOME guests)
-    syncHostWallpaper: boolean;    // host wallpaper as composite source
-    syncGit: boolean;              // ~/.gitconfig user.name/email
-    syncProxy: boolean;            // host proxy config
-    syncCa: boolean;               // host custom CA roots
-    syncAgent: boolean;            // ssh -R agent socket forward
-    syncShares: boolean;           // guest fstab/mount reconcile for spec.shares
+    // host → guest sync (spec.sync.*) fields come from SyncFormFields —
+    // the credential channels are off by default
     iso: string;                   // iso path/url
     importPath: string;            // imported: existing disk image (absolute)
     importRef: string;             // config import: gist url/id or .cruiser.* file path
@@ -242,9 +235,7 @@ const defaultCreate = (): CreateForm => ({
     method: "cloudimg", distro: "ubuntu", release: "26.04", desktop: "gnome",
     browser: "none", snap: false, extraFonts: false, autologin: true,
     preset: "standard", devtools: [],
-    syncTheme: true, syncAccent: true, syncContrast: true, syncTimezone: true,
-    syncLocale: true, syncKeyboard: true, syncMonitors: true, syncHostWallpaper: true,
-    syncGit: false, syncProxy: false, syncCa: false, syncAgent: false, syncShares: true,
+    ...syncFormDefaults(),
     iso: "", importPath: "", importRef: "", diskDir: "",
     username: "cruiser", password: "",
     memUnit: "GiB", vd: 0, usb: [],

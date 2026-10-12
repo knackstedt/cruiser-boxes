@@ -36,6 +36,13 @@ jobs:
             console.log(`version -> ${version}`);
           '
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build + stage viewer-dd
+        # native/dist/<plat>-<arch>/ is copied to <appdir>/native/ by the
+        # packager's game-native convention; ddViewerPath() probes it there.
+        run: bun run viewer-dd:stage
+
       - name: Package (deb + AppImage via draft release)
         # Formats come from build.linux.target in package.json; runtime from
         # downdraft.config.json ("node" — emit-tree + shipped node binary).

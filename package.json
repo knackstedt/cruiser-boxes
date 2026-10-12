@@ -10,6 +10,7 @@
     "dev": "draft dev",
     "cli": "bun run src/cli.ts",
     "toolchain": "bun run toolchain/build.mts",
+    "viewer-dd:stage": "bun run toolchain/stage-viewer-dd.mts",
     "lint": "oxlint",
     "test": "bun test tests/",
     "typecheck": "tsc --noEmit"

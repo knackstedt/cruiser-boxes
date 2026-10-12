@@ -17,10 +17,16 @@ import { spawnChild, which } from "../../sys/src/exec";
 
 export interface ViewerLaunch { child: ChildProcess; argv: string[] }
 
-/** Resolve the viewer-dd binary: packaged PATH lookup → repo target dirs. */
+/** Resolve the viewer-dd binary: PATH → packaged appdir → repo target dirs.
+ *  Releases stage it via the engine's game-native convention:
+ *  `toolchain/stage-viewer-dd.mts` drops it into native/dist/<plat>-<arch>/
+ *  and the packager copies that whole dir to <appdir>/native/, where
+ *  dirname(process.execPath) == appdir root anchors the lookup. */
 export async function ddViewerPath(): Promise<string | null> {
     const onPath = await which("viewer-dd");
     if (onPath) return onPath;
+    const packaged = join(dirname(process.execPath), "native", "viewer-dd");
+    if (existsSync(packaged)) return packaged;
     // dev: libraries/host-int/src → repo root
     const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
     const rels = ["viewer-dd/target/release/viewer-dd", "viewer-dd/target/debug/viewer-dd"];

@@ -19,5 +19,9 @@ vms/
 release/
 dd-assets/
 
+# Rust viewer build + release staging (toolchain/stage-viewer-dd.mts)
+viewer-dd/target/
+native/dist/
+
 # scratch
 .playwright-mcp/

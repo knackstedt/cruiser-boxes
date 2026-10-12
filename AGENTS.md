@@ -27,6 +27,13 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 - `.github/workflows/ci.yml` — typecheck + lint + `bun test tests/` on push/PR;
   reused by `release.yml` (tag `v*` → `draft release --target=linux` →
   deb + AppImage uploaded to a GitHub release; `-` in the tag = prerelease).
+  ci.yml also runs `cargo check --locked` + `cargo clippy --locked` on
+  `viewer-dd/`; release.yml runs `bun run viewer-dd:stage`
+  (toolchain/stage-viewer-dd.mts: `cargo build --release --locked` →
+  `native/dist/<plat>-<arch>/viewer-dd`) before packaging — the packager's
+  game-native convention copies that dir into `<appdir>/native/`, where
+  `dirname(process.execPath)` anchors `ddViewerPath()`'s probe
+  (PATH → packaged appdir → repo `viewer-dd/target/{release,debug}`).
 - CI does NOT use the sibling `file:` engine checkout —
   `.github/actions/downdraft-deps` rewrites `@downdraft/*` to the published
   npm version (`^0.3.0` by default). Engine changes must be **published to
@@ -36,10 +43,22 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 ## Layout
 
 - `src/native-entry.ts` — DownDraft app entry (bare `createNativeHost` +
-  `HtmlUiHost`; no GameModule/sim worker).
+  `HtmlUiHost`; no GameModule/sim worker). The env-gated dev/screenshot
+  harness (fake VM, route forcing, input script) lives in
+  `libraries/app-shell/src/dev-harness.ts` — the entry only calls
+  `initDevHarness`/`screenshotHostOpts`.
 - `src/cli.ts` — headless control surface (vm/usb/provision/host/doctor).
 - `libraries/vm-core` — VmSpec schema, QEMU argv builder, QMP/QGA clients
   (pure TS over unix sockets), lifecycle + reattach, disk ops, USB, rendernode.
+  vm-core is a LEAF: it never imports host-int/provision — guest monitor
+  topology is computed by the caller
+  (`provision/src/monitors.ts`'s `hostMirroredGuestMonitors`, gated on
+  `spec.display.monitors`) and passed to `start()`/`buildArgv()` via
+  `BuildOpts.guestMonitors`; headless/cli builds never touch the display
+  stack. `config/shares.ts` (`makeShare`) is the single share-entry builder
+  for the UI's shareAdd and the cli's --share/`vm share add`;
+  `config/portable.ts` owns `loadPortableRef` + `pullConfigFromOrigin`
+  (shared by import/`config pull` on both surfaces).
   `logs.ts` — the Logs screen's backends: run/ file tails (cruiser.log is
   tee'd from lifecycle + provision via `appendVmLog`; serial.log is attached
   on every boot) and guest journalctl with filters over QGA, falling back to
@@ -109,11 +128,16 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   `QT_QPA_PLATFORM=offscreen` in the QGA/ssh context — no DISPLAY/
   WAYLAND_DISPLAY means the Qt xcb plugin aborts and the `|| true` eats it,
   silently leaving the guest on BreezeLight.
-  `sync.ts` — the host→guest sync engine. `spec.sync` gates thirteen channels:
+  `sync.ts` — the host→guest sync engine. `spec.sync` gates thirteen channels
+  declared in the single-definition registry
+  `vm-core/src/config/sync-channels.ts` (id/env kill/spec default/create-form
+  key — schema.ts, store.ts, service.ts, and the cli all derive from it):
   nine default-on (theme, accentColor, contrast, timezone, locale, keyboard,
   monitors, hostWallpaper, shares) and four default-off security-sensitive ones
   (gitIdentity, proxy, caCerts, sshAgent). `SessionSyncs` (viewer lifetime,
-  wired in service.ensureViewer + cli `vm start|view`) runs one shared portal
+  wired by provision/session.ts's `openVmSession` — the shared
+  viewer+syncs+wallpaper kit used by service.ensureViewer AND cli
+  `vm start|view`) runs one shared portal
   watcher for theme/accent/contrast, an /etc/localtime fs.watch for timezone,
   session-start one-shots hash-gated via run/sync.state (locale/keyboard/
   monitors/git/proxy/ca — in-guest drift isn't clobbered unless host input
@@ -130,11 +154,16 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   + `ensureKeypair` key. direction "both" = `--update` push+pull (newest wins,
   no deletes); "host-to-guest" = authoritative push (+`--delete` when
   `deletions`). `FileSyncs` runs fs.watch pushes + a 30s pull interval for the
-  viewer session (service.ensureViewer); `vm filesync <name>` is one-shot,
+  viewer session (openVmSession); `vm filesync <name>` is one-shot,
   `--watch` holds it. Guest target = guestPath or ~/cruiser-sync/<basename>;
   prep script mkdirs targets and lazily installs guest rsync (cli-tools also
   ships it). Env: `CRUISER_FILESYNC=0` kills, `CRUISER_FILESYNC_{PUSH,PULL}_MS`
   tune the intervals.
+  `session.ts` — `openVmSession(h, opts)`: the shared session kit both
+  surfaces call (UI's ensureViewer + cli's start/view) — opens the
+  ViewerSession, starts SessionSyncs + FileSyncs bound to the "closed" hook,
+  and fires the managed-wallpaper pass. `disposeSyncs()` drops the engines
+  without closing the window.
   `stage.ts` — shared QGA-writeFile/ssh-scp guest staging extracted from
   wallpaper (pushFileToGuest).
   `wallpaper.ts` — managed guest wallpaper: jimp composite (lazy `importJimp`
@@ -163,6 +192,9 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   query-blockstats — no agent needed; net bytes/s via QGA /proc/net/dev;
   gpu util+mem via host `/proc/<qemu>/fdinfo` DRM client stats, absent in
   software mode). Rate sparks (disk/net) auto-scale bars to the window max.
+  CruiserService.run() locks per-VM (`busyVms`) when opts.vm is set — ops on
+  different VMs overlap; the global `busy` flag only covers VM-agnostic
+  actions (create/import/doctor).
 - `libraries/sys` — exec helpers (node:child_process — runs under bun AND node).
   `gist.ts` — GitHub Gist client over plain fetch: `readGist` accepts a bare
   id / gist URL / user/id (unauth read for public; token unlocks secret),
@@ -181,14 +213,17 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 - `toolchain/` — versions.json pins + build.mts (fetch/build into `opt/`).
 - `src-tarballs/` — adopted/downloaded source trees (gitignored, may be
   symlinks into ~/devvm/src).
-  **Local QEMU patch**: `ui/dbus-listener.c` calls
-  `qemu_console_listener_set_refresh(&ddl->dcl, 10)` after
-  `qemu_console_register_listener` — upstream dbus listeners are pinned to
-  GUI_REFRESH_INTERVAL_DEFAULT (30ms ≈ 33fps), which caps the dmabuf viewer
-  at ~33fps; 10ms lifts the cap to ~100fps. Rebuild: `ninja -C
-  ~/devvm/src/qemu-11.1.1/build qemu-system-x86_64 && ninja -C ... install`.
-  Keep this patch when refreshing the QEMU tree — a plain tarball re-extract
-  silently drops it.
+  **Local QEMU patch**: tracked at
+  `toolchain/patches/qemu-11.1.1-dbus-refresh-10ms.patch` and applied
+  idempotently by `build.mts` (versions.json `patches:` per component;
+  forward-applies, detects already-applied, hard-fails on drift so a tarball
+  re-extract can't silently drop it). It calls
+  `qemu_console_listener_set_refresh(&ddl->dcl, 10)` in `ui/dbus-listener.c`
+  after `qemu_console_register_listener` — upstream dbus listeners are
+  pinned to GUI_REFRESH_INTERVAL_DEFAULT (30ms ≈ 33fps), which caps the
+  dmabuf viewer at ~33fps; 10ms lifts the cap to ~100fps. Rebuild:
+  `ninja -C ~/devvm/src/qemu-11.1.1/build qemu-system-x86_64 && ninja -C ...
+  install`.
 
 ## Rules
 

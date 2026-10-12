@@ -29,6 +29,8 @@ interface Component {
     sha256?: string | null;
     kind: "tool" | "meson" | "qemu" | "cmake";
     prefix?: string;
+    /** patch files in toolchain/patches/, applied to the extracted tree. */
+    patches?: string[];
     dir?: string;
     mesonArgs?: string[];
     cmakeArgs?: string[];
@@ -132,10 +134,33 @@ async function sha256File(p: string): Promise<string> {
     return h.digest("hex");
 }
 
+/**
+ * Apply a component's toolchain/patches/ entries — idempotent: a clean
+ * forward dry-run applies for real; a clean REVERSE dry-run means it's
+ * already applied (skip); neither means upstream drifted — hard fail so a
+ * re-extract on a new release can't silently drop a local patch.
+ */
+async function applyPatches(name: string, src: string, c: Component): Promise<void> {
+    const ps = c.patches ?? [];
+    for (let i = 0; i < ps.length; i++) {
+        const p = ps[i]!;
+        const pf = join(ROOT, "toolchain", "patches", p);
+        const fwd = await run("patch", ["-p1", "--dry-run", "-d", src, "-i", pf], { noThrow: true });
+        if (fwd.code === 0) {
+            await run("patch", ["-p1", "-d", src, "-i", pf]);
+            msg("patch", `${name}: ${p}`);
+            continue;
+        }
+        const rev = await run("patch", ["-p1", "-R", "--dry-run", "-d", src, "-i", pf], { noThrow: true });
+        if (rev.code === 0) { msg("ok", `${name}: ${p} already applied`); continue; }
+        throw new Error(`${name}: patch ${p} doesn't apply and isn't already applied — upstream drifted:\n${(fwd.stdout + fwd.stderr).slice(-800)}`);
+    }
+}
+
 async function ensureSource(name: string, c: Component): Promise<string> {
     const dirName = c.dir ?? `${name === "spice-server" ? "spice" : name}-${c.version}`;
     const dst = join(SRC_DIR, dirName);
-    if (existsSync(dst) && !FORCE) return dst;
+    if (existsSync(dst) && !FORCE) { await applyPatches(name, dst, c); return dst; }
     await mkdir(SRC_DIR, { recursive: true });
     if (!c.url) throw new Error(`${name}: no url configured`);
     const tarball = join(SRC_DIR, `${dirName}${extFor(c.url)}`);
@@ -154,6 +179,7 @@ async function ensureSource(name: string, c: Component): Promise<string> {
         // Some archives extract to a differently-named root — find it.
         throw new Error(`${name}: expected ${dst} after extract — adjust url/dir naming`);
     }
+    await applyPatches(name, dst, c);
     return dst;
 }
 

@@ -11,10 +11,14 @@
 // so a hand-written minimal doc works as an import source.
 // ============================================================================
 
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import { parseVmSpec, type VmSpec } from "./schema";
+import { parseVmSpec, VmSpec } from "./schema";
+import { readGist } from "../../../sys/src/gist";
+import type { VmHandle } from "../lifecycle/vm";
 
 export const PORTABLE_FORMAT = "cruiser-vm";
 export const PORTABLE_VERSION = 1;
@@ -193,4 +197,47 @@ function mergeHostfwd(current: VmSpec, next: VmSpec): VmSpec["network"]["hostfwd
         if (!out.some((o) => o.guestPort === f.guestPort && o.proto === f.proto)) out.push(f);
     });
     return out;
+}
+
+// ── shared fetch/apply helpers (cli + app-shell consume these) ──
+
+/** Load a portable config from a local file path or a gist ref
+ *  (bare id / gist url / user/id). */
+export async function loadPortableRef(ref: string): Promise<{
+    doc: PortableVmConfig;
+    origin: NonNullable<VmSpec["origin"]>;
+}> {
+    if (existsSync(ref)) {
+        const text = await readFile(ref, "utf-8");
+        return { doc: parsePortable(text, undefined, ref), origin: { kind: "file", url: ref } };
+    }
+    const g = await readGist(ref);
+    const f = pickConfigFile(g.files);
+    const doc = parsePortable(f.content, undefined, f.filename);
+    if (!doc.description && g.description) doc.description = g.description;
+    return { doc, origin: { kind: "gist", id: g.id, url: g.url } };
+}
+
+/**
+ * Re-fetch the spec from spec.origin and merge it over the local spec
+ * (host-allocated ports, provisioned state, credentials preserved). Saves
+ * the spec; returns the boot-relevant sections that changed.
+ */
+export async function pullConfigFromOrigin(h: VmHandle): Promise<{ needsRestart: string[] }> {
+    const o = h.spec.origin;
+    if (!o) throw new Error(`${h.spec.name} has no origin — it wasn't imported. Push it first: 'vm gist push ${h.spec.name}'`);
+    let doc: PortableVmConfig;
+    if (o.kind === "gist") {
+        const g = await readGist(o.id ?? o.url ?? "");
+        const f = pickConfigFile(g.files);
+        doc = parsePortable(f.content, undefined, f.filename);
+        h.spec.origin = { kind: "gist", id: g.id, url: g.url };
+    } else {
+        if (!o.url || !existsSync(o.url)) throw new Error(`origin file ${o.url ?? "?"} is gone`);
+        doc = parsePortable(await readFile(o.url, "utf-8"), undefined, o.url);
+    }
+    const { spec, needsRestart } = mergePulledSpec(h.spec, doc.spec);
+    h.spec = VmSpec.parse(spec);
+    await h.saveSpec();
+    return { needsRestart };
 }

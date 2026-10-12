@@ -16,10 +16,11 @@
 // invoke this CLI.
 // ============================================================================
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { VmRegistry, VmSpec, VmHandle, HeadMode, defaultSpec } from "../libraries/vm-core/src/index";
+import { VmRegistry, VmSpec, VmHandle, HeadMode, defaultSpec, type ShareSpec } from "../libraries/vm-core/src/index";
+import { makeShare } from "../libraries/vm-core/src/config/shares";
 import type { ViewerSession } from "../libraries/host-int/src/session";
 import { listUsbDevices } from "../libraries/vm-core/src/usb/usb";
 import { createDisk } from "../libraries/vm-core/src/disk/ops";
@@ -120,32 +121,6 @@ async function holdViewer(s: ViewerSession): Promise<void> {
     process.off("SIGTERM", onSig);
 }
 
-/** Host → guest syncs for the viewer session's lifetime (portal appearance
- *  keys + timezone watchers, session one-shots, optional agent forward) —
- *  fire-and-forget so a missing dbus-monitor/agent can't fail the viewer
- *  open. Dies with the session via the "closed" hook. */
-function startSessionSyncs(h: VmHandle, s: ViewerSession): void {
-    void import("../libraries/provision/src/sync").then(({ SessionSyncs }) => {
-        const t = new SessionSyncs(h, (m) => console.log(`${h.spec.name}: ${m}`));
-        t.start();
-        s.on("closed", () => t.dispose());
-    }).catch(() => {});
-    void import("../libraries/provision/src/filesync").then(({ FileSyncs }) => {
-        const f = new FileSyncs(h, (m) => console.log(`${h.spec.name}: ${m}`));
-        f.start();
-        s.on("closed", () => f.dispose());
-    }).catch(() => {});
-}
-
-/** Push the managed wallpaper into the guest if inputs changed (or a prior
- *  apply only staged). Fire-and-forget — same nonblocking rules as
- *  startSessionSyncs: nothing here may delay or fail the viewer open. */
-function startWallpaperSync(h: VmHandle): void {
-    void import("../libraries/provision/src/wallpaper").then(({ ensureGuestWallpaper }) =>
-        ensureGuestWallpaper(h, (m) => console.log(`${h.spec.name}: ${m}`))
-    ).catch(() => {});
-}
-
 async function needVm(name?: string): Promise<VmHandle> {
     if (!name) { console.error("missing vm name"); usage(); }
     const h = registry.get(name);
@@ -153,47 +128,17 @@ async function needVm(name?: string): Promise<VmHandle> {
     return h;
 }
 
-/** Read a portable config from a local file or a gist ref. */
-async function loadPortableRef(ref: string): Promise<{
-    doc: import("../libraries/vm-core/src/config/portable").PortableVmConfig;
-    origin: NonNullable<VmSpec["origin"]>;
-}> {
-    const P = await import("../libraries/vm-core/src/config/portable");
-    if (existsSync(ref)) {
-        const text = await readFile(ref, "utf-8");
-        return { doc: P.parsePortable(text, undefined, ref), origin: { kind: "file", url: ref } };
-    }
-    const { readGist } = await import("../libraries/sys/src/gist");
-    const g = await readGist(ref);
-    const f = P.pickConfigFile(g.files);
-    const doc = P.parsePortable(f.content, undefined, f.filename);
-    if (!doc.description && g.description) doc.description = g.description;
-    return { doc, origin: { kind: "gist", id: g.id, url: g.url } };
-}
-
 /** `vm config pull` / `vm gist pull` — refetch the spec from its origin and
  *  merge over the local spec (ports/provisioned/credentials preserved). */
 async function configPull(h: VmHandle): Promise<void> {
-    const o = h.spec.origin;
-    if (!o) {
-        console.error(`${h.spec.name} has no origin — it wasn't imported. Push it first: 'vm gist push ${h.spec.name}'`);
+    const P = await import("../libraries/vm-core/src/config/portable");
+    let needsRestart: string[];
+    try {
+        ({ needsRestart } = await P.pullConfigFromOrigin(h));
+    } catch (e) {
+        console.error(e instanceof Error ? e.message : e);
         process.exit(1);
     }
-    const P = await import("../libraries/vm-core/src/config/portable");
-    let doc;
-    if (o.kind === "gist") {
-        const { readGist } = await import("../libraries/sys/src/gist");
-        const g = await readGist(o.id ?? o.url ?? "");
-        const f = P.pickConfigFile(g.files);
-        doc = P.parsePortable(f.content, undefined, f.filename);
-        h.spec.origin = { kind: "gist", id: g.id, url: g.url };
-    } else {
-        if (!o.url || !existsSync(o.url)) { console.error(`origin file ${o.url ?? "?"} is gone`); process.exit(1); }
-        doc = P.parsePortable(await readFile(o.url, "utf-8"), undefined, o.url);
-    }
-    const { spec, needsRestart } = P.mergePulledSpec(h.spec, doc.spec);
-    h.spec = VmSpec.parse(spec);
-    await h.saveSpec();
     console.log(`pulled config for ${h.spec.name}` +
         (needsRestart.length ? ` — changed: ${needsRestart.join(", ")}` : " — nothing boot-relevant changed"));
     if (h.isRunning() && needsRestart.length)
@@ -248,13 +193,12 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
                 const push = (raw: string, mode: "mount" | "copy", direction: "both" | "host-to-guest") => {
                     const [p, second] = raw.split(":");
                     if (!p) { console.error(`empty path in '${raw}'`); process.exit(2); }
-                    spec.shares.push({
+                    spec.shares.push(makeShare(spec, {
                         hostPath: p,
-                        tag: mode === "mount" ? (second ?? "hostshare") : `share${spec.shares.length}`,
-                        mode, direction, readOnly: direction === "host-to-guest",
-                        enabled: true, deletions: false,
+                        tag: mode === "mount" ? (second ?? "hostshare") : undefined,
+                        mode, direction,
                         ...(mode === "copy" && second ? { guestPath: second } : {}),
-                    });
+                    }));
                 };
                 if (a === "--share") push(argv[++i] ?? "", "mount", "both");
                 else if (a === "--share-ro") push(argv[++i] ?? "", "mount", "host-to-guest");
@@ -283,21 +227,22 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
                 if (!m.success) { console.error(`bad --mode '${mode}' — expected ${HeadMode.options.join("|")}`); process.exit(2); }
                 h.spec.display.headMode = m.data;
             }
-            await h.start();
+            const { hostMirroredGuestMonitors } = await import("../libraries/provision/src/monitors");
+            await h.start({ guestMonitors: await hostMirroredGuestMonitors(h.spec) });
             console.log(`${h.spec.name} started (pid ${h.pid()})`);
             // Match the UI's Start button: poll for guest login, then launch the
             // viewer and place its window per headMode. headMode "app" has no
             // freerdp viewer (waypipe is explicit).
             if (!has("--no-view") && h.spec.display.headMode !== "app") {
-                const { ViewerSession } = await import("../libraries/host-int/src/session");
-                const s = new ViewerSession(h.spec, { rdpWaitMs: 180_000 });
                 console.log(`waiting for ${h.spec.name} guest login (rdp :${h.spec.network.rdpPort ?? "–"})…`);
                 try {
-                    await s.open();
-                    startSessionSyncs(h, s);
-                    startWallpaperSync(h);
+                    const { openVmSession } = await import("../libraries/provision/src/session");
+                    const sess = await openVmSession(h, {
+                        rdpWaitMs: 180_000,
+                        log: (m) => console.log(`${h.spec.name}: ${m}`),
+                    });
                     console.log("viewer opened — close the window or ctrl+c to end the session");
-                    await holdViewer(s);
+                    await holdViewer(sess.viewer);
                 } catch (e) { console.error(`viewer: ${e instanceof Error ? e.message : e}`); }
             }
             break;
@@ -305,7 +250,13 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
         case "stop": { const h = await needVm(args[0]); const out = await h.stop(); console.log(out === "stopped" ? "stopped" : "still running — guest ignored shutdown; use kill"); break; }
         case "kill": { const h = await needVm(args[0]); await h.kill(); console.log("killed"); break; }
         case "status": { const h = await needVm(args[0]); console.log(await h.probe()); break; }
-        case "args": { const h = await needVm(args[0]); const b = await h.buildArgv(); console.log(b.argv.map((a) => (a.includes(" ") ? JSON.stringify(a) : a)).join(" \\\n  ")); break; }
+        case "args": {
+            const h = await needVm(args[0]);
+            const { hostMirroredGuestMonitors } = await import("../libraries/provision/src/monitors");
+            const b = await h.buildArgv({ guestMonitors: await hostMirroredGuestMonitors(h.spec) });
+            console.log(b.argv.map((a) => (a.includes(" ") ? JSON.stringify(a) : a)).join(" \\\n  "));
+            break;
+        }
         case "snapshots": { const h = await needVm(args[0]); console.table(await h.snapshots()); break; }
         case "snapshot": { const h = await needVm(args[0]); await h.snapshot(args[1] ?? `snap-${Date.now()}`); console.log("snapshotted"); break; }
         case "restore": { const h = await needVm(args[0]); await h.restoreSnapshot(args[1]!); console.log("restored"); break; }
@@ -404,7 +355,8 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
         case "import": {
             const ref = args[0];
             if (!ref) usage();
-            const { doc, origin } = await loadPortableRef(ref);
+            const P = await import("../libraries/vm-core/src/config/portable");
+            const { doc, origin } = await P.loadPortableRef(ref);
             const name = flagVal("--name") ?? doc.spec.name;
             if (registry.get(name)) {
                 console.error(`a VM named '${name}' already exists — pass --name to pick another`);
@@ -487,13 +439,13 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
                 const dir = flagVal("--direction") ?? (has("--ro") ? "host-to-guest" : "both");
                 const mode = flagVal("--mode") ?? "mount";
                 const next = JSON.parse(JSON.stringify(h.spec)) as VmSpec;
-                next.shares.push({
+                next.shares.push(makeShare(next, {
                     hostPath: hp,
-                    tag: flagVal("--tag") ?? `share${next.shares.length}`,
+                    tag: flagVal("--tag"),
                     guestPath: flagVal("--guest"),
-                    mode, direction: dir, readOnly: dir === "host-to-guest",
+                    mode: mode as ShareSpec["mode"], direction: dir as ShareSpec["direction"],
                     enabled: !has("--disabled"), deletions: has("--delete"),
-                } as VmSpec["shares"][number]);
+                }));
                 h.spec = VmSpec.parse(next);
                 await h.saveSpec();
                 console.log(`share '${h.spec.shares[h.spec.shares.length - 1]!.tag}' added` +
@@ -541,14 +493,11 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
         case "view": {
             const h = await needVm(args[0]);
             if (!h.isRunning()) { console.error(`'${h.spec.name}' is not running`); process.exit(1); }
-            const { ViewerSession } = await import("../libraries/host-int/src/session");
-            const s = new ViewerSession(h.spec);
-            console.log(`adapter: ${s.adapter.id}`);
-            await s.open();
-            startSessionSyncs(h, s);
-            startWallpaperSync(h);
+            const { openVmSession } = await import("../libraries/provision/src/session");
+            const sess = await openVmSession(h, { log: (m) => console.log(`${h.spec.name}: ${m}`) });
+            console.log(`adapter: ${sess.viewer.adapter.id}`);
             console.log("viewer launched — close the window or ctrl+c to end the session");
-            await holdViewer(s);
+            await holdViewer(sess.viewer);
             break;
         }
         default: usage();
