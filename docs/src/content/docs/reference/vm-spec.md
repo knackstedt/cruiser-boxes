@@ -50,7 +50,8 @@ Edit while the VM is stopped; the next `vm start` picks changes up.
 | `escapeShortcuts` | `[{keys:"ctrl+alt+delete", action:"host-desktop:1"}, {keys:"ctrl+alt+end", action:"command:{cli} vm kill {vm}"}]` | host keybindings while the viewer runs — keys normalized lowercase, action `name` or `name:arg` |
 | `dynamicResolution` | `true` | freerdp dynamic-resolution channel |
 | `wallpaper` | `{managed:true, position:"bottom-right"}` | cruiser-managed guest wallpaper — watermarked with the VM name + escape hints; `position`: corner/`center`/`off` (no watermark); `managed:false` leaves the guest alone; `source` = host image path (default: generated gradient) |
-| `sound` / `microphone` / `clipboard` | `true` | RDP redirection toggles |
+| `sound` / `microphone` | `true` | RDP redirection toggles |
+| `clipboard` | `true` | guest clipboard sync — freerdp `+clipboard` on the rdp viewer; on dmabuf, a `qemu-vdagent` chardev ↔ `viewer-dd` D-Bus bridge (text only). dmabuf needs a VM restart to add/remove the port. Wayland guests: spice-vdagent is X11-only — host→guest reaches native Wayland apps via KWin's bridge, but guest→host only sees X11/XWayland copies |
 | `grabKeyboard` | `false` | `false` → freerdp `-grab-keyboard` (host keeps global shortcuts — required for escape shortcuts); `true` → `+grab-keyboard` (guest gets all keys) |
 
 Escape actions: `host-desktop:<n>` · `desktop-cycle-left` ·

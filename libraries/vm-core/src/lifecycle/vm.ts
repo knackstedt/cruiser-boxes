@@ -22,6 +22,22 @@ import { run, spawnChild, virtiofsdPath } from "../../../sys/src/exec";
 
 export type VmState = "stopped" | "starting" | "running" | "stopping" | "paused" | "crashed" | "unknown";
 
+/** `-chardev help` output is a fixed list — cache the verdict per binary. */
+const vdagentCache = new Map<string, Promise<boolean>>();
+
+/** Does this qemu build have the qemu-vdagent chardev (CONFIG_SPICE_PROTOCOL)? */
+function qemuHasVdagent(qemu: string, ldLibraryPath: string): Promise<boolean> {
+    let p = vdagentCache.get(qemu);
+    if (!p) {
+        p = run(qemu, ["-chardev", "help"], {
+            noThrow: true,
+            env: { LD_LIBRARY_PATH: ldLibraryPath },
+        }).then((r) => /\bqemu-vdagent\b/.test(r.stdout + r.stderr)).catch(() => false);
+        vdagentCache.set(qemu, p);
+    }
+    return p;
+}
+
 export class VmHandle extends EventEmitter {
     spec: VmSpec;
     readonly paths: VmPaths;
@@ -134,6 +150,14 @@ export class VmHandle extends EventEmitter {
             opts.dbusRenderNode ??= (await pickDisplayRenderNode()) ?? undefined;
             if (!opts.dbusRenderNode)
                 throw new Error("display.viewer=dmabuf: no DRM render node found for the host display GPU");
+            // Clipboard rides a qemu-vdagent chardev → org.qemu.Display1.Clipboard.
+            // The backend needs CONFIG_SPICE_PROTOCOL — absent on some distro
+            // builds, so probe once per binary and warn instead of failing.
+            if (this.spec.display.clipboard) {
+                opts.vdagent ??= await qemuHasVdagent(this.toolchain.qemu, this.toolchain.ldLibraryPath);
+                if (!opts.vdagent)
+                    void appendVmLog(this.paths, "clipboard: qemu lacks the qemu-vdagent chardev — guest clipboard sync disabled");
+            }
         }
         // Mirror host monitor topology into virtio-gpu outputs[] so the guest
         // gets one head per selected host display (dmabuf viewer spawns one

@@ -16,6 +16,9 @@ libloading = "0.8"
 once_cell = "1"
 minifb = "0.29.0"
 raw-window-handle = "0.6.2"
+# host clipboard for the qemu-vdagent bridge — x11rb on X11, wl-clipboard-rs
+# under Wayland (both pure-rust; no wayland-client C libs)
+arboard = { version = "3.6", features = ["wl-clipboard-rs"] }
 
 [profile.release]
 opt-level = 3

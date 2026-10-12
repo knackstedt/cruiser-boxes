@@ -179,6 +179,8 @@ export const VmSpec = z.object({
         }).prefault({}),
         sound: z.boolean().default(true),
         microphone: z.boolean().default(true),
+        /** guest clipboard sync: freerdp +clipboard on the rdp viewer,
+         *  qemu-vdagent ↔ viewer-dd D-Bus bridge on the dmabuf viewer. */
         clipboard: z.boolean().default(true),
         grabKeyboard: z.boolean().default(false), // freerdp -grab-keyboard → host shortcuts win
     }).prefault({}),

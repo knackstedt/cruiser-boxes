@@ -27,6 +27,9 @@ export interface BuildOpts {
     /** display.viewer=dmabuf: rendernode QEMU exports scanouts from — must be
      *  the host display GPU (resolved by the lifecycle, auto-detected). */
     dbusRenderNode?: string;
+    /** Resolved by the lifecycle: display.clipboard AND the qemu binary has
+     *  the qemu-vdagent chardev backend (CONFIG_SPICE_PROTOCOL). */
+    vdagent?: boolean;
     extraArgs?: string[];
 }
 
@@ -144,6 +147,14 @@ export function buildArgs(
     push("-device", "virtio-serial-pci,id=ser0");
     push("-chardev", `socket,path=${paths.qgaSock},server=on,wait=off,id=qga`);
     push("-device", "virtserialport,chardev=qga,name=org.qemu.guest_agent.0");
+    // dmabuf clipboard: the vdagent chardev bridges the guest's spice-vdagent
+    // (com.redhat.spice.0) to QEMU's clipboard core, which -display dbus
+    // exposes to viewer-dd as org.qemu.Display1.Clipboard (text only).
+    // The RDP path uses freerdp +clipboard instead.
+    if (spec.display.viewer === "dmabuf" && spec.display.clipboard && opts.vdagent) {
+        push("-chardev", "qemu-vdagent,id=vda,clipboard=on,mouse=off");
+        push("-device", "virtserialport,chardev=vda,name=com.redhat.spice.0");
+    }
     // QMP monitor directly on a unix socket (the "-mon chardev=" form is deprecated in QEMU 11).
     push("-qmp", `unix:path=${paths.monitorSock},server=on,wait=off`);
 

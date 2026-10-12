@@ -63,6 +63,32 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   `cruiser:<vm>:<i>` ↔ guest output i ↔ host monitor i); guest scanouts are
   per-console dims — letterbox fit_viewport math is shared by render AND
   input (SetAbsPosition wants scanout px).
+  Clipboard (dmabuf): `-chardev qemu-vdagent,clipboard=on,mouse=off` +
+  virtserialport `com.redhat.spice.0` (args.ts, gated on display.clipboard +
+  a `-chardev help` probe — backend needs CONFIG_SPICE_PROTOCOL). Guest side
+  needs nothing extra: udev (70-spice-vdagentd.rules) auto-starts
+  spice-vdagentd when the port appears, spice-vdagent autostarts in the
+  session (needs a VM RESTART — the port can't hotplug into a running
+  virtio-serial spec). viewer-dd serves org.qemu.Display1.Clipboard ON the
+  input conn — QEMU binds its object tree to the LAST add_client conn, and
+  proxies Clipboard calls back to whatever conn called Register, so the
+  input conn is the only place it works. Protocol is symmetric
+  Register/Grab/Release/Request. Grab serials are a SHARED sequence
+  starting at 0 (NOT 1): QEMU resets it via our own Register call, and
+  spice-vdagentd silently drops any grab whose serial != its counter —
+  off-by-one = every grab discarded forever. fetch_max() incoming guest
+  serials so the next outgoing stays ahead of the guest's stream. QEMU
+  also BOUNCES the virtio port once per guest caps re-announce
+  (vdagent.c reset_serial → CHR_EVENT_CLOSED; settles after one
+  reconnect — "AIIEEE lost spice client connection" in the daemon log is
+  this, not a real failure). Our Request handler answers QEMU's SYNC
+  main-loop call — read parked state only, never block on the worker.
+  Host side = arboard (x11rb/wl-clipboard-rs) polled 300ms — no change
+  watcher exists; a parked `host_text` echo guard stops guest→host writes
+  re-grabbing back. Text only (text/plain;charset=utf-8) — QEMU's dbus
+  clipboard knows no other MIME. Guest caveat: spice-vdagent is X11-only,
+  so on Wayland sessions host→guest reaches native apps (KWin bridges the
+  X11 selection) but guest→host only sees X11/XWayland copies.
   `appearance.ts` — xdg-desktop-portal settings: `color-scheme`/`accent-color`/
   `contrast` reads (busctl, gdbus fallback) + one dbus-monitor SettingChanged
   watcher shared by all portal channels. `hoststate.ts` — the non-portal

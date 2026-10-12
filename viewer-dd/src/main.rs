@@ -143,6 +143,137 @@ impl UnixDmabuf2 {
     }
 }
 
+// ── clipboard bridging ──
+// QEMU's -chardev qemu-vdagent lands guest clipboard state in QEMU's
+// clipboard core; -display dbus exposes it as org.qemu.Display1.Clipboard.
+// The interface is symmetric: we serve an object at
+// /org/qemu/Display1/Clipboard, call Register on QEMU's skeleton (the call's
+// sender = our conn), and from then on QEMU invokes Grab/Release/Request on
+// our object while we invoke the same names on its side. Text only —
+// QEMU's dbus clipboard knows one MIME.
+const CLIP_MIME: &str = "text/plain;charset=utf-8";
+const SEL_CLIPBOARD: u32 = 0;
+
+enum ClipEv { GuestGrab(u32) }
+
+#[derive(Default)]
+struct ClipShared {
+    /// last text synced to/from the host clipboard — echo guard for the
+    /// poller (setting host text from a guest grab must not re-grab it)
+    host_text: String,
+    /// last text we grabbed toward QEMU — served to the guest by Request
+    serving: Option<String>,
+}
+
+struct ClipPeer {
+    st: std::sync::Arc<std::sync::Mutex<ClipShared>>,
+    serial: std::sync::Arc<AtomicU64>,
+    evtx: std::sync::mpsc::Sender<ClipEv>,
+}
+
+#[zbus::interface(name = "org.qemu.Display1.Clipboard")]
+impl ClipPeer {
+    /// QEMU resets the serial counter through our Register — both on our own
+    /// Register call and any later session reset.
+    fn register(&mut self) {
+        self.serial.store(0, Ordering::Relaxed);
+        eprintln!("[clip] serial reset by qemu");
+    }
+    fn unregister(&mut self) {}
+    /// Guest grabbed the clipboard — fetch the text on demand (worker thread,
+    /// not here: QEMU's call is fire-and-forget, our Request is not).
+    fn grab(&mut self, selection: u32, serial: u32, mimes: Vec<String>) {
+        self.serial.fetch_max(serial as u64, Ordering::Relaxed);
+        if selection == SEL_CLIPBOARD && mimes.iter().any(|m| m == CLIP_MIME) {
+            let _ = self.evtx.send(ClipEv::GuestGrab(selection));
+        }
+    }
+    fn release(&mut self, _selection: u32) {}
+    /// Guest paste while we own — QEMU blocks its main loop on this reply, so
+    /// it must never block on the worker: just read the parked text.
+    fn request(&mut self, selection: u32, mimes: Vec<String>) -> zbus::fdo::Result<(String, Vec<u8>)> {
+        if selection != SEL_CLIPBOARD || !mimes.iter().any(|m| m == CLIP_MIME) {
+            return Err(zbus::fdo::Error::InvalidArgs("unsupported selection or mime".into()));
+        }
+        match self.st.lock().unwrap().serving.clone() {
+            Some(t) => Ok((CLIP_MIME.to_string(), t.into_bytes())),
+            None => Err(zbus::fdo::Error::Failed("no clipboard data".into())),
+        }
+    }
+}
+
+/// Owns the host clipboard (arboard) and the outgoing half of the protocol.
+/// Register failure = no vdagent backend on this QEMU (or another client got
+/// there first) — log once and let the thread die; the flag off case is the
+/// same as not passing the chardev.
+fn clipboard_worker(iconn: std::sync::Arc<zbus::blocking::Connection>,
+                    st: std::sync::Arc<std::sync::Mutex<ClipShared>>,
+                    serial: std::sync::Arc<AtomicU64>,
+                    rx: std::sync::mpsc::Receiver<ClipEv>) {
+    let clip = match zbus::blocking::Proxy::new(&iconn, "org.qemu",
+            "/org/qemu/Display1/Clipboard", "org.qemu.Display1.Clipboard") {
+        Ok(p) => p,
+        Err(e) => { eprintln!("[clip] proxy: {e} — clipboard sync off"); return; }
+    };
+    if let Err(e) = clip.call::<_, _, ()>("Register", &()) {
+        eprintln!("[clip] register: {e} — clipboard sync off");
+        return;
+    }
+    let mut host = match arboard::Clipboard::new() {
+        Ok(c) => c,
+        Err(e) => { eprintln!("[clip] host clipboard: {e} — clipboard sync off"); return; }
+    };
+    eprintln!("[clip] registered — host↔guest text sync active");
+    let utf8 = vec![CLIP_MIME.to_string()];
+    loop {
+        // guest → host: QEMU reported a grab; pull the text by demand.
+        while let Ok(ev) = rx.try_recv() {
+            let ClipEv::GuestGrab(sel) = ev;
+            match clip.call::<_, _, (String, Vec<u8>)>("Request", &(sel, utf8.clone())) {
+                Ok((_mime, data)) => {
+                    let text = String::from_utf8_lossy(&data).into_owned();
+                    st.lock().unwrap().host_text = text.clone();
+                    match host.set_text(text.clone()) {
+                        Ok(()) => eprintln!("[clip] guest→host {} bytes", text.len()),
+                        Err(e) => eprintln!("[clip] host set_text: {e}"),
+                    }
+                }
+                Err(e) => eprintln!("[clip] request: {e}"),
+            }
+        }
+        // host → guest: arboard has no change watcher — poll + diff.
+        match host.get_text() {
+            Ok(t) => {
+                let changed = {
+                    let mut s = st.lock().unwrap();
+                    if t != s.host_text {
+                        s.host_text = t.clone();
+                        s.serving = Some(t);
+                        true
+                    } else { false }
+                };
+                if changed {
+                    // serial space starts at 0 and is shared with the guest:
+                    // spice-vdagentd discards grabs that aren't exactly its
+                    // counter — first grab after a reset must be 0
+                    let s = serial.fetch_add(1, Ordering::Relaxed) as u32;
+                    match clip.call::<_, _, ()>("Grab", &(SEL_CLIPBOARD, s, utf8.clone())) {
+                        Ok(()) => eprintln!("[clip] host→guest grabbed (serial {s})"),
+                        Err(e) => eprintln!("[clip] grab: {e}"),
+                    }
+                }
+            }
+            Err(arboard::Error::ContentNotAvailable) => {}
+            Err(e) => {
+                static CE: AtomicU64 = AtomicU64::new(0);
+                let n = CE.fetch_add(1, Ordering::Relaxed) + 1;
+                if n % 200 == 1 { eprintln!("[clip] host get_text x{n}: {e}"); }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+}
+
 // ── input forwarding: minifb events -> D-Bus Display1.Keyboard/Mouse ──
 // QEMU key numbers are XT scancodes (qnum table); mouse btns: 0=L,1=M,2=R.
 enum In { Move(u32, u32), Btn(u8, bool), Key(u32, bool) }
@@ -377,8 +508,10 @@ async fn main() -> Result<()> {
     let mut h = 1080usize;
     let mut offsets: Vec<(u32, u32)> = Vec::new();
     let mut probes: Vec<String> = Vec::new();
+    let mut clipboard = true;
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--no-clipboard" => clipboard = false,
             "--title" => title = args.next().unwrap_or(title),
             "--size" => {
                 if let Some(s) = args.next() {
@@ -486,12 +619,28 @@ async fn main() -> Result<()> {
 
     // One shared conn for every console's Keyboard/Mouse calls — built async
     // (blocking::build() would block_on inside the tokio runtime and panic),
-    // then wrapped for the sync input workers.
+    // then wrapped for the sync input workers. This is the LAST add_client
+    // channel, so QEMU binds its object tree to it — which makes it the only
+    // place the Clipboard skeleton is reachable: the clipboard peer object
+    // rides this conn too (QEMU proxies Clipboard calls back to the conn the
+    // Register came from).
+    let (clip_tx, clip_rx) = std::sync::mpsc::channel::<ClipEv>();
+    let clip_state = std::sync::Arc::new(std::sync::Mutex::new(ClipShared::default()));
+    let clip_serial = std::sync::Arc::new(AtomicU64::new(0));
     let si = open_dbus_channel(&monitor).context("input dbus channel")?;
     si.set_nonblocking(true)?;
-    let ia = connection::Builder::unix_stream(tokio::net::UnixStream::from_std(si)?)
-        .p2p().build().await.context("input p2p conn")?;
+    let mut ib = connection::Builder::unix_stream(tokio::net::UnixStream::from_std(si)?).p2p();
+    if clipboard {
+        ib = ib.serve_at("/org/qemu/Display1/Clipboard", ClipPeer {
+            st: clip_state.clone(), serial: clip_serial.clone(), evtx: clip_tx,
+        })?;
+    }
+    let ia = ib.build().await.context("input p2p conn")?;
     let iconn = std::sync::Arc::new(zbus::blocking::Connection::from(ia));
+    if clipboard {
+        let (ic, st, se) = (iconn.clone(), clip_state.clone(), clip_serial.clone());
+        std::thread::spawn(move || clipboard_worker(ic, st, se, clip_rx));
+    }
 
     // --probe diagnostics: fire raw SetAbsPosition calls after startup so the
     // guest's answer (listener mouse_set) reveals the real coordinate space.

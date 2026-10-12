@@ -107,6 +107,10 @@ elif command -v zypper >/dev/null; then zypper --non-interactive install $WANTED
 fi
 usermod -aG render "$U" || true
 systemctl enable --now qemu-guest-agent 2>/dev/null || true
+# spice-vdagentd owns the com.redhat.spice.0 port the dmabuf clipboard bridge
+# uses. udev (70-spice-vdagentd.rules) auto-starts it when the port exists;
+# this is a no-op on distros where the unit is static.
+systemctl enable --now spice-vdagentd.service 2>/dev/null || true
 systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd 2>/dev/null || true
 # firewalld blocks the RDP/ssh inbound on distros that ship it (fedora wkst)
 command -v firewall-cmd >/dev/null && {

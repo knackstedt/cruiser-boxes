@@ -92,6 +92,20 @@ describe("buildArgs", () => {
         void b;
     });
 
+    test("dmabuf viewer + clipboard → qemu-vdagent chardev + spice.0 port", () => {
+        const dd = (s: ReturnType<typeof defaultSpec>) => { s.display.viewer = "dmabuf"; };
+        const on = build(dd, { vdagent: true });
+        expect(on).toContain("qemu-vdagent,id=vda,clipboard=on,mouse=off");
+        expect(on).toContain("virtserialport,chardev=vda,name=com.redhat.spice.0");
+        // binary probe failed → args dropped (clipboard silently off)
+        const noprobe = build(dd, { vdagent: false });
+        expect(noprobe).not.toContain("qemu-vdagent");
+        // clipboard flag off / rdp viewer → no vdagent
+        expect(build((s) => { s.display.viewer = "dmabuf"; s.display.clipboard = false; }, { vdagent: true }))
+            .not.toContain("qemu-vdagent");
+        expect(build(undefined, { vdagent: true })).not.toContain("qemu-vdagent");
+    });
+
     test("install mode attaches iso+seed+kernel", () => {
         const a = build(undefined, {
             mode: "install",

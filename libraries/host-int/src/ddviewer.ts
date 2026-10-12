@@ -45,6 +45,7 @@ export async function launchDdViewer(spec: VmSpec, offsets?: string): Promise<Vi
     const { w, h } = spec.display.windowSize;
     const argv = [monitorSock, "--title", `cruiser:${spec.name}`, "--size", `${w}x${h}`];
     if (offsets) argv.push("--offsets", offsets);
+    if (!spec.display.clipboard) argv.push("--no-clipboard");
     const child = spawnChild(bin, argv, {
         detached: true,
         logFile: join(vmPaths(spec.name).run, "viewer-dd.log"),
