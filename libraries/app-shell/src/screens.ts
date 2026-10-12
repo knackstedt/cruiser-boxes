@@ -11,6 +11,14 @@ import type { CruiserState, VmSummary } from "./store";
 
 const CSS = `
 * { margin:0; padding:0; box-sizing:border-box; }
+/* Buttons/labels/chips should never enter text-selection drags — a >2px
+   move during a press would highlight a few characters and leave it stuck
+   until the next click (in-input selection is the editor's own path and
+   doesn't consult user-select). .logpre keeps real selection for log
+   copying; body is auto so hits canonicalized to .logpre itself pass the
+   parent check — html stays none so bare-body presses still can't select. */
+* { user-select:none; }
+body, .logpre, .logpre * { user-select:auto; }
 html, body { height:100%; }
 body { background:#10141a; color:#e8ecf1; font-family:'Cruiser Sans',sans-serif; overflow:hidden;
        display:flex; flex-direction:column; }

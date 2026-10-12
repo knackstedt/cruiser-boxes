@@ -8,6 +8,7 @@
 export class RenderGate {
     private last: string;
     private editing = false;
+    private pressed = false;
     private deferred = false;
 
     constructor(initial: string, private apply: (html: string) => void) {
@@ -15,10 +16,11 @@ export class RenderGate {
     }
 
     /** Push fresh markup. Identical markup is dropped; while a text field
-     *  holds focus the push is deferred so the focused node survives. */
+     *  holds focus — or a pointer press is in flight — the push is deferred
+     *  so the focused/pressed node survives the gesture. */
     render(html: string): void {
         if (html === this.last) return;
-        if (this.editing) { this.deferred = true; return; }
+        if (this.editing || this.pressed) { this.deferred = true; return; }
         this.deferred = false;
         this.last = html;
         try {
@@ -38,6 +40,18 @@ export class RenderGate {
      *  should re-render current state and push it through render(). */
     blur(): boolean {
         this.editing = false;
+        const d = this.deferred;
+        this.deferred = false;
+        return d;
+    }
+
+    /** A pointer press started on the panel — rebuilds wait for release so
+     *  the pressed element (and any focus the down lands) survives. */
+    pressDown(): void { this.pressed = true; }
+
+    /** Returns true when a render was deferred during the press. */
+    pressUp(): boolean {
+        this.pressed = false;
         const d = this.deferred;
         this.deferred = false;
         return d;

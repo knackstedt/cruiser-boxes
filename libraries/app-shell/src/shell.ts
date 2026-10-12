@@ -90,6 +90,14 @@ export class CruiserShell {
         this.lastRoute = `${store.getState().route}:${store.getState().selectedVm ?? ""}`;
         this.lastParts = mountParts;
         this.gate = new RenderGate(mountParts.html, () => this.applyHtml());
+        // Hold DOM rebuilds stable across a press: a store update that lands
+        // between pointerdown and the click (or the focus event it queues)
+        // would otherwise rebuild the DOM under the pressed element — killing
+        // a just-focused input or the click target itself.
+        this.host.onPressChange = (id) => {
+            if (id !== null) { this.gate.pressDown(); return; }
+            if (this.gate.pressUp()) queueMicrotask(() => this.pushRender());
+        };
         // Re-render on state change (cheap for now; targeted mutations later).
         let pending = false;
         this.unsub = store.subscribe(() => {
