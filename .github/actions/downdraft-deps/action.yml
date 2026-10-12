@@ -8,7 +8,7 @@ inputs:
   downdraft-version:
     description: "npm version spec for @downdraft/* packages"
     required: false
-    default: "^0.3.0"
+    default: "^0.4.2"
 runs:
   using: "composite"
   steps:
