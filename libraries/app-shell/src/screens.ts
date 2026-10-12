@@ -235,6 +235,7 @@ function vmRow(vm: VmSummary, s: CruiserState): string {
     return `<div class="vmrow">
         <div class="grow" data-action="nav" data-route="vm" data-vm="${esc(vm.name)}">
             <div class="vmname">${esc(vm.name)}</div>
+            ${vm.description ? `<div class="vmmode">${esc(vm.description)}</div>` : ""}
             <div class="vmspecs">${esc(specs)}</div>
             <div class="vmmode">${esc(mode)}${vm.provisioned ? "" : ` · <span style="color:#f0c98a">not provisioned</span>`}</div>
             ${diskParts ? `<div class="vmdisk">${esc(diskParts)}</div>` : ""}
@@ -333,6 +334,7 @@ function create(s: CruiserState): string {
         ${checkRow("Keyboard layout", "syncKeyboard", f.syncKeyboard, "host X11 keymap → guest input sources")}
         ${checkRow("Monitor topology", "syncMonitors", f.syncMonitors, "host layout + scale → guest monitors.xml (GNOME guests)")}
         ${checkRow("Host wallpaper", "syncHostWallpaper", f.syncHostWallpaper, "host's wallpaper as the composite source — an explicit wallpaper path always wins")}
+        ${checkRow("Share mounts", "syncShares", f.syncShares, "reconciles the shared-folders fstab inside the guest whenever the share list changes")}
         ${checkRow("Git identity", "syncGit", f.syncGit, "pushes host ~/.gitconfig user.name/email into the guest")}
         ${checkRow("Proxy settings", "syncProxy", f.syncProxy, "pushes host proxy config (gsettings/kioslaverc + /etc/environment) into the guest")}
         ${checkRow("Custom CA roots", "syncCa", f.syncCa, "pushes host /usr/local/share/ca-certificates + pki anchors into the guest trust store")}
@@ -343,10 +345,26 @@ function create(s: CruiserState): string {
                 `<div class="opt${f.usb.includes(d.key) ? " on" : ""}${d.writable ? "" : " dim"}" data-action="usb-toggle" data-key="${esc(d.key)}">${esc(d.label)} <span class="meta">${d.vendorId}:${d.productId}${d.writable ? "" : " · no access"}</span></div>`).join("")}</div>
                <div class="hint" style="margin-left:0">selected devices are passed straight to the guest at boot — "no access" needs a udev rule or group fix</div>`
             : `<div class="meta">no USB devices found</div>`}`;
+    const importSection = editing ? "" : `<div class="h2">Import a config</div>
+        <div class="row"><div class="lbl">Gist or file</div>
+            <input data-field="importRef" value="${esc(f.importRef)}" style="width:340px">
+            <div class="opt" data-action="import-config">Import</div></div>
+        <div class="hint">a gist url/id or a local <b>*.cruiser.{yaml,toml,json}</b> doc creates the VM
+            straight from the config — ports re-allocate, everything else (resources, shares, sync
+            channels, os profile) comes along. Export a VM from its detail page.</div>`;
     return `<div class="h1">${editing ? `Edit ${esc(s.editVm ?? "")}` : "New VM"}</div>
         ${hostsum}
+        ${importSection}
         ${editing
-            ? `<div class="row"><div class="lbl">Name</div><div class="meta" style="color:#e8ecf1">${esc(s.editVm ?? "")}</div></div>`
+            ? `<div class="row"><div class="lbl">Name</div><div class="meta" style="color:#e8ecf1">${esc(s.editVm ?? "")}</div></div>
+        <div class="row"><div class="lbl">Description</div>
+            <input data-field="vm-desc" value="${esc(s.vmDesc)}" style="width:320px"></div>
+        <div class="hint">exported with the config — a one-liner like "work dev box, cuda testing".</div>
+        <div class="row"><div class="lbl">Portable config</div>
+            ${btn("Export (yaml)", "vm-export", attr("vm", s.editVm ?? ""), "btn sm")}
+            ${btn("Push to gist", "vm-gist-push", attr("vm", s.editVm ?? ""), "btn sm")}
+            ${editTarget?.origin ? btn("Pull", "vm-gist-pull", attr("vm", s.editVm ?? ""), "btn sm") : ""}
+            <div class="meta">${editTarget?.origin ? esc(editTarget.origin) : "gist/file origin set on push or import"}</div></div>`
             : field("Name", "name", f.name)}
         <div class="h2">Resources</div>
         ${field("vCPUs", "cpus", f.cpus, 80)}
@@ -377,6 +395,7 @@ function create(s: CruiserState): string {
         <div class="hint">The base bundle — desktop, RDP/audio/GPU stack, flatpak + software store, fonts — is always installed.</div>`}`}
         ${syncSection}
         ${usbSection}
+        ${editing && editTarget ? shareSection(editTarget, s, editTarget.state === "running") : ""}
         ${editing ? "" : `<div class="h2">Credentials</div>
         ${field("Username", "username", f.username)}
         ${field("Password", "password", f.password)}`}
@@ -422,9 +441,62 @@ function vmDetail(s: CruiserState): string {
         <div style="margin:10px 0 18px">
             ${vmBtns(vm, s, true)}
         </div>
+        <div class="h2">Config</div>
+        <div class="row"><div class="lbl">Description</div>
+            <input data-field="vm-desc" value="${esc(s.vmDesc)}" style="width:320px">
+            <div class="opt" data-action="vm-desc-save" data-vm="${esc(vm.name)}">Save</div></div>
+        <div class="hint">exported with the config — a one-liner like "work dev box, cuda testing".</div>
+        <div class="row"><div class="lbl">Portable config</div>
+            ${btn("Export (yaml)", "vm-export", attr("vm", vm.name), "btn sm")}
+            ${btn("Push to gist", "vm-gist-push", attr("vm", vm.name), "btn sm")}
+            ${vm.origin ? btn("Pull", "vm-gist-pull", attr("vm", vm.name), "btn sm") : ""}
+            <div class="meta">${vm.origin ? esc(vm.origin) : "gist/file origin set on push or import"}</div></div>
+        ${shareSection(vm, s, up)}
         <div class="h2">Snapshots</div>
         ${snapSection}
         <div style="margin-top:24px">${btn("‹ VMs", "nav", attr("route", "home"), "btn dim")}</div>`;
+}
+
+/** The shares list + add form on the vm detail screen. */
+function shareSection(vm: VmSummary, s: CruiserState, up: boolean): string {
+    const sf = s.shareForm;
+    const opt = (field: string, value: string, label: string, cur: string) =>
+        `<div class="opt${cur === value ? " on" : ""}" data-action="share-form" data-field="${field}" data-value="${value}">${esc(label)}</div>`;
+    const rows = vm.shares.length ? vm.shares.map((sh) => {
+        const mp = sh.guestPath ?? (sh.mode === "copy"
+            ? `~/cruiser-sync/${sh.hostPath.replace(/\/+$/, "").split("/").pop() ?? sh.tag}`
+            : `/mnt/${sh.tag}`);
+        const chip = (field: string, value: string, label: string, on: boolean) =>
+            `<div class="opt${on ? " on" : ""}" data-action="share-attr" data-vm="${esc(vm.name)}" data-idx="${sh.idx}" data-field="${field}" data-value="${value}">${esc(label)}</div>`;
+        return `<div class="docrow">
+            ${chip("enabled", String(!sh.enabled), sh.enabled ? "on" : "off", sh.enabled)}
+            <div style="flex:1;min-width:0">${esc(sh.hostPath)} → ${esc(mp)}
+                <div class="fix">${esc(sh.tag)} · ${sh.mode === "copy" ? "copy (rsync)" : "mount (virtiofs/9p)"}${sh.deletions ? " · --delete" : ""}</div></div>
+            ${chip("direction", "both", "h↔g", sh.direction === "both")}
+            ${chip("direction", "host-to-guest", "h→g", sh.direction === "host-to-guest")}
+            ${chip("mode", "mount", "mount", sh.mode === "mount")}
+            ${chip("mode", "copy", "copy", sh.mode === "copy")}
+            <div class="opt" data-action="share-rm" data-vm="${esc(vm.name)}" data-idx="${sh.idx}">✕</div>
+        </div>`;
+    }).join("") : `<div class="meta">no shares yet</div>`;
+    return `<div class="h2">Shared folders &amp; file sync</div>
+        <div class="hint" style="margin-left:0"><b>mount</b> shows the real host folder inside the guest
+            (virtiofs/9p — applied at boot; fstab reconciles on each session). <b>copy</b> rsyncs real
+            copies — works for single files too, and applies live with no restart.</div>
+        ${rows}
+        <div class="row" style="margin-top:10px"><div class="lbl">Host path</div>
+            <input data-field="share-hostPath" value="${esc(sf.hostPath)}" style="width:280px">
+            <div class="opt" data-action="share-pick">Browse…</div></div>
+        <div class="row"><div class="lbl">Guest path</div>
+            <input data-field="share-guestPath" value="${esc(sf.guestPath)}" style="width:280px">
+            <div class="meta">${sf.mode === "mount" ? "mountpoint — default /mnt/<tag>" : "destination dir — default ~/cruiser-sync/<name>"}</div></div>
+        <div class="row"><div class="lbl">Mode</div><div class="opts">
+            ${opt("mode", "mount", "mount", sf.mode)}${opt("mode", "copy", "copy", sf.mode)}</div></div>
+        <div class="row"><div class="lbl">Direction</div><div class="opts">
+            ${opt("direction", "both", "h↔g both", sf.direction)}${opt("direction", "host-to-guest", "host→guest only", sf.direction)}</div></div>
+        <div style="margin:8px 0 18px">${btn("Add share", "share-add", attr("vm", vm.name))}
+            ${vm.shares.some((x) => x.mode === "copy" && x.enabled) && up
+                ? btn("Sync now", "filesync-now", attr("vm", vm.name), "btn dim") : ""}</div>`;
 }
 
 // ── logs ──

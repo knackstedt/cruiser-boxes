@@ -154,7 +154,9 @@ export function buildArgs(
     });
 
     // ── host shares ──
-    spec.shares.forEach((s, i) => {
+    // Mount-mode shares only — copy-mode entries are synced by FileSyncs
+    // over ssh and get no fsdev.
+    spec.shares.filter((s) => s.enabled !== false && s.mode !== "copy").forEach((s, i) => {
         if (opts.virtiofs) {
             const sock = `${paths.vfsSock}.${i}`;
             virtiofsd.push({ socket: sock, sharedDir: s.hostPath, tag: s.tag });

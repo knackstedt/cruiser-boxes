@@ -58,11 +58,36 @@ export const UsbDeviceRef = z.object({
 });
 export type UsbDeviceRef = z.infer<typeof UsbDeviceRef>;
 
+/**
+ * Host↔guest file sharing entry. Two transports:
+ *
+ *   mount — virtiofs (9p fallback) live mount baked into QEMU argv + guest
+ *           fstab. direction "both" = rw share, "host-to-guest" = ro mount.
+ *           Applies at boot (no fsdev hotplug); the session "shares" channel
+ *           reconciles guest fstab/mounts so it's ready on first boot after.
+ *   copy  — rsync over the ssh forward, run by FileSyncs for the viewer
+ *           session's lifetime (fs.watch push + interval pull). Works for
+ *           single files, applies live with no restart.
+ */
 export const ShareSpec = z.object({
     hostPath: z.string(),
     // mount_tag goes into fstab + qemu -virtfs unquoted — safe charset only.
     tag: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/).default("hostshare"),
+    /** Guest-side path: mountpoint for mount mode (default /mnt/<tag>),
+     *  destination dir/file for copy mode (default ~/cruiser-sync/<base>). */
+    guestPath: z.string().optional(),
+    mode: z.enum(["mount", "copy"]).default("mount"),
+    /** "both" = guest writes propagate back; "host-to-guest" = read-only
+     *  mount / push-only copy. */
+    direction: z.enum(["both", "host-to-guest"]).optional(),
+    /** Legacy alias kept for old vm.json — direction wins when both set. */
     readOnly: z.boolean().default(false),
+    enabled: z.boolean().default(true),
+    /** copy mode + host-to-guest only: rsync --delete (mirror semantics). */
+    deletions: z.boolean().default(false),
+}).transform((s) => {
+    const direction = s.direction ?? (s.readOnly ? "host-to-guest" : "both");
+    return { ...s, direction, readOnly: direction === "host-to-guest" };
 });
 export type ShareSpec = z.infer<typeof ShareSpec>;
 
@@ -76,6 +101,22 @@ export type HostFwd = z.infer<typeof HostFwd>;
 export const VmSpec = z.object({
     version: z.literal(1).default(1),
     name: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
+
+    /** Free text — shown in the UI and exported with portable configs. */
+    description: z.string().default(""),
+
+    /**
+     * Where this spec was imported from — set by `vm import`/`vm gist push`
+     * so `vm config pull` can refetch and re-apply it. Not set for VMs
+     * created locally.
+     */
+    origin: z.object({
+        kind: z.enum(["gist", "file"]),
+        /** gist id (kind=gist). */
+        id: z.string().optional(),
+        /** source reference (gist url / file path) for display + refetch. */
+        url: z.string().optional(),
+    }).optional(),
 
     resources: z.object({
         cpus: z.number().int().min(1).max(64).default(4),
@@ -175,6 +216,10 @@ export const VmSpec = z.object({
         caCerts: z.boolean().default(false),
         /** host SSH agent socket → guest via a held ssh -R forward. */
         sshAgent: z.boolean().default(false),
+        /** reconcile spec.shares mounts inside the guest (fstab + mount) —
+         *  makes shares added while a VM was stopped work on the next boot
+         *  without a re-provision. */
+        shares: z.boolean().default(true),
     }).prefault({}),
 
     shares: z.array(ShareSpec).default([]),

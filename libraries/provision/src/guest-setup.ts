@@ -11,7 +11,7 @@ import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { guestAgentContext } from "../../vm-core/src/logs";
 import { profileFromSpec, resolvePackages, resolveFlatpaks } from "./packages";
-import { guestSyncScript, type HostSnapshot } from "./sync";
+import { guestSyncScript, guestSharesScript, type HostSnapshot } from "./sync";
 
 /**
  * Wait until the QEMU guest agent answers (guest booted + agent installed).
@@ -115,22 +115,9 @@ command -v firewall-cmd >/dev/null && {
     firewall-cmd --reload >/dev/null 2>&1 || true
 }`;
 
-    const shareSection = `# host shares — virtiofs when a virtio-fs device is bound, 9p otherwise.
-# (virtiofs devices have no mount_tag sysfs attr; driver binding is the test.)
-SHARE_FSTYPE=9p; ls -d /sys/bus/virtio/drivers/virtiofs/virtio* >/dev/null 2>&1 && SHARE_FSTYPE=virtiofs
-${spec.shares.map((s) => `mkdir -p ${sq(`/mnt/${s.tag}`)}
-if [ "$SHARE_FSTYPE" = virtiofs ]; then
-    grep -q ${sq(` /mnt/${s.tag} `)} /etc/fstab || tee -a /etc/fstab <<'FSTAB'
-${s.tag} /mnt/${s.tag} virtiofs rw,nofail,_netdev,x-systemd.automount 0 0
-FSTAB
-    mount -t virtiofs ${sq(s.tag)} ${sq(`/mnt/${s.tag}`)} 2>/dev/null || true
-else
-    grep -q ${sq(` /mnt/${s.tag} `)} /etc/fstab || tee -a /etc/fstab <<'FSTAB'
-${s.tag} /mnt/${s.tag} 9p trans=virtio,version=9p2000.L,msize=262144,_netdev,x-systemd.automount,x-systemd.idle-timeout=60,nofail 0 0
-FSTAB
-    mount -t 9p -o trans=virtio,version=9p2000.L ${sq(s.tag)} ${sq(`/mnt/${s.tag}`)} 2>/dev/null || true
-fi`).join("\n")}
-systemctl daemon-reload || true`;
+    // Managed fstab block + mounts — the same reconcile the session "shares"
+    // channel runs, so provision and post-edit converge identically.
+    const shareSection = guestSharesScript(spec);
 
     const dmSection = gnome ? `# GDM autologin (console seat; headless RDP seat is separate).
 # debian/ubuntu keep custom.conf under /etc/gdm3, fedora under /etc/gdm.

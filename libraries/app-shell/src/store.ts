@@ -7,6 +7,18 @@ import type { VmState } from "../../vm-core/src/lifecycle/vm";
 
 export type { VmState };
 
+/** A spec.shares entry as rendered on the vm detail screen. */
+export interface ShareRow {
+    idx: number;                   // index into spec.shares
+    tag: string;
+    hostPath: string;
+    guestPath?: string;
+    mode: string;                  // "mount" | "copy"
+    direction: string;             // "both" | "host-to-guest"
+    enabled: boolean;
+    deletions: boolean;
+}
+
 export interface VmSummary {
     name: string;
     state: VmState;
@@ -19,6 +31,9 @@ export interface VmSummary {
     rdpPort?: number;
     provisioned?: string;          // method or undefined
     persist: string;
+    description: string;           // spec.description
+    origin?: string;               // "gist:<id>" / "file:<path>" when imported/pushed
+    shares: ShareRow[];            // spec.shares
     snapshots: string[];
     vd: number;                    // display.virtualDesktop (edit form)
     usbKeys: string[];             // spec.usb.autoAttach as "vid:pid:serial" keys
@@ -63,8 +78,10 @@ export interface CreateForm {
     syncProxy: boolean;            // host proxy config
     syncCa: boolean;               // host custom CA roots
     syncAgent: boolean;            // ssh -R agent socket forward
+    syncShares: boolean;           // guest fstab/mount reconcile for spec.shares
     iso: string;                   // iso path/url
     importPath: string;            // imported: existing disk image (absolute)
+    importRef: string;             // config import: gist url/id or .cruiser.* file path
     diskDir: string;               // "" = default (vms dir); else disk file's dir
     username: string;
     password: string;              // kept in-memory only; writePasswordFile persists to 0600
@@ -170,6 +187,17 @@ export interface CruiserState {
     /** Name of the VM being edited in the create wizard (edit mode), or null. */
     editVm: string | null;
     logs: LogsState;
+    /** Description edit buffer on the vm detail screen (loaded on nav). */
+    vmDesc: string;
+    /** The share-add form on the vm detail screen. */
+    shareForm: ShareForm;
+}
+
+export interface ShareForm {
+    hostPath: string;
+    guestPath: string;
+    mode: "mount" | "copy";
+    direction: "both" | "host-to-guest";
 }
 
 export interface CruiserActions {
@@ -191,6 +219,8 @@ export interface CruiserActions {
     setConfirm(c: string | null): void;
     setEditVm(name: string | null): void;
     setLogs(p: Partial<LogsState>): void;
+    setVmDesc(d: string): void;
+    setShareForm(p: Partial<ShareForm>): void;
 }
 
 export type CruiserStore = CruiserState & CruiserActions;
@@ -209,8 +239,8 @@ const defaultCreate = (): CreateForm => ({
     preset: "standard", devtools: [],
     syncTheme: true, syncAccent: true, syncContrast: true, syncTimezone: true,
     syncLocale: true, syncKeyboard: true, syncMonitors: true, syncHostWallpaper: true,
-    syncGit: false, syncProxy: false, syncCa: false, syncAgent: false,
-    iso: "", importPath: "", diskDir: "",
+    syncGit: false, syncProxy: false, syncCa: false, syncAgent: false, syncShares: true,
+    iso: "", importPath: "", importRef: "", diskDir: "",
     username: "cruiser", password: "",
     memUnit: "GiB", vd: 0, usb: [],
 });
@@ -234,6 +264,8 @@ export function createCruiserStore() {
         confirm: null,
         editVm: null,
         logs: defaultLogs(),
+        vmDesc: "",
+        shareForm: { hostPath: "", guestPath: "", mode: "mount", direction: "both" },
         setRoute: (route, vm = null) => set({ route, selectedVm: vm, confirm: null, editVm: null }),
         setVms: (vms) => set({ vms }),
         setStatus: (status) => set({ status }),
@@ -250,6 +282,8 @@ export function createCruiserStore() {
         setConfirm: (confirm) => set({ confirm }),
         setEditVm: (editVm) => set({ editVm }),
         setLogs: (p) => set((s) => ({ logs: { ...s.logs, ...p } })),
+        setVmDesc: (vmDesc) => set({ vmDesc }),
+        setShareForm: (p) => set((s) => ({ shareForm: { ...s.shareForm, ...p } })),
         toggleUsb: (key) => set((s) => ({
             create: {
                 ...s.create,

@@ -65,6 +65,14 @@ if (process.env.CRUISER_FAKE_VM) {
         name: "fake-runner", state: "running", gpuMode: "venus", headMode: "windowed",
         cpus: 4, memMiB: 8192, diskGiB: 64, sshPort: 4022, rdpPort: 43389,
         provisioned: "cloudimg", persist: "daemonize", snapshots: [], vd: 0, usbKeys: [],
+        description: "fake VM for the screenshot harness",
+        origin: "gist:0123456789abcdef0123456789abcdef",
+        shares: [
+            { idx: 0, tag: "src", hostPath: "/home/u/dev/project", mode: "mount", direction: "both", enabled: true, deletions: false },
+            { idx: 1, tag: "assets", hostPath: "/home/u/assets", guestPath: "/opt/assets", mode: "mount", direction: "host-to-guest", enabled: true, deletions: false },
+            { idx: 2, tag: "notes", hostPath: "/home/u/notes.md", mode: "copy", direction: "both", enabled: true, deletions: false },
+            { idx: 3, tag: "secrets", hostPath: "/home/u/.ssh/config", mode: "copy", direction: "host-to-guest", enabled: false, deletions: false },
+        ],
         cpu: [12, 30, 55, 22, 40, 68, 35], mem: [40, 44, 60, 38, 52, 55, 48],
     };
     const orig = store.getState().setVms;

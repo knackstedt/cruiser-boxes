@@ -155,6 +155,11 @@ export class CruiserShell {
                 while (st().vms.some((v) => v.name === `vm-${n}`)) n++;
                 st().setField("name", `vm-${n}`);
             }
+            if (route === "vm") {
+                // Seed the description edit buffer from the selected VM.
+                const vm = st().vms.find((v) => v.name === d.vm);
+                if (vm) st().setVmDesc(vm.description);
+            }
             if (route === "settings") void svc.refreshSettings();
         });
         this.host.onAction("set-field", (d) => {
@@ -210,7 +215,9 @@ export class CruiserShell {
                 syncMonitors: sy.monitors ?? true, syncHostWallpaper: sy.hostWallpaper ?? true,
                 syncGit: sy.gitIdentity ?? false, syncProxy: sy.proxy ?? false,
                 syncCa: sy.caCerts ?? false, syncAgent: sy.sshAgent ?? false,
+                syncShares: sy.shares ?? true,
             });
+            st().setVmDesc(vm.description);
             st().setRoute("create");
             st().setEditVm(vm.name);
             void svc.refreshCreateExtras();
@@ -227,6 +234,21 @@ export class CruiserShell {
             if (d.vm && d.snap && this.armed(`vm-restore:${d.vm}:${d.snap}`)) svc.restoreSnapshot(d.vm, d.snap);
         });
         this.host.onAction("doctor", () => { svc.runDoctor(); });
+        this.host.onAction("import-config", () => { void svc.importConfig(); });
+        this.host.onAction("vm-export", (d) => { if (d.vm) void svc.exportConfig(d.vm); });
+        this.host.onAction("vm-gist-push", (d) => { if (d.vm) void svc.gistPush(d.vm); });
+        this.host.onAction("vm-gist-pull", (d) => { if (d.vm) void svc.gistPull(d.vm); });
+        this.host.onAction("vm-desc-save", (d) => { if (d.vm) void svc.saveDescription(d.vm); });
+        this.host.onAction("share-pick", () => { void svc.pickShareDir(); });
+        this.host.onAction("share-add", (d) => { if (d.vm) void svc.shareAdd(d.vm); });
+        this.host.onAction("share-rm", (d) => { if (d.vm) void svc.shareRemove(d.vm, Number(d.idx)); });
+        this.host.onAction("share-attr", (d) => {
+            if (d.vm && d.field) void svc.shareAttr(d.vm, Number(d.idx), String(d.field), String(d.value ?? ""));
+        });
+        this.host.onAction("share-form", (d) => {
+            if (d.field) st().setShareForm({ [d.field]: d.value } as never);
+        });
+        this.host.onAction("filesync-now", (d) => { if (d.vm) void svc.filesyncNow(d.vm); });
         this.host.onAction("log-set", (d) => {
             const f = d.field;
             if (!f) return;
@@ -266,6 +288,13 @@ export class CruiserShell {
                 (st.logs as unknown as Record<string, unknown>)[field.slice(4)] = ev.v;
                 if (this.logInputTimer) clearTimeout(this.logInputTimer);
                 this.logInputTimer = setTimeout(() => { void this.svc.refreshLogs(); }, 700);
+                return;
+            }
+            // vm-desc / share-* bind outside the create form — write directly
+            // (a re-render would destroy the focused input).
+            if (field === "vm-desc") { this.store.getState().setVmDesc(String(ev.v)); return; }
+            if (field.startsWith("share-")) {
+                this.store.getState().setShareForm({ [field.slice(6)]: ev.v } as never);
                 return;
             }
             const cur = this.store.getState().create;

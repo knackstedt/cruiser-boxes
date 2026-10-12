@@ -81,6 +81,14 @@ describe("buildArgs", () => {
         const vfs = buildArgs(spec2, vmPaths("t3"), { virtiofs: true }, env);
         expect(vfs.argv.join("\n")).toContain("vhost-user-fs-pci");
         expect(vfs.virtiofsd[0].sharedDir).toBe("/x");
+        // copy-mode + disabled shares get no fsdev — they sync over rsync.
+        const spec3 = defaultSpec("t4");
+        spec3.shares.push(
+            { hostPath: "/c", tag: "copied", readOnly: false, mode: "copy" } as never,
+            { hostPath: "/d", tag: "off", readOnly: false, enabled: false } as never);
+        const none = buildArgs(spec3, vmPaths("t4"), { virtiofs: false }, env);
+        expect(none.argv.join("\n")).not.toContain("9p-pci");
+        expect(none.virtiofsd).toEqual([]);
         void b;
     });
 

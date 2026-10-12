@@ -49,13 +49,13 @@ export type { ColorScheme };
 export type SyncId =
     | "theme" | "accentColor" | "contrast" | "timezone" | "locale" | "keyboard"
     | "monitors" | "hostWallpaper"
-    | "gitIdentity" | "proxy" | "caCerts" | "sshAgent";
+    | "gitIdentity" | "proxy" | "caCerts" | "sshAgent" | "shares";
 
 /** Ordered for display (cli `vm sync`) — provision/session order is the same. */
 export const SYNC_IDS: SyncId[] = [
     "theme", "accentColor", "contrast", "timezone", "locale", "keyboard",
     "monitors", "hostWallpaper",
-    "gitIdentity", "proxy", "caCerts", "sshAgent",
+    "gitIdentity", "proxy", "caCerts", "sshAgent", "shares",
 ];
 
 const ENV_KEYS: Record<SyncId, string> = {
@@ -71,6 +71,7 @@ const ENV_KEYS: Record<SyncId, string> = {
     proxy: "CRUISER_SYNC_PROXY",
     caCerts: "CRUISER_SYNC_CA_CERTS",
     sshAgent: "CRUISER_SYNC_SSH_AGENT",
+    shares: "CRUISER_SYNC_SHARES",
 };
 
 /** spec.sync[id] AND env: CRUISER_HOST_SYNC=0 kills all, CRUISER_SYNC_<ID>=0
@@ -344,6 +345,55 @@ grep -q '^SSH_AUTH_SOCK=' /etc/environment 2>/dev/null \\
 cat > /etc/profile.d/cruiser-agent.sh <<AGENTENV
 [ -S "$UHOME/.ssh/cruiser-agent.sock" ] && export SSH_AUTH_SOCK="$UHOME/.ssh/cruiser-agent.sock"
 AGENTENV`;
+}
+
+/**
+ * Mount-mode shares → guest fstab + mounts, reconciled. Both provision and
+ * the session channel run this: it rewrites the managed block between the
+ * markers (dropping legacy unmarked per-share lines and virtfs mounts whose
+ * tags left the spec), so adding/removing a share in vm.json converges the
+ * guest on the next pass. QEMU fsdevs are CLI-only — a share added while
+ * the VM is running gets its fstab entry now and the device at next boot.
+ */
+export function guestSharesScript(spec: VmSpec): string {
+    const mounts = spec.shares.filter((s) => s.enabled !== false && s.mode !== "copy");
+    const keep = mounts.map((s) => s.tag).join(" ");
+    const lines = mounts.map((s) => {
+        const mp = s.guestPath ?? `/mnt/${s.tag}`;
+        const mpFstab = mp.replace(/ /g, "\\040");   // fstab field escapes
+        const ro = s.direction === "host-to-guest";
+        const opts9p = `trans=virtio,version=9p2000.L,msize=262144,_netdev,x-systemd.automount,x-systemd.idle-timeout=60,nofail${ro ? ",ro" : ""}`;
+        const optsVfs = `${ro ? "ro," : "rw,"}nofail,_netdev,x-systemd.automount`;
+        return `if [ "$SHARE_FSTYPE" = virtiofs ]; then
+        echo '${s.tag} ${mpFstab} virtiofs ${optsVfs} 0 0'
+    else
+        echo '${s.tag} ${mpFstab} 9p ${opts9p} 0 0'
+    fi
+    mkdir -p ${sq(mp)}
+    grep -qs '^${s.tag} ' /proc/mounts || {
+        if [ "$SHARE_FSTYPE" = virtiofs ]; then
+            mount -t virtiofs -o ${ro ? "ro" : "rw"} ${sq(s.tag)} ${sq(mp)} 2>/dev/null
+        else
+            mount -t 9p -o trans=virtio,version=9p2000.L${ro ? ",ro" : ""} ${sq(s.tag)} ${sq(mp)} 2>/dev/null
+        fi
+    } || echo "cruiser: share '${s.tag}' has no device yet — it mounts at next boot" >&2`;
+    });
+    return `# host shares → guest fstab + mounts (managed block, reconciled)
+[ -f /etc/fstab ] || : > /etc/fstab
+SHARE_FSTYPE=9p; ls -d /sys/bus/virtio/drivers/virtiofs/virtio* >/dev/null 2>&1 && SHARE_FSTYPE=virtiofs
+KEEP=" ${keep} "
+sed -i '/# >>> cruiser-shares/,/# <<< cruiser-shares/d' /etc/fstab
+for T in ${keep}; do sed -i "\\|^\${T}[[:space:]]|d" /etc/fstab; done
+# drop virtfs mounts whose tag left the spec (only cruiser creates fsdevs)
+awk '$3=="9p"||$3=="virtiofs"{print $1" "$2}' /proc/mounts | while read -r SRC MP; do
+    case "$KEEP" in *" $SRC "*) ;; *) umount -l "$MP" 2>/dev/null || true ;; esac
+done
+{
+    echo '# >>> cruiser-shares >>>'
+${lines.map((l) => `    ${l}`).join("\n")}
+    echo '# <<< cruiser-shares <<<'
+} >> /etc/fstab
+systemctl daemon-reload 2>/dev/null || true`;
 }
 
 /**
@@ -625,6 +675,11 @@ export class SessionSyncs {
                     await pushScript(this.h, guestCaCertsScript(), "ca certs");
                 });
             })());
+        }
+        if (syncEnabled(spec, "shares")) {
+            const mounts = spec.shares.filter((s) => s.enabled !== false && s.mode !== "copy");
+            jobs.push(tryChan("shares", mounts, () =>
+                pushScript(this.h, guestSharesScript(spec), "shares")));
         }
         if (syncEnabled(spec, "monitors") && spec.os.desktop === "gnome") {
             jobs.push((async () => {

@@ -16,8 +16,9 @@
 // invoke this CLI.
 // ============================================================================
 
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { VmRegistry, VmSpec, VmHandle, HeadMode, defaultSpec } from "../libraries/vm-core/src/index";
 import type { ViewerSession } from "../libraries/host-int/src/session";
 import { listUsbDevices } from "../libraries/vm-core/src/usb/usb";
@@ -42,6 +43,20 @@ usage: cruiser <area> <command> [args]
                    [--sync a,b,c] [--no-sync x,y]     host→guest sync channels (see vm sync)
                    [--viewer rdp|dmabuf]              dmabuf = direct QEMU dma-buf display (virgl+)
                    [--wallpaper PATH] [--wallpaper-pos POS]
+                   [--share PATH[:tag]]                mount a host dir rw in the guest
+                   [--share-ro PATH[:tag]]             …read-only (host→guest only)
+                   [--copy PATH[:guestdir]]            rsync-copy a file/dir, bidirectional
+                   [--copy-h2g PATH[:guestdir]]        …host→guest only
+  vm import <file|gist-url|id> [--name x] [--description "…"]   create from a *.cruiser doc
+  vm export <name> [--format yaml|toml|json] [--out path]       write the portable config
+  vm gist push <name> [--gist <id>|--new] [--public] [--format yaml] [--description "…"]
+  vm config pull <name>            re-import the spec from its origin (gist/file)
+  vm describe <name> [text]        show/set the description exported with configs
+  vm share ls <name>               vm share add <name> <hostPath> [--guest PATH]
+                                   [--tag t] [--direction both|host-to-guest]
+                                   [--mode mount|copy] [--delete] [--disabled]
+  vm share rm <name> <tag|hostPath>
+  vm filesync <name> [--watch]     run copy-mode shares now (--watch keeps syncing live)
   vm start <name> [--mode <headmode>] [--no-view]         (auto-opens the viewer like the UI)
   vm stop <name>                        vm kill <name>
   vm status <name>                      vm args <name>   (print QEMU argv)
@@ -55,9 +70,9 @@ usage: cruiser <area> <command> [args]
   vm sync <name>                      list host→guest sync channels (on/off per vm.json)
   vm sync <name> <channel> on|off     toggle a channel (--apply pushes it now if running)
                                       channels: theme accentColor contrast timezone locale
-                                      keyboard monitors hostWallpaper | gitIdentity proxy
-                                      caCerts sshAgent   (last four default off — they push
-                                      host credentials/identity/trust into the guest)
+                                      keyboard monitors hostWallpaper shares | gitIdentity
+                                      proxy caCerts sshAgent   (last four default off —
+                                      they push host credentials/identity/trust into the guest)
   vm logs <name> [--file cruiser|qemu|serial|install-serial] [--lines N]
            [--journal] [--unit U] [--priority P] [--boot N] [--since X] [--grep PAT]
            [--units]                    guest journal via QGA (ssh fallback on confined agents)
@@ -115,6 +130,11 @@ function startSessionSyncs(h: VmHandle, s: ViewerSession): void {
         t.start();
         s.on("closed", () => t.dispose());
     }).catch(() => {});
+    void import("../libraries/provision/src/filesync").then(({ FileSyncs }) => {
+        const f = new FileSyncs(h, (m) => console.log(`${h.spec.name}: ${m}`));
+        f.start();
+        s.on("closed", () => f.dispose());
+    }).catch(() => {});
 }
 
 /** Push the managed wallpaper into the guest if inputs changed (or a prior
@@ -131,6 +151,53 @@ async function needVm(name?: string): Promise<VmHandle> {
     const h = registry.get(name);
     if (!h) { console.error(`vm '${name}' not found (registered: ${registry.list().map((v) => v.spec.name).join(", ") || "none"})`); process.exit(1); }
     return h;
+}
+
+/** Read a portable config from a local file or a gist ref. */
+async function loadPortableRef(ref: string): Promise<{
+    doc: import("../libraries/vm-core/src/config/portable").PortableVmConfig;
+    origin: NonNullable<VmSpec["origin"]>;
+}> {
+    const P = await import("../libraries/vm-core/src/config/portable");
+    if (existsSync(ref)) {
+        const text = await readFile(ref, "utf-8");
+        return { doc: P.parsePortable(text, undefined, ref), origin: { kind: "file", url: ref } };
+    }
+    const { readGist } = await import("../libraries/sys/src/gist");
+    const g = await readGist(ref);
+    const f = P.pickConfigFile(g.files);
+    const doc = P.parsePortable(f.content, undefined, f.filename);
+    if (!doc.description && g.description) doc.description = g.description;
+    return { doc, origin: { kind: "gist", id: g.id, url: g.url } };
+}
+
+/** `vm config pull` / `vm gist pull` — refetch the spec from its origin and
+ *  merge over the local spec (ports/provisioned/credentials preserved). */
+async function configPull(h: VmHandle): Promise<void> {
+    const o = h.spec.origin;
+    if (!o) {
+        console.error(`${h.spec.name} has no origin — it wasn't imported. Push it first: 'vm gist push ${h.spec.name}'`);
+        process.exit(1);
+    }
+    const P = await import("../libraries/vm-core/src/config/portable");
+    let doc;
+    if (o.kind === "gist") {
+        const { readGist } = await import("../libraries/sys/src/gist");
+        const g = await readGist(o.id ?? o.url ?? "");
+        const f = P.pickConfigFile(g.files);
+        doc = P.parsePortable(f.content, undefined, f.filename);
+        h.spec.origin = { kind: "gist", id: g.id, url: g.url };
+    } else {
+        if (!o.url || !existsSync(o.url)) { console.error(`origin file ${o.url ?? "?"} is gone`); process.exit(1); }
+        doc = P.parsePortable(await readFile(o.url, "utf-8"), undefined, o.url);
+    }
+    const { spec, needsRestart } = P.mergePulledSpec(h.spec, doc.spec);
+    h.spec = VmSpec.parse(spec);
+    await h.saveSpec();
+    console.log(`pulled config for ${h.spec.name}` +
+        (needsRestart.length ? ` — changed: ${needsRestart.join(", ")}` : " — nothing boot-relevant changed"));
+    if (h.isRunning() && needsRestart.length)
+        console.log("note: the VM is running — those sections apply at next boot");
 }
 
 async function vmCmd(cmd: string | undefined, args: string[]) {
@@ -177,10 +244,22 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             applySyncList(flagVal("--sync"), true);
             applySyncList(flagVal("--no-sync"), false);
             for (let i = 0; i < argv.length; i++) {
-                if (argv[i] === "--share") {
-                    const [p, tag] = (argv[i + 1] ?? "").split(":");
-                    spec.shares.push({ hostPath: p, tag: tag ?? "hostshare", readOnly: false });
-                }
+                const a = argv[i];
+                const push = (raw: string, mode: "mount" | "copy", direction: "both" | "host-to-guest") => {
+                    const [p, second] = raw.split(":");
+                    if (!p) { console.error(`empty path in '${raw}'`); process.exit(2); }
+                    spec.shares.push({
+                        hostPath: p,
+                        tag: mode === "mount" ? (second ?? "hostshare") : `share${spec.shares.length}`,
+                        mode, direction, readOnly: direction === "host-to-guest",
+                        enabled: true, deletions: false,
+                        ...(mode === "copy" && second ? { guestPath: second } : {}),
+                    });
+                };
+                if (a === "--share") push(argv[++i] ?? "", "mount", "both");
+                else if (a === "--share-ro") push(argv[++i] ?? "", "mount", "host-to-guest");
+                else if (a === "--copy") push(argv[++i] ?? "", "copy", "both");
+                else if (a === "--copy-h2g") push(argv[++i] ?? "", "copy", "host-to-guest");
             }
             // flag values were cast unchecked — re-parse so a bad --distro /
             // --cpus / --share tag fails here instead of poisoning vm.json.
@@ -322,6 +401,143 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             }
             break;
         }
+        case "import": {
+            const ref = args[0];
+            if (!ref) usage();
+            const { doc, origin } = await loadPortableRef(ref);
+            const name = flagVal("--name") ?? doc.spec.name;
+            if (registry.get(name)) {
+                console.error(`a VM named '${name}' already exists — pass --name to pick another`);
+                process.exit(1);
+            }
+            const spec = doc.spec;
+            spec.name = name;
+            spec.origin = origin;
+            const desc = flagVal("--description");
+            if (desc) spec.description = desc;
+            else if (!spec.description && doc.description) spec.description = doc.description;
+            const h = await registry.create(VmSpec.parse(spec));
+            console.log(`imported '${h.spec.name}' from ${origin.url ?? origin.id} → ${h.paths.dir}`);
+            console.log(`  ssh:${h.spec.network.sshPort} rdp:${h.spec.network.rdpPort} (freshly allocated)`);
+            console.log(`  next: cruiser provision cloudimg ${h.spec.name}  (or drop a disk.qcow2 in)`);
+            break;
+        }
+        case "export": {
+            const h = await needVm(args[0]);
+            const P = await import("../libraries/vm-core/src/config/portable");
+            const fmt = flagVal("--format") ?? "yaml";
+            if (!["yaml", "toml", "json"].includes(fmt)) { console.error(`bad --format '${fmt}'`); process.exit(2); }
+            const doc = P.exportPortable(h.spec, flagVal("--description"));
+            const out = flagVal("--out") ?? join(h.paths.dir, P.portableFilename(h.spec.name, fmt as "yaml" | "toml" | "json"));
+            await writeFile(out, P.serializePortable(doc, fmt as "yaml" | "toml" | "json"));
+            console.log(`exported ${h.spec.name} → ${out}`);
+            break;
+        }
+        case "describe": {
+            const h = await needVm(args[0]);
+            const text = args.slice(1).join(" ");
+            if (!args[1]) { console.log(h.spec.description || "(no description)"); break; }
+            h.spec.description = text;
+            await h.saveSpec();
+            console.log("description updated");
+            break;
+        }
+        case "gist": {
+            const op = args[0];
+            if (op === "pull") { await configPull(await needVm(args[1])); break; }
+            if (op !== "push") usage();
+            const h = await needVm(args[1]);
+            const P = await import("../libraries/vm-core/src/config/portable");
+            const G = await import("../libraries/sys/src/gist");
+            const fmt = (flagVal("--format") ?? "yaml") as "yaml" | "toml" | "json";
+            const desc = flagVal("--description") ?? h.spec.description ?? `cruiser vm '${h.spec.name}'`;
+            const doc = P.exportPortable(h.spec, desc);
+            const fname = P.portableFilename(h.spec.name, fmt);
+            const existing = h.spec.origin?.kind === "gist" ? h.spec.origin.id : undefined;
+            const id = has("--new") ? undefined
+                : flagVal("--gist") ? G.gistIdFromRef(flagVal("--gist")!) : existing;
+            const r = await G.pushGist({
+                id, description: desc, isPublic: has("--public"),
+                files: { [fname]: P.serializePortable(doc, fmt) },
+            });
+            h.spec.origin = { kind: "gist", id: r.id, url: r.url };
+            if (!h.spec.description) h.spec.description = desc;
+            await h.saveSpec();
+            console.log(`pushed ${fname} → ${r.url}`);
+            break;
+        }
+        case "config": {
+            if (args[0] !== "pull") usage();
+            await configPull(await needVm(args[1]));
+            break;
+        }
+        case "share": {
+            const op = args[0];
+            const h = await needVm(args[1]);
+            if (op === "ls" || op === undefined) {
+                if (!h.spec.shares.length) console.log("(no shares — 'vm share add <name> <hostPath>')");
+                h.spec.shares.forEach((s) => console.log(
+                    `${s.tag.padEnd(14)} ${s.mode.padEnd(5)} ${s.direction === "host-to-guest" ? "h→g" : "h↔g"}${s.enabled ? " " : " (off)"}` +
+                    `  ${s.hostPath} → ${s.guestPath ?? (s.mode === "copy" ? "~/cruiser-sync/<name>" : `/mnt/${s.tag}`)}${s.deletions ? "  --delete" : ""}`));
+                break;
+            }
+            if (op === "add") {
+                const hp = args[2];
+                if (!hp) usage();
+                const dir = flagVal("--direction") ?? (has("--ro") ? "host-to-guest" : "both");
+                const mode = flagVal("--mode") ?? "mount";
+                const next = JSON.parse(JSON.stringify(h.spec)) as VmSpec;
+                next.shares.push({
+                    hostPath: hp,
+                    tag: flagVal("--tag") ?? `share${next.shares.length}`,
+                    guestPath: flagVal("--guest"),
+                    mode, direction: dir, readOnly: dir === "host-to-guest",
+                    enabled: !has("--disabled"), deletions: has("--delete"),
+                } as VmSpec["shares"][number]);
+                h.spec = VmSpec.parse(next);
+                await h.saveSpec();
+                console.log(`share '${h.spec.shares[h.spec.shares.length - 1]!.tag}' added` +
+                    (mode === "copy"
+                        ? " — syncs while a viewer session is open (or 'vm filesync --once')"
+                        : h.isRunning() ? " — fstab lands on the next session sync; device attaches at next boot" : ""));
+                break;
+            }
+            if (op === "rm") {
+                const k = args[2];
+                if (!k) usage();
+                const before = h.spec.shares.length;
+                h.spec.shares = h.spec.shares.filter((s) => s.tag !== k && s.hostPath !== k);
+                if (h.spec.shares.length === before) { console.error(`no share matching '${k}' (tag or hostPath)`); process.exit(1); }
+                h.spec = VmSpec.parse(h.spec);
+                await h.saveSpec();
+                console.log("removed");
+                break;
+            }
+            usage();
+            break;
+        }
+        case "filesync": {
+            const h = await needVm(args[0]);
+            const { FileSyncs, copyEntries } = await import("../libraries/provision/src/filesync");
+            if (!copyEntries(h.spec).length) {
+                console.log("no copy-mode shares — add one with 'vm share add --mode copy'");
+                break;
+            }
+            if (!h.isRunning()) { console.error(`'${h.spec.name}' is not running`); process.exit(1); }
+            const fs = new FileSyncs(h, (m) => console.log(`${h.spec.name}: ${m}`));
+            if (has("--watch")) {
+                fs.start();
+                console.log("watching — ctrl+c to stop");
+                await new Promise<void>((res) => {
+                    process.on("SIGINT", res);
+                    process.on("SIGTERM", res);
+                });
+                fs.dispose();
+            } else {
+                await fs.applyOnce();
+            }
+            break;
+        }
         case "view": {
             const h = await needVm(args[0]);
             if (!h.isRunning()) { console.error(`'${h.spec.name}' is not running`); process.exit(1); }
@@ -378,6 +594,8 @@ async function doctor() {
         const p = await which(tools[i]!);
         checks.push([`tool: ${tools[i]}`, !!p, "see toolchain/versions.json systemTools"]);
     }
+    checks.push(["tool: rsync (copy-mode shares)", !!(await which("rsync")), "apt install rsync — needed for --copy shares"]);
+    checks.push(["tool: gh (gist push)", !!(await which("gh")), "apt install gh + gh auth login, or set GITHUB_TOKEN — only needed for 'vm gist push'"]);
     const vfsd = await virtiofsdPath();
     checks.push(["tool: virtiofsd", vfsd !== null, "apt install virtiofsd"]);
     const tc = await resolveToolchain().catch((e) => { checks.push(["qemu toolchain", false, String(e)]); return null; });

@@ -64,9 +64,9 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   `guestThemeScript` bakes into guest-setup (gsettings `color-scheme` /
   `plasma-apply-colorscheme`, both `command -v`-gated so the spec's desktop
   guess can't misfire).
-  `sync.ts` — the host→guest sync engine. `spec.sync` gates twelve channels:
-  eight default-on (theme, accentColor, contrast, timezone, locale, keyboard,
-  monitors, hostWallpaper) and four default-off security-sensitive ones
+  `sync.ts` — the host→guest sync engine. `spec.sync` gates thirteen channels:
+  nine default-on (theme, accentColor, contrast, timezone, locale, keyboard,
+  monitors, hostWallpaper, shares) and four default-off security-sensitive ones
   (gitIdentity, proxy, caCerts, sshAgent). `SessionSyncs` (viewer lifetime,
   wired in service.ensureViewer + cli `vm start|view`) runs one shared portal
   watcher for theme/accent/contrast, an /etc/localtime fs.watch for timezone,
@@ -76,7 +76,20 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   backoff) for sshAgent. `syncEnabled` = spec flag AND env: `CRUISER_HOST_
   SYNC=0` kills all, `CRUISER_SYNC_<ID>=0` per channel, `CRUISER_THEME_SYNC=0`
   still honored. Guest scripts all follow the guestThemeScript mold (runuser
-  for user-context, command -v gates, never abort provision).
+  for user-context, command -v gates, never abort provision). The `shares`
+  channel runs `guestSharesScript` — a managed `# >>> cruiser-shares >>>`
+  fstab block reconciled against spec.shares (stale virtfs mounts unmounted,
+  `ro` written for direction:"host-to-guest") — the same script guest-setup
+  bakes at provision, so editing shares converges the guest on the next pass.
+  `filesync.ts` — copy-mode shares (`mode:"copy"`): rsync over the ssh hostfwd
+  + `ensureKeypair` key. direction "both" = `--update` push+pull (newest wins,
+  no deletes); "host-to-guest" = authoritative push (+`--delete` when
+  `deletions`). `FileSyncs` runs fs.watch pushes + a 30s pull interval for the
+  viewer session (service.ensureViewer); `vm filesync <name>` is one-shot,
+  `--watch` holds it. Guest target = guestPath or ~/cruiser-sync/<basename>;
+  prep script mkdirs targets and lazily installs guest rsync (cli-tools also
+  ships it). Env: `CRUISER_FILESYNC=0` kills, `CRUISER_FILESYNC_{PUSH,PULL}_MS`
+  tune the intervals.
   `stage.ts` — shared QGA-writeFile/ssh-scp guest staging extracted from
   wallpaper (pushFileToGuest).
   `wallpaper.ts` — managed guest wallpaper: jimp composite (lazy `importJimp`
@@ -93,6 +106,20 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 - `libraries/app-mode` — waypipe over vsock (socat bridge) / ssh fallback.
 - `libraries/app-shell` — UI: zustand store, CruiserService, screens markup.
 - `libraries/sys` — exec helpers (node:child_process — runs under bun AND node).
+  `gist.ts` — GitHub Gist client over plain fetch: `readGist` accepts a bare
+  id / gist URL / user/id (unauth read for public; token unlocks secret),
+  `pushGist` creates or PATCHes. Token order: CRUISER_GITHUB_TOKEN →
+  GITHUB_TOKEN → GH_TOKEN → `gh auth token`; never stored or logged.
+  `CRUISER_GITHUB_API` overrides the API base (GHES + tests).
+  Portable configs: `vm-core/src/config/portable.ts` wraps VmSpec in
+  `{format:"cruiser-vm", version:1, description?, spec}` — serializes
+  JSON/YAML (`yaml` pkg) / TOML (`smol-toml` pkg), sniffs by `*.cruiser.*`
+  filename then content. Export scrubs host-local state (allocated
+  ssh/rdp ports + their auto hostfwd, provisioned, passwordFile, origin);
+  import goes through `registry.create` so ports re-allocate; `vm config
+  pull` re-merges over an existing spec preserving name/network/
+  provisioned/credentials and reports which sections need a reboot.
+  `spec.origin` {kind:"gist"|"file", id?, url?} records the pull source.
 - `toolchain/` — versions.json pins + build.mts (fetch/build into `opt/`).
 - `src-tarballs/` — adopted/downloaded source trees (gitignored, may be
   symlinks into ~/devvm/src).

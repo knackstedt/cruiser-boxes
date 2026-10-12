@@ -25,7 +25,7 @@ const SYNC_FORM: [keyof CreateForm, keyof VmSpec["sync"]][] = [
     ["syncTimezone", "timezone"], ["syncLocale", "locale"], ["syncKeyboard", "keyboard"],
     ["syncMonitors", "monitors"], ["syncHostWallpaper", "hostWallpaper"],
     ["syncGit", "gitIdentity"], ["syncProxy", "proxy"], ["syncCa", "caCerts"],
-    ["syncAgent", "sshAgent"],
+    ["syncAgent", "sshAgent"], ["syncShares", "shares"],
 ];
 
 function applySyncForm(spec: VmSpec, f: CreateForm): void {
@@ -110,12 +110,14 @@ export class CruiserService {
     }
 
     /** Native file dialogs via kdialog (KDE) or zenity — both optional. */
-    private async pickPath(kind: "dir" | "file", title: string, start: string): Promise<string | null> {
+    private async pickPath(kind: "dir" | "file" | "save", title: string, start: string): Promise<string | null> {
         const kd = await which("kdialog");
         if (kd) {
             const args = kind === "dir"
                 ? ["--title", title, "--getexistingdirectory", start]
-                : ["--title", title, "--getopenfilename", start, "*.qcow2 *.img *.raw *.vmdk *.vdi *.vhdx|Disk images"];
+                : kind === "save"
+                    ? ["--title", title, "--getsavefilename", start]
+                    : ["--title", title, "--getopenfilename", start, "*.qcow2 *.img *.raw *.vmdk *.vdi *.vhdx|Disk images"];
             const r = await run(kd, args, { noThrow: true });
             return r.code === 0 && r.stdout.trim() ? r.stdout.trim() : null;
         }
@@ -123,7 +125,9 @@ export class CruiserService {
         if (zn) {
             const args = kind === "dir"
                 ? ["--file-selection", "--directory", "--title", title, `--filename=${start}/`]
-                : ["--file-selection", "--title", title, `--filename=${start}/`, "--file-filter=*.qcow2 *.img *.raw *.vmdk *.vdi *.vhdx"];
+                : kind === "save"
+                    ? ["--file-selection", "--save", "--confirm-overwrite", "--title", title, `--filename=${start}`]
+                    : ["--file-selection", "--title", title, `--filename=${start}/`, "--file-filter=*.qcow2 *.img *.raw *.vmdk *.vdi *.vhdx"];
             const r = await run(zn, args, { noThrow: true });
             return r.code === 0 && r.stdout.trim() ? r.stdout.trim() : null;
         }
@@ -177,6 +181,12 @@ export class CruiserService {
             diskGiB: s.disk.sizeGiB,
             sshPort: s.network.sshPort, rdpPort: s.network.rdpPort,
             provisioned: s.provisioned.method, persist: s.persist,
+            description: s.description,
+            origin: s.origin ? `${s.origin.kind}:${s.origin.id ?? s.origin.url ?? ""}` : undefined,
+            shares: s.shares.map((sh, idx) => ({
+                idx, tag: sh.tag, hostPath: sh.hostPath, guestPath: sh.guestPath,
+                mode: sh.mode, direction: sh.direction, enabled: sh.enabled, deletions: sh.deletions,
+            })),
             snapshots: [],
             vd: s.display.virtualDesktop,
             usbKeys: s.usb.autoAttach.map((u) => [u.vendorId, u.productId, u.serial].filter(Boolean).join(":")),
@@ -540,6 +550,7 @@ export class CruiserService {
                 const [vendorId = "", productId = "", serial = ""] = k.split(":");
                 return { vendorId, productId, ...(serial ? { serial } : {}), atBoot: true };
             });
+            spec.description = st.vmDesc.trim();
             applySyncForm(spec, f);
             this.validateSpec(spec);
             if (f.diskGiB !== h.spec.disk.sizeGiB) await h.resizeDisk(f.diskGiB);
@@ -577,6 +588,10 @@ export class CruiserService {
                 const { SessionSyncs } = await import("../../provision/src/sync");
                 const syncs = new SessionSyncs(h, (m) => this.store.getState().setStatus(`${name}: ${m}`));
                 syncs.start();
+                const { FileSyncs } = await import("../../provision/src/filesync");
+                const fs = new FileSyncs(h, (m) => this.store.getState().setStatus(`${name}: ${m}`));
+                fs.start();
+                s.on("closed", () => fs.dispose());
                 // Wallpaper sync — fire-and-forget like a session one-shot; a
                 // dead agent or slow jimp decode mustn't delay the viewer.
                 void import("../../provision/src/wallpaper").then(({ ensureGuestWallpaper }) =>
@@ -639,6 +654,201 @@ export class CruiserService {
         }, { vm: name, verb: "launching" });
     }
 
+    // ── config import/export + shares ──
+
+    /** Create-screen "Import" — a gist url/id or a local *.cruiser.* file.
+     *  Creates the VM directly (the form can't represent every spec field,
+     *  e.g. shares/escapeShortcuts, so filling it would lose data). */
+    async importConfig(): Promise<void> {
+        const st = this.store.getState();
+        const ref = st.create.importRef.trim();
+        if (!ref) { st.setStatus("paste a gist url/id or a config file path first"); return; }
+        await this.run(`import ${ref}`, async () => {
+            const { existsSync } = await import("node:fs");
+            const P = await import("../../vm-core/src/config/portable");
+            let doc, origin: VmSpec["origin"];
+            if (existsSync(ref)) {
+                doc = P.parsePortable(await readFile(ref, "utf-8"), undefined, ref);
+                origin = { kind: "file" as const, url: ref };
+            } else {
+                const { readGist } = await import("../../sys/src/gist");
+                const g = await readGist(ref);
+                const f = P.pickConfigFile(g.files);
+                doc = P.parsePortable(f.content, undefined, f.filename);
+                if (!doc.description && g.description) doc.description = g.description;
+                origin = { kind: "gist" as const, id: g.id, url: g.url };
+            }
+            let name = doc.spec.name;
+            for (let n = 1; this.handles.has(name); n++) name = `${doc.spec.name}-${n}`;
+            const spec = doc.spec;
+            spec.name = name;
+            spec.origin = origin;
+            if (doc.description && !spec.description) spec.description = doc.description;
+            const h = await this.registry.create(VmSpec.parse(spec));
+            this.handles.set(name, h);
+            this.store.getState().resetCreate();
+            this.store.getState().setRoute("vm", name);
+            return name;
+        }, { done: (n) => `imported '${n}' — provision it to boot` });
+    }
+
+    /** Export the VM's portable config — save dialog when kdialog/zenity is
+     *  around, else <vmdir>/<name>.cruiser.yaml. */
+    async exportConfig(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        const P = await import("../../vm-core/src/config/portable");
+        const suggested = join(h.paths.dir, P.portableFilename(name, "yaml"));
+        const hasDlg = (await which("kdialog")) || (await which("zenity"));
+        let out = suggested;
+        if (hasDlg) {
+            const picked = await this.pickPath("save", "Export VM config", suggested);
+            if (!picked) return;
+            out = picked;
+        }
+        await this.run(`export ${name}`, async () => {
+            const { writeFile } = await import("node:fs/promises");
+            await writeFile(out, P.serializePortable(P.exportPortable(h.spec), "yaml"));
+            return out;
+        }, { done: (o) => `exported → ${o}`, vm: name, verb: "exporting" });
+    }
+
+    /** Push the portable config to a gist — updates the recorded gist when
+     *  this VM was pushed/imported before, else creates a secret one. */
+    async gistPush(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        await this.run(`push ${name} to gist`, async () => {
+            const P = await import("../../vm-core/src/config/portable");
+            const G = await import("../../sys/src/gist");
+            const desc = h.spec.description || `cruiser vm '${name}'`;
+            const doc = P.exportPortable(h.spec, desc);
+            const fname = P.portableFilename(name, "yaml");
+            const id = h.spec.origin?.kind === "gist" ? h.spec.origin.id : undefined;
+            const r = await G.pushGist({ id, description: desc, files: { [fname]: P.serializePortable(doc, "yaml") } });
+            h.spec.origin = { kind: "gist", id: r.id, url: r.url };
+            if (!h.spec.description) h.spec.description = desc;
+            await h.saveSpec();
+            return r.url;
+        }, { done: (u) => `pushed → ${u}`, vm: name, verb: "pushing" });
+    }
+
+    /** Re-import the spec from spec.origin (gist or file). */
+    async gistPull(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        if (!h.spec.origin) {
+            this.store.getState().setStatus(`${name} has no origin — push or import it first`);
+            return;
+        }
+        await this.run(`pull config for ${name}`, async () => {
+            const o = h.spec.origin!;
+            const P = await import("../../vm-core/src/config/portable");
+            let doc;
+            if (o.kind === "gist") {
+                const { readGist } = await import("../../sys/src/gist");
+                const g = await readGist(o.id ?? o.url ?? "");
+                const f = P.pickConfigFile(g.files);
+                doc = P.parsePortable(f.content, undefined, f.filename);
+                h.spec.origin = { kind: "gist", id: g.id, url: g.url };
+            } else {
+                doc = P.parsePortable(await readFile(o.url ?? "", "utf-8"), undefined, o.url);
+            }
+            const { spec, needsRestart } = P.mergePulledSpec(h.spec, doc.spec);
+            h.spec = VmSpec.parse(spec);
+            await h.saveSpec();
+            return needsRestart;
+        }, {
+            done: (nr) => nr.length ? `pulled — applies at next boot: ${nr.join(", ")}` : "pulled — nothing boot-relevant changed",
+            vm: name, verb: "pulling",
+        });
+    }
+
+    /** Save the vm-detail description edit buffer into the spec. */
+    async saveDescription(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        const st = this.store.getState();
+        await this.run(`save description`, async () => {
+            h.spec.description = st.vmDesc.trim();
+            await h.saveSpec();
+        }, { vm: name, verb: "saving" });
+    }
+
+    /** Browse for the share's host directory. */
+    async pickShareDir(): Promise<void> {
+        const p = await this.pickPath("dir", "Choose host folder to share", homedir());
+        if (p) this.store.getState().setShareForm({ hostPath: p });
+    }
+
+    private unusedShareTag(spec: VmSpec): string {
+        let i = 0;
+        while (spec.shares.some((s) => s.tag === `share${i}`)) i++;
+        return `share${i}`;
+    }
+
+    async shareAdd(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        const st = this.store.getState();
+        const f = st.shareForm;
+        if (!f.hostPath.trim()) { st.setStatus("set a host path for the share first"); return; }
+        await this.run(`add share`, async () => {
+            const next = JSON.parse(JSON.stringify(h.spec)) as VmSpec;
+            next.shares.push({
+                hostPath: f.hostPath.trim(),
+                tag: this.unusedShareTag(next),
+                guestPath: f.guestPath.trim() || undefined,
+                mode: f.mode,
+                direction: f.direction,
+                readOnly: f.direction === "host-to-guest",
+                enabled: true, deletions: false,
+            });
+            h.spec = VmSpec.parse(next);
+            await h.saveSpec();
+            st.setShareForm({ hostPath: "", guestPath: "" });
+            return f.mode;
+        }, {
+            done: (m) => m === "copy"
+                ? "share added — copy entries sync live while a viewer session is open"
+                : h.isRunning() ? "share added — fstab lands on the next sync pass; the device attaches at next boot" : "share added",
+            vm: name, verb: "adding share",
+        });
+    }
+
+    async shareRemove(name: string, idx: number): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        await this.run(`remove share`, async () => {
+            const next = JSON.parse(JSON.stringify(h.spec)) as VmSpec;
+            next.shares.splice(idx, 1);
+            h.spec = VmSpec.parse(next);
+            await h.saveSpec();
+        }, { vm: name, verb: "removing share" });
+    }
+
+    /** Toggle a share attribute — enabled, mode, or direction. */
+    async shareAttr(name: string, idx: number, field: string, value: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        const next = JSON.parse(JSON.stringify(h.spec)) as VmSpec;
+        const s = next.shares[idx];
+        if (!s) return;
+        if (field === "enabled") s.enabled = value === "true";
+        else if (field === "mode" && (value === "mount" || value === "copy")) s.mode = value;
+        else if (field === "direction" && (value === "both" || value === "host-to-guest")) {
+            s.direction = value;
+            s.readOnly = value === "host-to-guest";
+        } else return;
+        h.spec = VmSpec.parse(next);
+        await h.saveSpec();
+        this.store.getState().setStatus("share updated");
+        this.refresh().catch(() => {});
+    }
+
+    /** Run the copy-mode shares once, right now. */
+    async filesyncNow(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        if (!h.isRunning()) { this.store.getState().setStatus(`${name} isn't running`); return; }
+        await this.run(`file sync`, async () => {
+            const { FileSyncs } = await import("../../provision/src/filesync");
+            await new FileSyncs(h, (m) => this.store.getState().setStatus(`${name}: ${m}`)).applyOnce();
+        }, { vm: name, verb: "syncing" });
+    }
+
     async runDoctor(): Promise<void> {
         await this.run("doctor", async () => {
             const { existsSync } = await import("node:fs");
@@ -651,6 +861,8 @@ export class CruiserService {
             for (let i = 0; i < tools.length; i++)
                 rows.push({ label: `tool: ${tools[i]}`, ok: !!(await which(tools[i]!)), fix: "see toolchain/versions.json systemTools" });
             rows.push({ label: "tool: virtiofsd", ok: (await virtiofsdPath()) !== null, fix: "apt install virtiofsd" });
+            rows.push({ label: "tool: rsync (copy shares)", ok: !!(await which("rsync")), fix: "apt install rsync — needed for copy-mode shares" });
+            rows.push({ label: "tool: gh (gist push)", ok: !!(await which("gh")), fix: "apt install gh + gh auth login, or set GITHUB_TOKEN" });
             const tc = await resolveToolchain().catch(() => null);
             rows.push({ label: "qemu toolchain", ok: !!tc, fix: "cruiser toolchain build" });
             rows.push({ label: "OVMF firmware", ok: existsSync("/usr/share/OVMF/OVMF_CODE_4M.fd"), fix: "apt install ovmf" });

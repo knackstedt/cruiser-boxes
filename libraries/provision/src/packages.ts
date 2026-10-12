@@ -85,7 +85,9 @@ export const PACKAGES: PkgEntry[] = [
     { id: "growfs",        pkgs: { ...deb("cloud-guest-utils"), fedora: "cloud-utils-growpart" } },
 
     // ── tools ──
-    { id: "cli-tools",     pkgs: { ...deb(["curl", "wget", "git", "htop"]), fedora: ["curl", "wget2", "git", "htop"] } },
+    { id: "cli-tools",     pkgs: { ...deb(["curl", "wget", "git", "htop", "rsync"]), fedora: ["curl", "wget2", "git", "htop", "rsync"] } },
+    // rsync ^ drives copy-mode shares (filesync.ts); the guest prep script
+    // keeps a lazy install as backstop for guests provisioned before this.
     { id: "bus-tools",     pkgs: ["usbutils", "pciutils"] },
     { id: "clipboard",     pkgs: ["wl-clipboard", "xclip"] },
     { id: "xdotool",       pkgs: "xdotool" },

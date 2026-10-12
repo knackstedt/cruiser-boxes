@@ -4,6 +4,7 @@
 
 export * from "./paths";
 export * from "./config/schema";
+export * from "./config/portable";
 export * from "./qemu/args";
 export * from "./qemu/resolve";
 export * from "./gpu/rendernode";
