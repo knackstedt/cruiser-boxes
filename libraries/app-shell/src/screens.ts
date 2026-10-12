@@ -40,20 +40,27 @@ body { background:#10141a; color:#e8ecf1; font-family:'Cruiser Sans',sans-serif;
 .vmrow { display:flex; align-items:center; flex-wrap:wrap; gap:8px 14px;
          padding:11px 16px;
          background:#161b23; border:1px solid #2a313c; border-radius:6px; }
-/* 240px basis: below that the sparks/pill/buttons wrap to a second line
-   instead of crushing the spec text into one-word-per-line. */
+/* 240px basis: below that the pill/buttons wrap to a second line instead
+   of crushing the spec text into one-word-per-line. */
 .vmrow .grow { flex:1 1 240px; min-width:0; }
 .vmbtns { display:flex; align-items:center; flex-wrap:wrap; row-gap:4px; }
 .vmname { font-size:15px; font-weight:bold; }
 .vmspecs { font-size:12px; color:#8a94a3; margin-top:3px; }
 .vmmode { font-size:12px; color:#5d6775; margin-top:2px; }
 .vmdisk { font-size:12px; color:#5d6775; margin-top:2px; }
-.sparks { display:flex; gap:16px; margin:0 4px; }
+.sparks { display:flex; gap:16px; margin:0 4px; flex-wrap:wrap; }
+/* five sparks don't fit beside the buttons — running rows get a full-width
+   stats band under the name/spec/pill/button line. */
+.vmrow > .sparks { flex:1 1 100%; margin:4px 0 0; padding-top:8px;
+                   border-top:1px solid #212933; justify-content:flex-end; }
 .spark { display:flex; flex-direction:column; align-items:flex-end; gap:3px; }
 .spbars { display:flex; align-items:flex-end; gap:1px; height:24px; }
 .spb { width:2px; border-radius:1px; background:#212933; }
 .spark.cpu .spb.v { background:#4fc2f7; }
 .spark.mem .spb.v { background:#9fd89f; }
+.spark.disk .spb.v { background:#f0c98a; }
+.spark.net .spb.v { background:#b39af0; }
+.spark.gpu .spb.v { background:#7fd0b0; }
 .splbl { font-size:10px; color:#5d6775; white-space:nowrap; }
 .pill { padding:4px 11px; border-radius:11px; font-size:12px; white-space:nowrap; }
 .pill.running { background:#1d3a24; color:#9fd89f; }
@@ -171,17 +178,53 @@ function guestDiskStr(vm: VmSummary): string | null {
 const SPARK_N = 40;
 const SPARK_H = 24;
 
-function spark(kind: "cpu" | "mem", samples: number[]): string {
-    const cur = samples.length ? Math.round(samples[samples.length - 1]!) : null;
+const lastSample = (a: number[]): number | null => (a.length ? a[a.length - 1]! : null);
+
+function spark(kind: "cpu" | "mem" | "disk" | "net" | "gpu", samples: number[],
+    opts: { auto?: boolean; label?: string } = {}): string {
+    const cur = lastSample(samples);
+    // auto: unbounded rates scale to the window's max instead of a 0–100 axis.
+    const max = opts.auto ? Math.max(1e-9, ...samples.slice(-SPARK_N)) : 100;
     let bars = "";
     for (let i = 0; i < SPARK_N; i++) {
         const v = samples[samples.length - SPARK_N + i];
         bars += v === undefined
             ? `<div class="spb" style="height:1px"></div>`
-            : `<div class="spb v" style="height:${Math.max(1, Math.round(v * SPARK_H / 100))}px"></div>`;
+            : `<div class="spb v" style="height:${Math.max(1, Math.round(v * SPARK_H / max))}px"></div>`;
     }
+    const lbl = opts.label ?? `${kind} ${cur === null ? "–" : `${Math.round(cur)}%`}`;
     return `<div class="spark ${kind}"><div class="spbars">${bars}</div>
-        <div class="splbl">${kind} ${cur === null ? "–" : `${cur}%`}</div></div>`;
+        <div class="splbl">${esc(lbl)}</div></div>`;
+}
+
+function fmtIops(v: number): string {
+    return v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${Math.round(v)}`;
+}
+
+/** bytes/s → compact rate: "340B", "12.4K", "2.4M", "1.1G". */
+function fmtRate(bps: number): string {
+    return bps >= GiB ? `${(bps / GiB).toFixed(1)}G`
+        : bps >= 1048576 ? `${(bps / 1048576).toFixed(1)}M`
+        : bps >= 1024 ? `${(bps / 1024).toFixed(1)}K`
+        : `${Math.round(bps)}B`;
+}
+
+/** The running-VM stats band — cpu/mem/gpu are % scales; disk/net rates are
+ *  unbounded so their bars scale to the visible window. The gpu spark only
+ *  appears once a DRM client reading has landed (none in software mode). */
+function sparksFor(vm: VmSummary): string {
+    const d = lastSample(vm.disk), n = lastSample(vm.net), g = lastSample(vm.gpu);
+    const parts = [
+        spark("cpu", vm.cpu),
+        spark("mem", vm.mem),
+        spark("disk", vm.disk, { auto: true, label: `disk ${d === null ? "–" : `${fmtIops(d)} iops`}` }),
+        spark("net", vm.net, { auto: true, label: `net ${n === null ? "–" : `${fmtRate(n)}/s`}` }),
+    ];
+    if (vm.gpu.length || vm.gpuMemBytes !== undefined) {
+        const mem = vm.gpuMemBytes !== undefined ? ` · ${fmtBytes(vm.gpuMemBytes)}` : "";
+        parts.push(spark("gpu", vm.gpu, { label: `gpu ${g === null ? "–" : `${Math.round(g)}%`}${mem}` }));
+    }
+    return `<div class="sparks">${parts.join("")}</div>`;
 }
 
 /** Action buttons for a VM state — shared between the list row and the
@@ -240,9 +283,9 @@ function vmRow(vm: VmSummary, s: CruiserState): string {
             <div class="vmmode">${esc(mode)}${vm.provisioned ? "" : ` · <span style="color:#f0c98a">not provisioned</span>`}</div>
             ${diskParts ? `<div class="vmdisk">${esc(diskParts)}</div>` : ""}
         </div>
-        ${up ? `<div class="sparks">${spark("cpu", vm.cpu)}${spark("mem", vm.mem)}</div>` : ""}
         <div class="pill ${pillClass(vm.state)}">${esc(vm.state)}</div>
         <div class="vmbtns">${vmBtns(vm, s)}</div>
+        ${up ? sparksFor(vm) : ""}
     </div>`;
 }
 
@@ -432,12 +475,12 @@ function vmDetail(s: CruiserState): string {
         <div class="kv">
             <div class="k">resources</div><div>${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB · ${vm.diskGiB} GiB disk</div>
             ${diskDetail ? `<div class="k">disk usage</div><div>${esc(diskDetail)}</div>` : ""}
-            ${up ? `<div class="k">usage</div><div class="sparks">${spark("cpu", vm.cpu)}${spark("mem", vm.mem)}</div>` : ""}
             <div class="k">gpu / head</div><div>${esc(vm.gpuMode)} / ${esc(vm.headMode)}</div>
             <div class="k">ports</div><div>ssh 127.0.0.1:${vm.sshPort ?? "–"} · rdp 127.0.0.1:${vm.rdpPort ?? "–"}</div>
             <div class="k">provisioned</div><div>${esc(vm.provisioned ?? "—")}</div>
             <div class="k">persist</div><div>${esc(vm.persist)}</div>
         </div>
+        ${up ? `<div class="h2">Usage</div>${sparksFor(vm)}` : ""}
         <div style="margin:10px 0 18px">
             ${vmBtns(vm, s, true)}
         </div>

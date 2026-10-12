@@ -191,7 +191,7 @@ export class CruiserService {
             vd: s.display.virtualDesktop,
             usbKeys: s.usb.autoAttach.map((u) => [u.vendorId, u.productId, u.serial].filter(Boolean).join(":")),
             sync: { ...s.sync },
-            cpu: [], mem: [],
+            cpu: [], mem: [], disk: [], net: [], gpu: [],
         };
     }
 
@@ -201,6 +201,10 @@ export class CruiserService {
         if (!prev) return s;
         if (!s.cpu.length) s.cpu = prev.cpu;
         if (!s.mem.length) s.mem = prev.mem;
+        if (!s.disk.length) s.disk = prev.disk;
+        if (!s.net.length) s.net = prev.net;
+        if (!s.gpu.length) s.gpu = prev.gpu;
+        s.gpuMemBytes ??= prev.gpuMemBytes;
         s.hostDiskBytes ??= prev.hostDiskBytes;
         s.guestUsedBytes ??= prev.guestUsedBytes;
         s.guestTotalBytes ??= prev.guestTotalBytes;
@@ -233,6 +237,10 @@ export class CruiserService {
         base.guestTotalBytes = mt.guestTotalBytes;
         base.cpu = mt.cpu;
         base.mem = mt.mem;
+        base.disk = mt.disk;
+        base.net = mt.net;
+        base.gpu = mt.gpu;
+        base.gpuMemBytes = mt.gpuMemBytes;
         return base;
     }
 

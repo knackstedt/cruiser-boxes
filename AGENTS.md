@@ -105,6 +105,10 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   in as the base image (watermark still applied — never the raw host file).
 - `libraries/app-mode` — waypipe over vsock (socat bridge) / ssh fallback.
 - `libraries/app-shell` — UI: zustand store, CruiserService, screens markup.
+  `metrics.ts` — the running-VM sparklines (cpu/mem %; disk iops via QMP
+  query-blockstats — no agent needed; net bytes/s via QGA /proc/net/dev;
+  gpu util+mem via host `/proc/<qemu>/fdinfo` DRM client stats, absent in
+  software mode). Rate sparks (disk/net) auto-scale bars to the window max.
 - `libraries/sys` — exec helpers (node:child_process — runs under bun AND node).
   `gist.ts` — GitHub Gist client over plain fetch: `readGist` accepts a bare
   id / gist URL / user/id (unauth read for public; token unlocks secret),

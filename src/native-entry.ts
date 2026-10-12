@@ -74,6 +74,8 @@ if (process.env.CRUISER_FAKE_VM) {
             { idx: 3, tag: "secrets", hostPath: "/home/u/.ssh/config", mode: "copy", direction: "host-to-guest", enabled: false, deletions: false },
         ],
         cpu: [12, 30, 55, 22, 40, 68, 35], mem: [40, 44, 60, 38, 52, 55, 48],
+        disk: [40, 120, 800, 210, 1300, 90, 420], net: [512e3, 1.4e6, 900e3, 3.2e6, 220e3, 780e3, 1.1e6],
+        gpu: [5, 18, 42, 30, 55, 12, 24], gpuMemBytes: 412 * 1048576,
     };
     const orig = store.getState().setVms;
     store.setState({ setVms: (vms) => orig([fake, ...vms.filter((v) => v.name !== fake.name)]) });

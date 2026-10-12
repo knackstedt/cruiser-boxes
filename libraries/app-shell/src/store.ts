@@ -43,6 +43,10 @@ export interface VmSummary {
     guestTotalBytes?: number;      // guest fs total (≈ diskGiB cap)
     cpu: number[];                 // recent cpu% samples (0–100), newest last
     mem: number[];                 // recent mem% samples
+    disk: number[];                // disk io ops/s samples (auto-scaled bars)
+    net: number[];                 // net bytes/s samples
+    gpu: number[];                 // gpu engine busy% samples (0–100)
+    gpuMemBytes?: number;          // latest DRM client memory total
     error?: string;
 }
 
