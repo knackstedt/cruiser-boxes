@@ -46,6 +46,8 @@ export class CruiserService {
     private metrics = new VmMetricsSampler();
     private refreshing = false;
     private snapCache = new Map<string, { names: string[]; at: number }>();
+    /** Set by the shell — drops a VM's terminal session+view on removal. */
+    termDropped?: (name: string) => void;
 
     constructor(private store: Store) {}
 
@@ -535,10 +537,49 @@ export class CruiserService {
         await this.run(`remove ${name}`, async () => {
             await this.registry.remove(name, { deleteDisk: true });
             this.handles.delete(name);
+            this.termDropped?.(name);
             this.metrics.drop(name);
             this.snapCache.delete(name);
             this.store.getState().setRoute("home");
         }, { vm: name, verb: "deleting" });
+    }
+
+    /** Current spec for a registered VM (null when unknown). */
+    specOf(name: string): VmSpec | null {
+        return this.handles.get(name)?.spec ?? null;
+    }
+
+    /**
+     * Terminal for a running VM: route to the embedded webui terminal when
+     * the whole path is staged (backend + term-dd + xterm bundle), else
+     * spawn a host terminal emulator over the same ssh connection.
+     */
+    async term(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        const st = this.store.getState();
+        if (!h.isRunning()) { st.setStatus(`${name} isn't running`); return; }
+        const { TermManager } = await import("./term/term-manager");
+        const { termBundleReady } = await import("./term/page");
+        const { termDdPath } = await import("../../host-int/src/termemu");
+        if (TermManager.embeddedAvailable() && termBundleReady() && (await termDdPath())) {
+            st.setTermLine("connecting…");
+            st.setRoute("term", name);
+            return;
+        }
+        await this.termHost(name);
+    }
+
+    /** Escape hatch — always opens a host terminal emulator on the guest. */
+    async termHost(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        const st = this.store.getState();
+        try {
+            const { openHostTerm } = await import("../../host-int/src/termemu");
+            await openHostTerm(h.spec);
+            st.setStatus(`${name} — opened a host terminal`);
+        } catch (e) {
+            st.setStatus(`terminal failed: ${(e as Error).message}`);
+        }
     }
 
     async resume(name: string): Promise<void> {

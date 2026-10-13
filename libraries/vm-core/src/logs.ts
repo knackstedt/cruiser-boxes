@@ -22,7 +22,7 @@ import { join } from "node:path";
 import type { VmHandle } from "./lifecycle/vm";
 import type { VmPaths } from "./paths";
 import { run } from "../../sys/src/exec";
-import { ensureKeypair } from "./sshkey";
+import { sshArgv } from "./ssh";
 
 // ── runner logs (host files) ──
 
@@ -151,16 +151,9 @@ interface GuestRunResult { code: number; stdout: string; stderr: string }
 /** Run argv in the guest over ssh (sudo -n). Requires the cruiser key
  *  authorized + NOPASSWD sudo — true for seeded/provisioned VMs. */
 async function sshGuestExec(h: VmHandle, argv: string[], timeoutMs: number): Promise<GuestRunResult> {
-    const port = h.spec.network.sshPort;
-    if (!port) throw new Error("no SSH hostfwd mapped — can't reach the guest journal");
-    const { priv } = await ensureKeypair();
-    const r = await run("ssh", [
-        "-i", priv, "-p", String(port),
-        "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-        "-o", "ConnectTimeout=10",
-        `${h.spec.credentials.username}@127.0.0.1`,
-        `sudo -n ${argv.map(sq).join(" ")}`,
-    ], { noThrow: true, timeoutMs });
+    const a = await sshArgv(h.spec, { remoteCmd: [`sudo -n ${argv.map(sq).join(" ")}`] })
+        .catch(() => { throw new Error("no SSH hostfwd mapped — can't reach the guest journal"); });
+    const r = await run("ssh", a, { noThrow: true, timeoutMs });
     if (r.code === 255)
         throw new Error(`ssh to guest failed — is the cruiser key authorized and sudo NOPASSWD?\n${r.stderr.slice(-600)}`);
     return r;

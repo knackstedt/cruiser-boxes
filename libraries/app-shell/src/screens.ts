@@ -132,6 +132,15 @@ input:focus { border-color:#4fc2f7; outline:none; }
           display:flex; align-items:center; padding:0 18px;
           background:#161b23; border-top:1px solid #2a313c;
           font-size:12px; color:#5d6775; }
+/* Term route: the .content scrollport becomes a fixed column — the head
+   strip stays put and #termbox fills the rest. The embedded webui view
+   composites over #termbox's rect (TermManager probes it post-layout). */
+.content.termroute { display:flex; flex-direction:column; overflow:hidden; }
+.termhead { display:flex; align-items:center; gap:12px; margin-bottom:10px;
+            flex-shrink:0; }
+.termhead .crumb { margin-bottom:0; }
+#termbox { flex:1; min-height:80px; background:#0b0e13;
+           border:1px solid #2a313c; border-radius:6px; }
 `;
 
 function esc(s: string): string {
@@ -250,6 +259,7 @@ function vmBtns(vm: VmSummary, s: CruiserState, detail = false): string {
     const parts: string[] = [];
     // "app" head mode has no freerdp viewer — waypipe apps are launched via CLI.
     if (up && vm.headMode !== "app") parts.push(b("View", "vm-view"));
+    if (up) parts.push(b("Term", "vm-term"));
     if (paused) parts.push(b("Resume", "vm-resume"));
     if (up || paused) parts.push(b("Stop", "vm-stop", "btn sm dim"));
     if (stopped) parts.push(b("Start", "vm-start"));
@@ -615,6 +625,25 @@ function logPaneInner(s: CruiserState): string {
     return `${body}<div class="logend" style="height:1px"></div>`;
 }
 
+// ── term ──
+
+/** Term route — a head strip + the empty #termbox the webui terminal view
+ *  composites over. Sessions outlive the route (TermManager); the head
+ *  shows the connect status and offers reconnect / host-window escapes. */
+function termView(s: CruiserState): string {
+    const name = s.selectedVm ?? "?";
+    const vm = s.vms.find((v) => v.name === name);
+    return `<div class="termhead">
+        <div class="crumb" data-action="nav" data-route="vm" data-vm="${esc(name)}">‹ ${esc(name)}</div>
+        <span class="pill ${pillClass(vm?.state ?? "")}">${esc(vm?.state ?? "?")}</span>
+        <div class="meta">terminal · ${esc(s.termLine || "…")}</div>
+        <div style="flex:1"></div>
+        ${btn("Reconnect", "vm-term-reconnect", attr("vm", name), "btn sm dim")}
+        ${btn("Open in window", "vm-term-host", attr("vm", name), "btn sm dim")}
+    </div>
+    <div id="termbox"></div>`;
+}
+
 // ── settings / doctor ──
 
 function settings(s: CruiserState): string {
@@ -701,9 +730,10 @@ export function renderRouteParts(s: CruiserState): RouteParts {
         s.route === "home" ? home(s) :
         s.route === "create" ? create(s) :
         s.route === "vm" ? vmDetail(s) :
-        s.route === "logs" ? logsView(s) : settings(s);
+        s.route === "logs" ? logsView(s) :
+        s.route === "term" ? termView(s) : settings(s);
     const topbar = `<div class="brand">cruiser</div>
-        <div class="nav">${nav("home", "VMs", ["home", "create", "vm", "logs"].includes(s.route))}${nav("settings", "Settings")}</div>
+        <div class="nav">${nav("home", "VMs", ["home", "create", "vm", "logs", "term"].includes(s.route))}${nav("settings", "Settings")}</div>
         <div style="flex:1"></div>`;
     const footer = esc(s.status);
     const log = s.route === "logs" ? logPaneInner(s) : null;
@@ -711,7 +741,7 @@ export function renderRouteParts(s: CruiserState): RouteParts {
         topbar, content: body, footer, log,
         html: `<html><head><style>${fontFaceCss()}${CSS}</style></head><body>
         <div class="topbar">${topbar}</div>
-        <div class="content${log !== null ? " logtop" : ""}">${body}</div>
+        <div class="content${log !== null ? " logtop" : ""}${s.route === "term" ? " termroute" : ""}">${body}</div>
         ${log !== null ? `<div class="logpre" id="logpane">${log}</div>` : ""}
         <div class="footer">${footer}</div>
     </body></html>`,

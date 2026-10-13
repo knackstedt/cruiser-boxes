@@ -77,10 +77,10 @@ function installFakeVm({ store }: DevHarnessCtx): void {
 /** Preselect a route for screenshots (CRUISER_VM overrides the vm selected
  *  for vm/logs routes). */
 function forceRoute({ store, svc, shell }: DevHarnessCtx, env: NodeJS.ProcessEnv): void {
-    const r = env.CRUISER_ROUTE as "create" | "vm" | "settings" | "logs";
+    const r = env.CRUISER_ROUTE as "create" | "vm" | "settings" | "logs" | "term";
     const vmName = env.CRUISER_VM ?? "test1";
     setTimeout(() => {
-        store.getState().setRoute(r, r === "vm" || r === "logs" ? vmName : null);
+        store.getState().setRoute(r, r === "vm" || r === "logs" || r === "term" ? vmName : null);
         if (r === "logs") {
             if (env.CRUISER_LOG_SOURCE === "journal") store.getState().setLogs({ source: "journal" });
             if (env.CRUISER_LOG_FILE) store.getState().setLogs({ file: env.CRUISER_LOG_FILE });

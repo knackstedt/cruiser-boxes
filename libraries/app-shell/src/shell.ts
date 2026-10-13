@@ -13,6 +13,7 @@ import { DISTROS } from "../../provision/src/distros";
 import { DEVTOOLS } from "../../provision/src/packages";
 import { registerUiFonts } from "./fonts";
 import { RenderGate } from "./render-gate";
+import { TermManager } from "./term/term-manager";
 import { mark } from "./startup-profile";
 
 const log = createLogger("info");
@@ -34,6 +35,7 @@ const isSpinwrap = (html: string) => html.startsWith('<div class="spinwrap"');
 export class CruiserShell {
     private host: HtmlUiHost;
     private panel: UiPanelHandle | null = null;
+    private termMgr: TermManager;
     private gate: RenderGate;
     private W: number;
     private H: number;
@@ -89,6 +91,11 @@ export class CruiserShell {
         mark("panel-mount");
         this.lastRoute = `${store.getState().route}:${store.getState().selectedVm ?? ""}`;
         this.lastParts = mountParts;
+        // Embedded terminals — the webui view is created lazily per VM on
+        // the term route; sessions outlive navigation. svc gets the drop
+        // hook so `vm rm` can kill the session+view too.
+        this.termMgr = new TermManager(device, format, bus, store, svc, () => this.panel);
+        svc.termDropped = (name) => this.termMgr.drop(name);
         this.gate = new RenderGate(mountParts.html, () => this.applyHtml());
         // Hold DOM rebuilds stable across a press: a store update that lands
         // between pointerdown and the click (or the focus event it queues)
@@ -139,7 +146,7 @@ export class CruiserShell {
         const st = () => this.store.getState();
         const svc = this.svc;
         this.host.onAction("nav", (d) => {
-            const route = d.route as "home" | "create" | "settings" | "vm" | "logs" | undefined;
+            const route = d.route as "home" | "create" | "settings" | "vm" | "logs" | "term" | undefined;
             if (!route) return;
             st().setRoute(route, d.vm ?? null);
             if (route === "logs") {
@@ -225,6 +232,9 @@ export class CruiserShell {
         this.host.onAction("vm-kill", (d) => { if (d.vm && this.armed(`vm-kill:${d.vm}`)) svc.kill(d.vm); });
         this.host.onAction("vm-rm", (d) => { if (d.vm && this.armed(`vm-rm:${d.vm}`)) svc.remove(d.vm); });
         this.host.onAction("vm-view", (d) => { if (d.vm) svc.view(d.vm); });
+        this.host.onAction("vm-term", (d) => { if (d.vm) void svc.term(d.vm); });
+        this.host.onAction("vm-term-reconnect", (d) => { if (d.vm) this.termMgr.reconnect(d.vm); });
+        this.host.onAction("vm-term-host", (d) => { if (d.vm) void svc.termHost(d.vm); });
         this.host.onAction("vm-snap", (d) => { if (d.vm) svc.snapshot(d.vm); });
         this.host.onAction("vm-restore", (d) => {
             if (d.vm && d.snap && this.armed(`vm-restore:${d.vm}:${d.snap}`)) svc.restoreSnapshot(d.vm, d.snap);
@@ -382,6 +392,9 @@ export class CruiserShell {
             if (parts.footer !== prev.footer) p.setInnerHtml(".footer", parts.footer);
         }
         this.lastParts = parts;
+        // Post-layout: activate/place the terminal view for the term route,
+        // deactivate views on every other route (sessions keep running).
+        void this.termMgr.syncRoute();
     }
 
     /** Re-pin the log pane to its newest lines — now + once after layout
@@ -406,17 +419,20 @@ export class CruiserShell {
     }
     composite(pass: GPURenderPassEncoder): void {
         this.host.compositor.render(pass, this.W, this.H);
+        this.termMgr.render(pass, this.W, this.H);
     }
 
     resize(w: number, h: number): void {
         this.W = w; this.H = h;
         this.panel?.setRect({ x: 0, y: 0, w, h });
+        void this.termMgr.syncRect();
     }
 
     dispose(): void {
         clearInterval(this.spinTimer);
         if (this.logInputTimer) clearTimeout(this.logInputTimer);
         if (this.confirmTimer) clearTimeout(this.confirmTimer);
+        this.termMgr.dispose();
         this.unsub();
         this.host.dispose();
         this.panel = null;

@@ -23,5 +23,9 @@ dd-assets/
 viewer-dd/target/
 native/dist/
 
+# Rust term helper build + bundle scratch (toolchain/build-term-page.mts)
+term-dd/target/
+.term-bundle-out/
+
 # scratch
 .playwright-mcp/

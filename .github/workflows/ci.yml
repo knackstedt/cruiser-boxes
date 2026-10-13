@@ -39,3 +39,11 @@ jobs:
       - name: viewer-dd cargo clippy
         run: cargo clippy --locked
         working-directory: viewer-dd
+
+      - name: term-dd cargo check
+        run: cargo check --locked
+        working-directory: term-dd
+
+      - name: term-dd cargo clippy
+        run: cargo clippy --locked
+        working-directory: term-dd

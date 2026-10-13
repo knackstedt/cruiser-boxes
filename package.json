@@ -11,6 +11,8 @@
     "cli": "bun run src/cli.ts",
     "toolchain": "bun run toolchain/build.mts",
     "viewer-dd:stage": "bun run toolchain/stage-viewer-dd.mts",
+    "term-dd:stage": "bun run toolchain/stage-term-dd.mts",
+    "term:bundle": "bun run toolchain/build-term-page.mts",
     "lint": "oxlint",
     "test": "bun test tests/",
     "typecheck": "tsc --noEmit"
@@ -18,6 +20,8 @@
   "dependencies": {
     "@downdraft/engine": "file:../downdraft-engine/packages/engine",
     "@downdraft/platform-native": "file:../downdraft-engine/packages/platform-native",
+    "@xterm/xterm": "^5.5.0",
+    "@xterm/addon-fit": "^0.10.0",
     "jimp": "^1.6.1",
     "smol-toml": "^1.9.1",
     "yaml": "^2.9.1",

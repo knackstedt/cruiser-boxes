@@ -65,6 +65,8 @@ usage: cruiser <area> <command> [args]
   vm restore <name> <snapname>          vm snapshot-rm <name> <snapname>
   vm backup <name> <dest.qcow2>         vm resize <name> <newGiB>
   vm rm <name> [--disk]                vm view <name>   launch freerdp viewer + place window
+  vm ssh <name> [cmd...]               interactive guest shell (or run cmd) over the cruiser key
+  vm term <name>                       open the guest shell in a host terminal emulator window
   vm wallpaper <name> [--source PATH|--no-source] [--position POS] [--managed|--no-managed]
                                       [--apply]         guest wallpaper + watermark (POS: top-left|top-right|
                                                         bottom-left|bottom-right|center|off)
@@ -498,6 +500,28 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             console.log(`adapter: ${sess.viewer.adapter.id}`);
             console.log("viewer launched — close the window or ctrl+c to end the session");
             await holdViewer(sess.viewer);
+            break;
+        }
+        case "ssh": {
+            const h = await needVm(args[0]);
+            if (!h.isRunning()) { console.error(`'${h.spec.name}' is not running`); process.exit(1); }
+            const { sshArgv, sshTarget } = await import("../libraries/vm-core/src/ssh");
+            const a = await sshArgv(h.spec, { tty: true, remoteCmd: args.slice(1) });
+            if (!args[1]) console.log(`${sshTarget(h.spec)} — interactive shell (ctrl+d / 'exit' to leave)`);
+            const { spawnSync } = await import("node:child_process");
+            const r = spawnSync("ssh", a, { stdio: "inherit" });
+            process.exit(r.status ?? (r.signal ? 1 : 0));
+        }
+        case "term": {
+            const h = await needVm(args[0]);
+            if (!h.isRunning()) { console.error(`'${h.spec.name}' is not running`); process.exit(1); }
+            const { openHostTerm } = await import("../libraries/host-int/src/termemu");
+            try {
+                await openHostTerm(h.spec);
+            } catch (e) {
+                console.error(`${e instanceof Error ? e.message : e} — 'vm ssh ${h.spec.name}' works in this terminal instead`);
+                process.exit(1);
+            }
             break;
         }
         default: usage();

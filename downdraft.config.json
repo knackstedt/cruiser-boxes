@@ -6,5 +6,8 @@
   "native": {
     "appId": "dev.cruiser.app",
     "title": "Cruiser"
+  },
+  "webui": {
+    "backend": "wpe"
   }
 }

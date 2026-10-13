@@ -141,7 +141,7 @@ export interface UsbChoice {
     writable: boolean;
 }
 
-export type Route = "home" | "create" | "vm" | "settings" | "logs";
+export type Route = "home" | "create" | "vm" | "settings" | "logs" | "term";
 
 /** Logs screen state — source picker + journal filters + fetched text. */
 export interface LogsState {
@@ -186,6 +186,8 @@ export interface CruiserState {
     logs: LogsState;
     /** Description edit buffer on the vm edit screen (loaded by vm-edit). */
     vmDesc: string;
+    /** Status line on the term route's head strip (connect state, exit). */
+    termLine: string;
     /** The share-add form on the vm detail screen. */
     shareForm: ShareForm;
 }
@@ -218,6 +220,7 @@ export interface CruiserActions {
     setEditVm(name: string | null): void;
     setLogs(p: Partial<LogsState>): void;
     setVmDesc(d: string): void;
+    setTermLine(s: string): void;
     setShareForm(p: Partial<ShareForm>): void;
 }
 
@@ -261,6 +264,7 @@ export function createCruiserStore() {
         editVm: null,
         logs: defaultLogs(),
         vmDesc: "",
+        termLine: "",
         shareForm: { hostPath: "", guestPath: "", mode: "mount", direction: "both", open: false },
         setRoute: (route, vm = null) => set({ route, selectedVm: vm, confirm: null, editVm: null }),
         setVms: (vms) => set({ vms }),
@@ -279,6 +283,7 @@ export function createCruiserStore() {
         setEditVm: (editVm) => set({ editVm }),
         setLogs: (p) => set((s) => ({ logs: { ...s.logs, ...p } })),
         setVmDesc: (vmDesc) => set({ vmDesc }),
+        setTermLine: (termLine) => set({ termLine }),
         setShareForm: (p) => set((s) => ({ shareForm: { ...s.shareForm, ...p } })),
         toggleUsb: (key) => set((s) => ({
             create: {
