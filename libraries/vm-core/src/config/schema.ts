@@ -124,6 +124,11 @@ export const VmSpec = z.object({
         sockets: z.number().int().default(1),
         threads: z.number().int().default(1),
         memoryMiB: z.number().int().min(512).default(8192),
+        /** Expose the host's vmx/svm CPUID bit to the guest so it can run
+         *  KVM itself (VMs inside the VM). QEMU filters virt flags out of
+         *  -cpu host, so this must be requested explicitly; the host's
+         *  kvm_intel/kvm_amd nested param must also be on. */
+        nestedVirt: z.boolean().default(false),
     }).prefault({}),
 
     disk: z.object({

@@ -54,7 +54,7 @@ export function initDevHarness(ctx: DevHarnessCtx): void {
 function installFakeVm({ store }: DevHarnessCtx): void {
     const fake: VmSummary = {
         name: "fake-runner", state: "running", gpuMode: "venus", headMode: "windowed",
-        cpus: 4, memMiB: 8192, diskGiB: 64, sshPort: 4022, rdpPort: 43389,
+        cpus: 4, memMiB: 8192, diskGiB: 64, nestedVirt: false, sshPort: 4022, rdpPort: 43389,
         provisioned: "cloudimg", persist: "daemonize", snapshots: [], vd: 0, usbKeys: [],
         description: "fake VM for the screenshot harness",
         origin: "gist:0123456789abcdef0123456789abcdef",

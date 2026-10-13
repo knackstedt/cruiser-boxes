@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { defaultSpec } from "../libraries/vm-core/src/config/schema";
-import { buildArgs, guestCid } from "../libraries/vm-core/src/qemu/args";
+import { buildArgs, guestCid, hostVirtFlag } from "../libraries/vm-core/src/qemu/args";
 import { vmPaths } from "../libraries/vm-core/src/paths";
 
 const env = { ldLibraryPath: "/opt/lib" };
@@ -121,6 +122,15 @@ describe("buildArgs", () => {
         const a = build(undefined, { mode: "install", install: { seedIso: "/s.iso" } });
         expect(a).toContain("cd1");
         expect(a).not.toContain("cd0");
+    });
+
+    test("nestedVirt appends the host's vmx/svm bit to -cpu host", () => {
+        const flag = /\bvmx\b/.test(readFileSync("/proc/cpuinfo", "utf8")) ? "vmx"
+            : /\bsvm\b/.test(readFileSync("/proc/cpuinfo", "utf8")) ? "svm" : null;
+        expect(hostVirtFlag()).toBe(flag);
+        const a = build((s) => { s.resources.nestedVirt = true; });
+        expect(a).toContain(`-cpu\nhost${flag ? `,+${flag}` : ""}\n`);
+        expect(build()).toContain("-cpu\nhost\n");   // off by default
     });
 
     test("owned persist drops -daemonize", () => {

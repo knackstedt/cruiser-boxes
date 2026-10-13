@@ -33,6 +33,7 @@ export interface VmSummary {
     cpus: number;
     memMiB: number;
     diskGiB: number;
+    nestedVirt: boolean;           // spec.resources.nestedVirt
     sshPort?: number;
     rdpPort?: number;
     provisioned?: string;          // method or undefined
@@ -61,6 +62,7 @@ export type CreateForm = SyncFormFields & {
     cpus: number;
     memMiB: number;
     diskGiB: number;
+    nestedVirt: boolean;           // pass vmx/svm through — run KVM inside the guest
     gpu: string;                   // venus|virgl|software
     headMode: string;              // fullscreen-monitor|windowed|virtual-desktop|app
     persist: string;               // daemonize|owned|ephemeral
@@ -233,7 +235,7 @@ const defaultLogs = (): LogsState => ({
 });
 
 const defaultCreate = (): CreateForm => ({
-    name: "", cpus: 4, memMiB: 8192, diskGiB: 100,
+    name: "", cpus: 4, memMiB: 8192, diskGiB: 100, nestedVirt: false,
     gpu: "venus", headMode: "virtual-desktop", persist: "daemonize",
     method: "cloudimg", distro: "ubuntu", release: "26.04", desktop: "gnome",
     browser: "none", snap: false, extraFonts: false, autologin: true,

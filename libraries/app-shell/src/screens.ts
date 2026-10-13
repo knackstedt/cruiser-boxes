@@ -423,6 +423,7 @@ function create(s: CruiserState): string {
         ${field("vCPUs", "cpus", f.cpus, 80)}
         ${memRow}
         ${diskRow}
+        ${checkRow("Nested virtualization", "nestedVirt", f.nestedVirt, "pass the host's vmx/svm flag to the guest — run KVM inside the VM (needs the host kvm module's nested=1, see doctor)")}
         <div class="h2">Graphics &amp; display</div>
         ${optRow("GPU mode", "gpu", f.gpu, [["venus", "Venus (Vulkan)"], ["virgl", "virgl (GL)"], ["software", "software"]])}
         ${optRow("Head mode", "headMode", f.headMode, [["virtual-desktop", "virtual desktop"], ["fullscreen-monitor", "fullscreen monitor"], ["windowed", "windowed"], ["app", "app-only"]])}
@@ -484,7 +485,7 @@ function vmDetail(s: CruiserState): string {
         <div class="h1">${esc(vm.name)} <span class="pill ${pillClass(vm.state)}">${esc(vm.state)}</span></div>
         ${vm.description ? `<div class="meta" style="margin:-8px 0 12px">${esc(vm.description)}</div>` : ""}
         <div class="kv">
-            <div class="k">resources</div><div>${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB · ${vm.diskGiB} GiB disk</div>
+            <div class="k">resources</div><div>${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB · ${vm.diskGiB} GiB disk${vm.nestedVirt ? " · nested virt" : ""}</div>
             ${diskDetail ? `<div class="k">disk usage</div><div>${esc(diskDetail)}</div>` : ""}
             <div class="k">gpu / head</div><div>${esc(vm.gpuMode)} / ${esc(vm.headMode)}</div>
             <div class="k">ports</div><div>ssh 127.0.0.1:${vm.sshPort ?? "–"} · rdp 127.0.0.1:${vm.rdpPort ?? "–"}</div>

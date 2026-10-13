@@ -196,7 +196,7 @@ export class CruiserService {
             name: s.name, state,
             gpuMode: s.gpu.mode, headMode: s.display.headMode,
             cpus: s.resources.cpus, memMiB: s.resources.memoryMiB,
-            diskGiB: s.disk.sizeGiB,
+            diskGiB: s.disk.sizeGiB, nestedVirt: s.resources.nestedVirt,
             sshPort: s.network.sshPort, rdpPort: s.network.rdpPort,
             provisioned: s.provisioned.method, persist: s.persist,
             description: s.description,
@@ -438,6 +438,7 @@ export class CruiserService {
             const spec = defaultSpec(f.name);
             spec.resources.cpus = f.cpus;
             spec.resources.memoryMiB = f.memMiB;
+            spec.resources.nestedVirt = f.nestedVirt;
             spec.disk.sizeGiB = f.diskGiB;
             spec.gpu.mode = f.gpu as VmSpec["gpu"]["mode"];
             spec.display.headMode = f.headMode as VmSpec["display"]["headMode"];
@@ -609,6 +610,7 @@ export class CruiserService {
             const spec: VmSpec = JSON.parse(JSON.stringify(h.spec));
             spec.resources.cpus = f.cpus;
             spec.resources.memoryMiB = f.memMiB;
+            spec.resources.nestedVirt = f.nestedVirt;
             spec.disk.sizeGiB = f.diskGiB;
             spec.gpu.mode = f.gpu as VmSpec["gpu"]["mode"];
             spec.display.headMode = f.headMode as VmSpec["display"]["headMode"];

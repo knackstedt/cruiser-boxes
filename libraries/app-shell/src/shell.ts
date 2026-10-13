@@ -20,9 +20,9 @@ const log = createLogger("info");
 
 const NUM_FIELDS: Set<string> = new Set(["cpus", "memMiB", "diskGiB"]);
 const BOOL_FIELDS: Set<string> = new Set([
-    "snap", "extraFonts", "autologin",
+    "snap", "extraFonts", "autologin", "nestedVirt",
     "syncTheme", "syncAccent", "syncContrast", "syncTimezone", "syncLocale",
-    "syncKeyboard", "syncMonitors", "syncHostWallpaper",
+    "syncKeyboard", "syncMonitors", "syncHostWallpaper", "syncScale", "syncShares",
     "syncGit", "syncProxy", "syncCa", "syncAgent",
 ]);
 
@@ -206,6 +206,7 @@ export class CruiserShell {
             // (method/distro/credentials) stay at their defaults, unused.
             Object.assign(st().create, {
                 name: vm.name, cpus: vm.cpus, memMiB: vm.memMiB, diskGiB: vm.diskGiB,
+                nestedVirt: vm.nestedVirt,
                 gpu: vm.gpuMode, headMode: vm.headMode, persist: vm.persist,
                 vd: vm.vd, usb: [...vm.usbKeys],
             });

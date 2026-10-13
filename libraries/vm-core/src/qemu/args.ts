@@ -8,6 +8,7 @@
 // shares, qemu-xhci + at-boot usb-host devices, autoinstall extras.
 // ============================================================================
 
+import { readFileSync } from "node:fs";
 import type { VmSpec } from "../config/schema";
 import { diskPath, type VmPaths } from "../paths";
 
@@ -41,6 +42,22 @@ export interface BuiltArgs {
     virtiofsd: { socket: string; sharedDir: string; tag: string }[];
 }
 
+/**
+ * The nested-virt CPUID bit for this host: "vmx" (Intel) / "svm" (AMD),
+ * null when the CPU advertises neither. QEMU strips virt flags from
+ * -cpu host, so resources.nestedVirt needs an explicit +vmx/+svm; the
+ * guest still won't see it unless the kvm module's nested param is on
+ * (doctor reports that).
+ */
+export function hostVirtFlag(): "vmx" | "svm" | null {
+    try {
+        const info = readFileSync("/proc/cpuinfo", "utf8");
+        if (/\bvmx\b/.test(info)) return "vmx";
+        if (/\bsvm\b/.test(info)) return "svm";
+    } catch { /* unreadable cpuinfo — KVM can't be in play anyway */ }
+    return null;
+}
+
 /** Deterministic vsock guest CID per VM name (>= 1024 avoids reserved cids). */
 export function guestCid(name: string): number {
     let h = 0;
@@ -66,7 +83,8 @@ export function buildArgs(
     push("-machine", "q35,kernel_irqchip=on,memory-backend=mem0");
     push("-object", `memory-backend-memfd,share=on,id=mem0,size=${memBytes}`);
     push("-accel", "kvm");
-    push("-cpu", "host");
+    const nestedFlag = spec.resources.nestedVirt ? hostVirtFlag() : null;
+    push("-cpu", `host${nestedFlag ? `,+${nestedFlag}` : ""}`);
     push("-smp", `${cpus},sockets=${spec.resources.sockets},cores=${cpus},threads=${spec.resources.threads}`);
     push("-drive", `if=pflash,format=raw,unit=0,readonly=on,file=${OVMF_CODE}`);
     push("-drive", `if=pflash,format=raw,unit=1,file=${paths.ovmfVars}`);

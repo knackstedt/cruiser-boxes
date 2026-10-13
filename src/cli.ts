@@ -16,7 +16,7 @@
 // invoke this CLI.
 // ============================================================================
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { VmRegistry, VmSpec, VmHandle, HeadMode, defaultSpec, type ShareSpec } from "../libraries/vm-core/src/index";
@@ -41,6 +41,8 @@ usage: cruiser <area> <command> [args]
                    [--distro ubuntu|debian|fedora] [--desktop gnome|kde]
                    [--browser none|firefox|chrome|chromium|vivaldi|brave]
                    [--snap] [--xfonts] [--no-autologin] [--devtools toolchain,python,rust,…]
+                   [--nested]                          expose vmx/svm to the guest (VMs in the VM —
+                                                        needs the host kvm module's nested=1, see doctor)
                    [--sync a,b,c] [--no-sync x,y]     host→guest sync channels (see vm sync)
                    [--viewer rdp|dmabuf]              dmabuf = direct QEMU dma-buf display (virgl+)
                    [--wallpaper PATH] [--wallpaper-pos POS]
@@ -173,6 +175,7 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const distro = flagVal("--distro"); if (distro) spec.os.family = distro as VmSpec["os"]["family"];
             const desktop = flagVal("--desktop"); if (desktop) spec.os.desktop = desktop as VmSpec["os"]["desktop"];
             const browser = flagVal("--browser"); if (browser) spec.os.browser = browser as VmSpec["os"]["browser"];
+            if (has("--nested")) spec.resources.nestedVirt = true;
             if (has("--snap")) spec.os.snap = true;
             if (has("--xfonts")) spec.os.extraFonts = true;
             if (has("--no-autologin")) spec.os.autologin = false;
@@ -579,6 +582,19 @@ async function doctor() {
         checks.push([`xfreerdp: ${tc.xfreerdp}`, true, ""]);
     }
     checks.push(["OVMF firmware", existsSync("/usr/share/OVMF/OVMF_CODE_4M.fd"), "apt install ovmf"]);
+    // Nested virt only fails doctor when a VM actually asks for it — the
+    // flag is opt-in per spec.
+    const kvmMod = ["kvm_intel", "kvm_amd"].find((m) => existsSync(`/sys/module/${m}/parameters/nested`));
+    const wantsNested = registry.list().some((h) => h.spec.resources.nestedVirt);
+    if (kvmMod) {
+        const v = (await readFile(`/sys/module/${kvmMod}/parameters/nested`, "utf8")).trim();
+        const on = v === "Y" || v === "1" || v === "y" || v.toLowerCase() === "true";
+        checks.push([`nested virtualization (${kvmMod} nested=${v})`, on || !wantsNested,
+            `echo "options ${kvmMod} nested=1" | sudo tee /etc/modprobe.d/kvm-nested.conf, then reboot`]);
+    } else {
+        checks.push(["nested virtualization (no kvm_intel/kvm_amd)", !wantsNested,
+            "enable VT-x/AMD-V in firmware and load the kvm module"]);
+    }
     // usb-host needs rw on /dev/bus/usb nodes — most distros ship root-only.
     const usbDevs = await listUsbDevices().catch(() => []);
     const blocked = usbDevs.filter((d) => !d.writable);
