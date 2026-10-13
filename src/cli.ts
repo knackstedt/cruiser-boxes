@@ -536,11 +536,11 @@ async function doctor() {
     const checks: [string, boolean, string][] = [];
     const k = await run("test", ["-w", "/dev/kvm"], { noThrow: true });
     checks.push(["/dev/kvm writable (kvm group)", k.code === 0, "usermod -aG kvm $USER"]);
-    const groups = (await run("id", ["-nG"])).stdout;
-    checks.push(["in kvm group", groups.split(" ").includes("kvm"), "usermod -aG kvm $USER (relogin)"]);
+    const groups = (await run("id", ["-nG"])).stdout.trim().split(/\s+/);
+    checks.push(["in kvm group", groups.includes("kvm"), "usermod -aG kvm $USER (relogin)"]);
     const tools = ["xfreerdp3", "cloud-localds", "genisoimage", "wmctrl", "xdotool", "qdbus", "waypipe", "socat", "sshfs"];
     for (let i = 0; i < tools.length; i++) {
-        const p = await which(tools[i]!);
+        const p = await which(tools[i]!) ?? (tools[i] === "qdbus" ? await which("qdbus6") : null);
         checks.push([`tool: ${tools[i]}`, !!p, "see toolchain/versions.json systemTools"]);
     }
     checks.push(["tool: rsync (copy-mode shares)", !!(await which("rsync")), "apt install rsync — needed for --copy shares"]);
