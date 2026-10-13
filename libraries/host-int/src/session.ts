@@ -88,6 +88,24 @@ export class ViewerSession extends EventEmitter {
             for (const p of stale.stdout.trim().split("\n").filter(Boolean))
                 try { process.kill(Number(p), "SIGTERM"); } catch { /* already gone */ }
 
+            // Pre-map VD placement: a KWin window rule lands every viewer
+            // head on its target desktop at map time. Without it each window
+            // flashes on the current desktop before the post-map
+            // moveToDesktop drags it over (still kept below as the fallback
+            // for adapters without a rules api — and for adopted windows).
+            if (this.adapter.installWindowRule && d.headMode === "virtual-desktop") {
+                const vd = (await this.adapter.desktops().catch(() => [])).find((x) => x.index === d.virtualDesktop);
+                if (vd?.id) {
+                    const un = await this.adapter.installWindowRule({
+                        titleRegex: `^cruiser:${escapeRegex(this.spec.name)}(:[0-9]+)?$`,
+                        wmClass: dmabuf ? undefined : "xfreerdp",
+                        desktopId: vd.id,
+                        description: `cruiser: ${this.spec.name} → desktop ${vd.index}${vd.name ? ` (${vd.name})` : ""}`,
+                    }).catch(() => null);
+                    if (un) this.uninstallers.push(un);
+                }
+            }
+
             // Newer krdp (Plasma ≥6.5) negotiates NLA but has no CredSSP
             // credentials — the connection dies in negotiation. Probe the
             // security layer up front (TLS-only → /sec:tls immediately), and
@@ -157,8 +175,9 @@ export class ViewerSession extends EventEmitter {
                 // monitor i (the outputs[] mirror order built into QEMU).
                 const hostMons = await this.adapter.monitors().catch(() => []);
                 const sel = d.monitors === "all" ? hostMons : hostMons.filter((m) => (d.monitors as string[]).includes(m.name));
-                for (let i = 0; i < this.windows.length; i++) {
-                    const w = this.windows[i]!;
+                // per-head ops are independent — run them together or heads
+                // place visibly one-by-one
+                await Promise.all(this.windows.map(async (w) => {
                     const idx = Number(w.title.match(/:(\d+)$/)?.[1] ?? 0);
                     const mon = sel[idx] ?? sel[0];
                     if (mon) await this.adapter.moveToMonitor(w, mon.name).catch(() => {});
@@ -167,7 +186,7 @@ export class ViewerSession extends EventEmitter {
                     if (d.headMode === "fullscreen-monitor" && d.sticky)
                         await this.adapter.moveToDesktop(w, "all").catch(() => {});
                     await this.adapter.setFullscreen(w, true).catch(() => {});
-                }
+                }));
             } else {
                 if (d.headMode === "virtual-desktop")
                     await this.adapter.moveToDesktop(this.window, d.virtualDesktop).catch(() => {});
@@ -240,6 +259,10 @@ export class ViewerSession extends EventEmitter {
     }
 }
 
+function escapeRegex(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /** "host-desktop:1" | "desktop-cycle-left" | "desktop-cycle-right" |
  *  "ungrab" | "command:<cmdline>" (run via sh -c; {vm}/{cli} placeholders
  *  are already substituted by the caller). */
@@ -261,8 +284,14 @@ export function parseEscapeAction(s: string): EscapeActionSpec | null {
 
 /** What `{cli}` expands to in escape-shortcut commands — dev trees resolve
  *  to the repo's cli.ts via bun; packaged builds don't ship it, so the
- *  installed `cruiser` binary is assumed on PATH. */
+ *  installed `cruiser` binary is assumed on PATH. Shortcut daemons (gsd,
+ *  kglobalaccel) exec through `sh -c` with the SESSION's PATH — which may
+ *  lack ~/.bun/bin — so the running bun is referenced by absolute path and
+ *  both paths are single-quoted for the shell. */
 export function cruiserCliPrefix(): string {
     const cli = new URL("../../../src/cli.ts", import.meta.url).pathname;
-    return existsSync(cli) ? `bun run ${cli}` : "cruiser";
+    if (!existsSync(cli)) return "cruiser";
+    const q = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
+    const bun = /bun/.test(process.execPath.split("/").pop() ?? "") ? q(process.execPath) : "bun";
+    return `${bun} run ${q(cli)}`;
 }

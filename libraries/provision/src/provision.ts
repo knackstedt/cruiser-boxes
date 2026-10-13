@@ -11,7 +11,7 @@ import { guestLayoutFromHost, hostMirroredGuestMonitors } from "./monitors";
 import { provisionCloudimg } from "./cloudimg";
 import { ensureIso, runIsoInstall } from "./iso-install";
 import { waitForAgent, runGuestSetup } from "./guest-setup";
-import { gatherHostSync, seedTimezone, syncEnabled, type HostSnapshot } from "./sync";
+import { applyHostScale, gatherHostSync, seedTimezone, syncEnabled, type HostSnapshot } from "./sync";
 import { writePasswordFile } from "./nocloud";
 import { randomBytes } from "node:crypto";
 
@@ -50,7 +50,7 @@ async function monitorsXml(spec: VmSpec, o: ProvisionOpts): Promise<string | und
     if (o.mirrorHostMonitors === false || !syncEnabled(spec, "monitors")) return undefined;
     const adapter = detectAdapter();
     if (!adapter.caps.monitors) return undefined;
-    const host = await adapter.monitors().catch(() => []);
+    const host = await applyHostScale(spec, await adapter.monitors().catch(() => []));
     return host.length ? guestLayoutFromHost(spec.name, host).xml : undefined;
 }
 

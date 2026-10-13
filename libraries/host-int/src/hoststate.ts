@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { glob } from "node:fs/promises";
 import { run, which } from "../../sys/src/exec";
 import { hostColorScheme } from "./appearance";
+import { detectSession } from "./detect";
 
 /** Host timezone ("Europe/Berlin"). timedatectl first, /etc/localtime
  *  symlink as the no-systemd fallback. */
@@ -111,6 +112,58 @@ export async function hostWallpaperPath(): Promise<string | null> {
             return p;
         }
     } catch { /* no readable plasma image */ }
+    return null;
+}
+
+export interface HostScale {
+    /** Display scale (1, 1.25, 2…) — gsettings scaling-factor / KDE
+     *  KScreen ScaleFactor. Absent when the host expresses none. */
+    scale?: number;
+    /** Font/text multiplier — gsettings text-scaling-factor / KDE
+     *  forceFontDPI÷96 / Xft.dpi÷96. */
+    text?: number;
+}
+
+/**
+ * Host display + font scaling. Probe order follows the session DE so a
+ * GNOME host's gsettings defaults are authoritative but a stray
+ * org.gnome.desktop.interface schema on a KDE host can't fabricate a 1.0.
+ * Returns null when no probe produces a value — the channel then skips.
+ */
+export async function hostDisplayScale(): Promise<HostScale | null> {
+    const kde = detectSession().startsWith("kde");
+    if (!kde && await which("gsettings")) {
+        const get = async (key: string) => {
+            const r = await run("gsettings", ["get", "org.gnome.desktop.interface", key],
+                { noThrow: true, timeoutMs: 5_000 });
+            // typed output is "uint32 2" / "1.25" — the value is the last token
+            const v = Number(r.stdout.trim().split(/\s+/).pop());
+            return r.code === 0 && Number.isFinite(v) && v > 0 ? v : undefined;
+        };
+        // scaling-factor 0 means "auto" — not a statement; text-scaling 1.0
+        // still counts so the channel resets a drifted guest.
+        const [sf, tf] = await Promise.all([get("scaling-factor"), get("text-scaling-factor")]);
+        if (sf !== undefined || tf !== undefined) return { scale: sf, text: tf ?? 1 };
+    }
+    if (kde && await which("kreadconfig6")) {
+        const get = async (file: string, group: string, key: string) => {
+            const r = await run("kreadconfig6", ["--file", file, "--group", group, "--key", key],
+                { noThrow: true, timeoutMs: 5_000 });
+            const v = Number(r.stdout.trim());
+            return r.code === 0 && Number.isFinite(v) ? v : undefined;
+        };
+        const [sf, dpi] = await Promise.all([
+            get("kdeglobals", "KScreen", "ScaleFactor"),
+            get("kcmfonts", "General", "forceFontDPI"),
+        ]);
+        if (sf !== undefined || (dpi !== undefined && dpi > 0))
+            return { scale: sf, text: dpi && dpi > 0 ? dpi / 96 : 1 };
+    }
+    if (await which("xrdb")) {
+        const r = await run("xrdb", ["-query"], { noThrow: true, timeoutMs: 5_000 });
+        const m = r.stdout.match(/^Xft\.dpi:\s*(\d+(?:\.\d+)?)/m);
+        if (m) return { text: Number(m[1]) / 96 };
+    }
     return null;
 }
 

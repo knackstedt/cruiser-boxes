@@ -5,7 +5,9 @@
 //   kde-x11        — full support via xdotool/wmctrl + kglobalshortcutsrc
 //   kde-wayland    — desktops + shortcuts via qdbus; window ops via KWin script
 //   gnome-x11      — full support via xdotool/wmctrl; shortcuts via gsettings
-//   gnome-wayland  — read-only without a shell extension (docs/de-matrix.md)
+//   gnome-wayland  — shortcuts via gsettings (gsd is session-level, not X11);
+//                    window ops are read-only without a shell extension
+//                    (docs/de-matrix.md)
 //   generic-x11    — wmctrl/xdotool baseline for other EWMH WMs
 // ============================================================================
 
@@ -19,7 +21,7 @@ import {
     x11CurrentDesktop, x11Desktops, x11FindWindow, x11FindWindows, x11Focus, x11Monitors,
     x11MoveToDesktop, x11MoveToMonitor, x11SetFullscreen, x11SwitchDesktop,
 } from "./x11";
-import { kdeDesktops, kdeInstallEscapeShortcut, kdeMonitors, kdeSwitchDesktop, kwinScript } from "./kde";
+import { kdeDesktops, kdeInstallEscapeShortcut, kdeInstallWindowRule, kdeMonitors, kdeSwitchDesktop, kwinScript } from "./kde";
 
 // ── shared X11 machinery ──
 
@@ -71,6 +73,7 @@ export function kdeX11(): WmAdapter {
             return ds.length ? ds : x11Desktops();
         },
         installEscapeShortcut: (keys, action) => kdeInstallEscapeShortcut(keys, action),
+        installWindowRule: kdeInstallWindowRule,
         // keep runEscape usable for runtime (non-installed) escapes
     };
 }
@@ -118,6 +121,9 @@ export function kdeWayland(): WmAdapter {
         async moveToMonitor(w, m2) { void w; void m2; },
         async focus(w) { void w; },
         installEscapeShortcut: (keys, action) => kdeInstallEscapeShortcut(keys, action),
+        // KWin rules reach Wayland clients too — the only placement path
+        // this adapter has until the KWin-script window ops land.
+        installWindowRule: kdeInstallWindowRule,
     };
 }
 
@@ -126,19 +132,23 @@ export function kdeWayland(): WmAdapter {
 
 export function gnomeX11(): WmAdapter {
     const base = x11Base("gnome-x11", { monitors: true, desktops: true, placeWindows: true, shortcuts: true });
-    return {
-        ...base,
-        async installEscapeShortcut(keys: string, action: EscapeActionSpec) {
-            const binding = gnomeKeys(keys);
-            if (action.kind === "command") return gnomeInstallCommandShortcut(binding, action.argv);
-            const path = gnomeKeybindFor(action);
-            if (!path) throw new Error(`escape action '${action.kind}' has no GNOME binding`);
-            const [schema, key] = path;
-            const prev = (await run("gsettings", ["get", schema, key], { noThrow: true })).stdout.trim();
-            await run("gsettings", ["set", schema, key, `['${binding}']`]);
-            return async () => { await run("gsettings", ["set", schema, key, prev || "@as []"], { noThrow: true }); };
-        },
-    };
+    return { ...base, installEscapeShortcut: gnomeInstallEscapeShortcut };
+}
+
+/**
+ * gsettings keybindings — identical on X11 and Wayland: mutter owns the
+ * wm.keybindings schema and gsd handles media-keys custom-keybindings at
+ * the session level, so none of this touches X11.
+ */
+async function gnomeInstallEscapeShortcut(keys: string, action: EscapeActionSpec) {
+    const binding = gnomeKeys(keys);
+    if (action.kind === "command") return gnomeInstallCommandShortcut(binding, action.argv);
+    const path = gnomeKeybindFor(action);
+    if (!path) throw new Error(`escape action '${action.kind}' has no GNOME binding`);
+    const [schema, key] = path;
+    const prev = (await run("gsettings", ["get", schema, key], { noThrow: true })).stdout.trim();
+    await run("gsettings", ["set", schema, key, `['${binding}']`]);
+    return async () => { await run("gsettings", ["set", schema, key, prev || "@as []"], { noThrow: true }); };
 }
 
 function gnomeKeys(keys: string): string {
@@ -194,14 +204,15 @@ async function gnomeInstallCommandShortcut(binding: string, argv: string[]): Pro
     };
 }
 
-// ── gnome-wayland — read-only until a companion shell extension ships ──
+// ── gnome-wayland — shortcuts via gsettings; window ops stay stubbed until
+// a companion shell extension ships ──
 
 export function gnomeWayland(): WmAdapter {
     return {
         id: "gnome-wayland",
         caps: {
-            monitors: false, desktops: false, placeWindows: false, shortcuts: false,
-            notes: "mutter exposes no window-placement dbus API; needs the cruiser shell extension (docs/de-matrix.md)",
+            monitors: false, desktops: false, placeWindows: false, shortcuts: true,
+            notes: "mutter exposes no window-placement dbus API; needs the cruiser shell extension (docs/de-matrix.md). Escape shortcuts DO work — media-keys/wm keybindings are session-level, not X11.",
         },
         monitors: async () => [],
         desktops: async () => [],
@@ -210,7 +221,7 @@ export function gnomeWayland(): WmAdapter {
         setFullscreen: async () => {},
         moveToMonitor: async () => {},
         focus: async () => {},
-        installEscapeShortcut: async () => { throw new Error("gnome-wayland: global shortcuts need the cruiser extension"); },
+        installEscapeShortcut: gnomeInstallEscapeShortcut,
     };
 }
 

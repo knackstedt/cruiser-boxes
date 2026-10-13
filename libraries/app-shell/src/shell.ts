@@ -208,6 +208,7 @@ export class CruiserShell {
                 syncContrast: sy.contrast ?? true, syncTimezone: sy.timezone ?? true,
                 syncLocale: sy.locale ?? true, syncKeyboard: sy.keyboard ?? true,
                 syncMonitors: sy.monitors ?? true, syncHostWallpaper: sy.hostWallpaper ?? true,
+                syncScale: sy.scale ?? true,
                 syncGit: sy.gitIdentity ?? false, syncProxy: sy.proxy ?? false,
                 syncCa: sy.caCerts ?? false, syncAgent: sy.sshAgent ?? false,
                 syncShares: sy.shares ?? true,

@@ -39,6 +39,17 @@ export interface WindowMatcher {
     pid?: number;
 }
 
+export interface WindowRuleSpec {
+    /** Regex matched against the window title. */
+    titleRegex?: string;
+    /** Exact WM_CLASS match. */
+    wmClass?: string;
+    /** Target desktop — adapter-native id (KWin VD uuid, …). */
+    desktopId: string;
+    /** Human-readable label for the WM's rules editor. */
+    description?: string;
+}
+
 export type EscapeActionSpec =
     | { kind: "host-desktop"; index: number }
     | { kind: "desktop-cycle"; dir: 1 | -1 }
@@ -74,4 +85,12 @@ export interface WmAdapter {
      * Returns an uninstaller.
      */
     installEscapeShortcut(keys: string, action: EscapeActionSpec): Promise<() => Promise<void>>;
+    /**
+     * Install a WM window rule evaluated at map time (KWin window rules)
+     * so a window lands on its target desktop before it is ever shown —
+     * unlike moveToDesktop, which drags a visible window after the fact.
+     * Optional; callers fall back to post-map placement. Returns an
+     * uninstaller.
+     */
+    installWindowRule?(rule: WindowRuleSpec): Promise<() => Promise<void>>;
 }

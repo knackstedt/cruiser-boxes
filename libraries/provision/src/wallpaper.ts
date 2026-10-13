@@ -21,7 +21,9 @@ import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { guestRun } from "../../vm-core/src/logs";
 import { pushFileToGuest } from "./stage";
+import { detectAdapter } from "../../host-int/src/detect";
 import { hostWallpaperPath } from "../../host-int/src/hoststate";
+import type { MonitorInfo } from "../../host-int/src/types";
 
 /** CRUISER_WALLPAPER=0 disables both the render and the push. */
 export function wallpaperEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -77,13 +79,28 @@ export function watermarkLines(spec: VmSpec): { text: string; kind: "title" | "d
 /** The "~/Desktop/VM Shortcuts.md" cheat sheet — UTF-8, full detail. */
 export function shortcutsDoc(spec: VmSpec): string {
     const n = spec.name;
-    const esc = escapesActive(spec)
-        ? spec.display.escapeShortcuts.map((s) => `- \`${s.keys}\` — ${escapeActionLabel(s.action, spec.name)}`).join("\n") ||
-          "(none configured in `display.escapeShortcuts`)"
-        : `None — this VM's head mode is \`${spec.display.headMode}\`${spec.display.grabKeyboard ? " with keyboard grab on" : ""}, so no host bindings are installed.`;
+    const dmabuf = spec.display.viewer === "dmabuf";
+    // The doc promises keys the host actually binds — a session whose
+    // adapter can't install global shortcuts gets the honest answer.
+    const bindable = (() => { try { return detectAdapter().caps.shortcuts; } catch { return true; } })();
+    const esc = !escapesActive(spec)
+        ? `None — this VM's head mode is \`${spec.display.headMode}\`${spec.display.grabKeyboard ? " with keyboard grab on" : ""}, so no host bindings are installed.`
+        : !bindable
+        ? `None — this host session's window manager has no keybinding API cruiser's adapter can reach, so no escape shortcuts are installed.`
+        : spec.display.escapeShortcuts.map((s) => `- \`${s.keys}\` — ${escapeActionLabel(s.action, spec.name)}`).join("\n") ||
+          "(none configured in `display.escapeShortcuts`)";
+    const [viewerDesc, viewerKeys] = dmabuf
+        ? [
+            `This desktop is rendered by cruiser's dmabuf viewer (\`cruiser:${n}\` — one viewer-dd window per guest display).`,
+            `- viewer windows are ordinary host windows — your WM's own keys apply (fullscreen toggle, desktop moves)\n- closing the viewer window ends the session (the VM keeps running)`,
+          ]
+        : [
+            `This desktop is streamed by the freerdp viewer (\`cruiser:${n}\`).`,
+            `- \`ctrl+alt+enter\` — toggle fullscreen\n- closing the viewer window ends the session (the VM keeps running)`,
+          ];
     return `# Cruiser VM shortcuts — ${n}
 
-This desktop is streamed by the freerdp viewer (\`cruiser:${n}\`). Keep this
+${viewerDesc} Keep this
 file — it's every way out if the guest looks stuck.
 
 ## Host escape shortcuts (while the viewer window is focused)
@@ -93,10 +110,9 @@ ${esc}
 These are bound on the host WM for the viewer session's lifetime, not inside
 the guest — they only fire while the cruiser viewer is up.
 
-## Viewer (xfreerdp) keys
+## Viewer (${dmabuf ? "viewer-dd" : "xfreerdp"}) keys
 
-- \`ctrl+alt+enter\` — toggle fullscreen
-- closing the viewer window ends the session (the VM keeps running)
+${viewerKeys}
 
 ## From a host terminal
 
@@ -200,7 +216,7 @@ export async function importJimp() {
     }
 }
 
-export async function renderWallpaper(spec: VmSpec, src?: string | null): Promise<Buffer> {
+export async function renderWallpaper(spec: VmSpec, src?: string | null, target?: { w: number; h: number } | null): Promise<Buffer> {
     const { Jimp, loadFont, measureText, measureTextHeight, JimpMime, F } = await importJimp();
 
     const w = spec.display.wallpaper;
@@ -208,7 +224,15 @@ export async function renderWallpaper(spec: VmSpec, src?: string | null): Promis
     // instantiations of the same class — `any` sidesteps the mismatch.
     const source = src !== undefined ? src : (w.source ?? null);
     let img: any = source ? await Jimp.read(source).catch(() => null) : null;
-    if (!img) img = defaultBackdrop(Jimp);
+    if (!img) img = defaultBackdrop(Jimp, target);
+    // Cover-fit to the guest screen BEFORE compositing: GNOME 'zoom' and
+    // Plasma 'crop' fill modes re-crop a mismatched-aspect source, which is
+    // what parked edge watermarks in dead space. A pixel-exact composite
+    // makes the DE's own crop a no-op so the watermark always lands on the
+    // visible area.
+    if (target && target.w > 0 && target.h > 0 &&
+        (img.bitmap.width !== target.w || img.bitmap.height !== target.h))
+        img.cover(target.w, target.h);
 
     if (w.position !== "off") {
         const W = img.bitmap.width, H = img.bitmap.height;
@@ -263,8 +287,8 @@ export async function renderWallpaper(spec: VmSpec, src?: string | null): Promis
 }
 
 /** Generated default: diagonal navy→charcoal gradient with a soft vignette. */
-function defaultBackdrop(Jimp: any) {
-    const W = 2560, H = 1440;
+function defaultBackdrop(Jimp: any, target?: { w: number; h: number } | null) {
+    const W = target?.w ?? 2560, H = target?.h ?? 1440;
     const img = new Jimp({ width: W, height: H, color: 0x000000ff });
     const c0 = [0x27, 0x38, 0x55], c1 = [0x0a, 0x0d, 0x14];
     img.scan((x: number, y: number, idx: number) => {
@@ -361,7 +385,7 @@ export async function wallpaperSource(spec: VmSpec): Promise<string | null> {
 }
 
 /** Inputs that make the pushed wallpaper stale — hashed into run/wallpaper.state. */
-async function wallpaperHash(h: VmHandle, source: string | null): Promise<string> {
+async function wallpaperHash(h: VmHandle, source: string | null, target: { w: number; h: number } | null): Promise<string> {
     const w = h.spec.display.wallpaper;
     let srcMeta = "";
     if (source) {
@@ -369,10 +393,25 @@ async function wallpaperHash(h: VmHandle, source: string | null): Promise<string
         srcMeta = st ? `${st.mtimeMs}:${st.size}` : "missing";
     }
     const payload = JSON.stringify({
-        v: 2, name: h.spec.name, position: w.position, desktop: h.spec.os.desktop,
-        source: source ?? "", srcMeta, doc: shortcutsDoc(h.spec),
+        v: 3, name: h.spec.name, position: w.position, desktop: h.spec.os.desktop,
+        source: source ?? "", srcMeta, target, doc: shortcutsDoc(h.spec),
     });
     return createHash("sha256").update(payload).digest("hex").slice(0, 16);
+}
+
+/**
+ * Guest primary-monitor resolution — the composite is cover-cropped to
+ * this aspect so the DE's fill-scaling can't crop the watermark. Mirrors
+ * the same host→guest monitor pick as outputs[]/monitors.xml (first
+ * selected monitor, primary preferred). null when no adapter probe is
+ * possible — render then falls back to the source's own aspect.
+ */
+export async function wallpaperTarget(spec: VmSpec): Promise<{ w: number; h: number } | null> {
+    const host = await detectAdapter().monitors().catch(() => [] as MonitorInfo[]);
+    const sel = spec.display.monitors;
+    const picked = sel === "all" ? host : host.filter((m) => sel.includes(m.name));
+    const m = picked.find((x) => x.primary) ?? picked[0];
+    return m ? { w: m.w, h: m.h } : null;
 }
 
 export type WallpaperSyncResult = "off" | "skipped" | "applied" | "staged";
@@ -390,12 +429,13 @@ export async function ensureGuestWallpaper(
     const w = h.spec.display.wallpaper;
     if (!w.managed || !wallpaperEnabled()) return "off";
     const source = await wallpaperSource(h.spec);
-    const hash = await wallpaperHash(h, source);
+    const target = await wallpaperTarget(h.spec);
+    const hash = await wallpaperHash(h, source, target);
     const statePath = join(h.paths.run, "wallpaper.state");
     const [prevHash, prevStatus] = (await readFile(statePath, "utf-8").catch(() => "")).trim().split(" ");
     if (!opts.force && prevHash === hash && prevStatus === "applied") return "skipped";
 
-    const png = await renderWallpaper(h.spec, source);
+    const png = await renderWallpaper(h.spec, source, target);
     await mkdir(h.paths.run, { recursive: true });
     await writeFile(join(h.paths.run, "wallpaper.png"), png); // host copy — preview/debug
     await pushFileToGuest(h, GUEST_STAGE, png);

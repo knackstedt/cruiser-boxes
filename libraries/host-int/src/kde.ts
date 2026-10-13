@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { DesktopInfo, EscapeActionSpec, MonitorInfo } from "./types";
+import type { DesktopInfo, EscapeActionSpec, MonitorInfo, WindowRuleSpec } from "./types";
 
 async function qdbus(args: string[]): Promise<string> {
     const bin = (await which("qdbus6")) ?? (await which("qdbus"));
@@ -450,4 +450,84 @@ export async function kwinScript(jsFn: string, timeoutMs = 8_000): Promise<void>
         await rm(tmp, { force: true }).catch(() => {});
         void timeoutMs;
     }
+}
+
+// ── kwinrulesrc window rules ──
+// A rule lands a matching window on its target VD at map time — the window
+// never renders on the wrong desktop, unlike post-map wmctrl -t moves.
+// Enum values from KWin 5.27 rules.h:
+//   match:    titlematch/wmclassmatch  1=exact 2=substring 3=regex
+//   policy:   desktopsrule             2=force 3=apply-initially 4=remember
+//             (5=apply-now, 6=force-temporarily)
+// `desktops` takes VD UUIDs (update_info use-virtual-desktop-ids); the "\\0"
+// string means "all desktops" (sticky).
+
+const KWIN_RULES = "kwinrulesrc";
+const KWINRULES_RC = () => join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), KWIN_RULES);
+
+async function kwinRulesList(kr: string): Promise<string[]> {
+    const r = await run(kr, ["--file", KWIN_RULES, "--group", "General", "--key", "rules"], { noThrow: true });
+    const v = r.stdout.trim();
+    return r.code === 0 && v && !v.startsWith("Usage:") && !v.includes("\n")
+        ? v.split(",").filter(Boolean) : [];
+}
+
+/**
+ * Install a KWin window rule (kwinrulesrc) matched on title regex and/or
+ * exact wmclass, applied at initial mapping. Works identically for X11 and
+ * Wayland clients — KWin evaluates rules before showing the window, so this
+ * is also the only placement path kde-wayland has.
+ *
+ * Group id is a deterministic `cruiser-<hash>` so concurrent installs of the
+ * same match share one group; uninstall drops the group and re-tracks
+ * [General] rules=/count=. `reconfigure` reloads the rulebook.
+ */
+export async function kdeInstallWindowRule(spec: WindowRuleSpec): Promise<() => Promise<void>> {
+    const kc = (await which("kwriteconfig6")) ?? (await which("kwriteconfig5")) ?? (await which("kwriteconfig"));
+    if (!kc) throw new Error("kwriteconfig not found");
+    const kr = (await which("kreadconfig6")) ?? (await which("kreadconfig5")) ?? (await which("kreadconfig")) ?? kc;
+    const group = `cruiser-${createHash("sha256")
+        .update(`${spec.titleRegex ?? ""}${spec.wmClass ?? ""}${spec.desktopId}`).digest("hex").slice(0, 8)}`;
+    const w = (key: string, value: string) =>
+        run(kc, ["--file", KWIN_RULES, "--group", group, "--key", key, value], { noThrow: true });
+    await w("Description", spec.description ?? "cruiser viewer placement");
+    if (spec.titleRegex) {
+        await w("title", spec.titleRegex);
+        await w("titlematch", "3");
+    }
+    if (spec.wmClass) {
+        await w("wmclass", spec.wmClass);
+        await w("wmclassmatch", "1");
+    }
+    await w("desktops", spec.desktopId);
+    await w("desktopsrule", "3");
+    const rules = await kwinRulesList(kr);
+    if (!rules.includes(group)) {
+        rules.push(group);
+        await run(kc, ["--file", KWIN_RULES, "--group", "General", "--key", "rules", rules.join(",")], { noThrow: true });
+        await run(kc, ["--file", KWIN_RULES, "--group", "General", "--key", "count", String(rules.length)], { noThrow: true });
+    }
+    await qdbus(["org.kde.KWin", "/KWin", "reconfigure"]).catch(() => {});
+    return async () => {
+        const cur = await kwinRulesList(kr);
+        const next = cur.filter((g) => g !== group);
+        if (next.length !== cur.length) {
+            await run(kc, ["--file", KWIN_RULES, "--group", "General", "--key", "rules", next.join(",")], { noThrow: true });
+            await run(kc, ["--file", KWIN_RULES, "--group", "General", "--key", "count", String(next.length)], { noThrow: true });
+        }
+        // kwriteconfig5 has no --delete-group — drop the ini section
+        // directly (same approach as khotkeysUninstall).
+        let src = "";
+        try { src = await readFile(KWINRULES_RC(), "utf8"); } catch { /* gone */ }
+        if (src) {
+            const kept: string[] = [];
+            let skipping = false;
+            for (const line of src.split("\n")) {
+                if (line.startsWith("[")) skipping = line.trim() === `[${group}]`;
+                if (!skipping) kept.push(line);
+            }
+            await writeFile(KWINRULES_RC(), kept.join("\n")).catch(() => {});
+        }
+        await qdbus(["org.kde.KWin", "/KWin", "reconfigure"]).catch(() => {});
+    };
 }

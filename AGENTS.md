@@ -65,11 +65,20 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   ssh+sudo when `guestAgentContext` reports a confined agent (also used by
   guest-setup).
 - `libraries/host-int` — WmAdapter impls (kde-x11 full; kde-wayland partial;
-  gnome-x11; gnome-wayland stub), xfreerdp viewer + ViewerSession. Viewer
+  gnome-x11; gnome-wayland — shortcuts via gsettings work there since gsd is
+  session-level; only window ops are stubbed), xfreerdp viewer + ViewerSession.
   stdout/stderr lands in `run/freerdp.log` / `run/viewer-dd.log` — a dead
   viewer with stdio ignored is undiagnosable; open() throws the log path.
   `x11MoveToDesktop` verify-retries `_NET_WM_DESKTOP` — KWin applies initial
-  placement after map and silently overwrites an early `-t`.
+  placement after map and silently overwrites an early `-t`. Post-map moves
+  are the FALLBACK: on KDE adapters `installWindowRule` writes a
+  kwinrulesrc group (title regex + wmclass match, `desktops=<vd-uuid>`,
+  desktopsrule=3 "apply at initial mapping" — KWin enums: match 1=exact
+  2=substr 3=regex; policy 2=force 3=apply 4=remember) before the viewer
+  spawns, so heads map straight onto the target VD with no flash — and it
+  works on Wayland clients too. Rules register in `[General] rules=`/`count`
+  + `qdbus org.kde.KWin /KWin reconfigure`; kwriteconfig5 has no
+  --delete-group so uninstall drops the ini section by rewrite.
   viewer-dd (dmabuf): QEMU's @dbus-display keeps effectively ONE client
   channel — the enumeration conn dies after RegisterListener and extra
   add_client channels EPIPE at the p2p handshake, so all per-console
@@ -132,8 +141,9 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   declared in the single-definition registry
   `vm-core/src/config/sync-channels.ts` (id/env kill/spec default/create-form
   key — schema.ts, store.ts, service.ts, and the cli all derive from it):
-  nine default-on (theme, accentColor, contrast, timezone, locale, keyboard,
-  monitors, hostWallpaper, shares) and four default-off security-sensitive ones
+  ten default-on (theme, accentColor, contrast, timezone, locale, keyboard,
+  monitors, scale, hostWallpaper, shares) and four default-off
+  security-sensitive ones
   (gitIdentity, proxy, caCerts, sshAgent). `SessionSyncs` (viewer lifetime,
   wired by provision/session.ts's `openVmSession` — the shared
   viewer+syncs+wallpaper kit used by service.ensureViewer AND cli
@@ -144,7 +154,14 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   changed), and an `AgentForward` (ssh -N -R host agent socket, respawn with
   backoff) for sshAgent. `syncEnabled` = spec flag AND env: `CRUISER_HOST_
   SYNC=0` kills all, `CRUISER_SYNC_<ID>=0` per channel, `CRUISER_THEME_SYNC=0`
-  still honored. Guest scripts all follow the guestThemeScript mold (runuser
+  still honored. The `scale` channel carries host display scale + font DPI:
+  `hostDisplayScale` probes gsettings scaling-factor/text-scaling-factor
+  (last-token parse — "uint32 2" is two tokens, stripping non-digits reads
+  "32"), KDE kdeglobals KScreen/kcmfonts, xrdb Xft.dpi; `applyHostScale`
+  fills xrandr's missing MonitorInfo.scale so it lands in monitors.xml +
+  kscreen args, and `guestScaleScript` pushes text-scaling-factor /
+  integer scaling-factor / kcmfonts forceFontDPI. Guest scripts all follow
+  the guestThemeScript mold (runuser
   for user-context, command -v gates, never abort provision). The `shares`
   channel runs `guestSharesScript` — a managed `# >>> cruiser-shares >>>`
   fstab block reconciled against spec.shares (stale virtfs mounts unmounted,
@@ -180,6 +197,12 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   `shellInsets` adds a per-guest-DE edge reserve (KDE bottom panel ~5% of
   image height, GNOME top bar ~3%) so the watermark isn't parked under the
   shell's bar — heuristic only, a moved/resized panel isn't tracked.
+  `wallpaperTarget` cover-crops the composite to the guest's mirrored
+  monitor aspect BEFORE watermarking — GNOME `zoom`/Plasma `crop`
+  fill-modes otherwise re-crop a mismatched-aspect source and park edge
+  watermarks in dead space. `shortcutsDoc` is viewer-aware (`display.viewer`
+  rdp→freerdp text, dmabuf→viewer-dd) and drops the escape list when the
+  host adapter can't bind shortcuts.
 - `libraries/app-mode` — waypipe over vsock (socat bridge) / ssh fallback.
 - `libraries/app-shell` — UI: zustand store, CruiserService, screens markup.
   Screen split: the vm detail screen owns everything that acts IMMEDIATELY
@@ -350,3 +373,50 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   `registerResource` (ui:// blobs) + `@font-face` — see
   `libraries/app-shell/src/fonts.ts`. Call before mount so the first doc
   resolve sees them.
+
+## Host GPU / driver pitfalls
+
+Observed on a hybrid Intel Iris Xe (i915) + NVIDIA MX550 laptop (KDE neon /
+Ubuntu 24.04) — applies to any dual-GPU host:
+
+- Debug order for "graphics problem": `nvidia-smi` FIRST — a
+  "Driver/library version mismatch" means apt bumped NVIDIA userspace
+  without a reboot (kernel still runs the old module): Vulkan/EGL can't
+  touch the dGPU at all and wgpu silently lands on the iGPU. DKMS already
+  builds for the running kernel, so a reboot is the whole fix. Then
+  `vulkaninfo --summary`, `vkcube --gpu_number N` per adapter, and
+  `dmesg | grep "GPU HANG"` for i915.
+- i915/ANV hard hang: kernel 6.11.0-29 + Mesa 25.2.8 (noble HWE) GPU-hangs
+  on ANY Vulkan submit (`i915 GPU HANG: ecode 12:1:e75ffefe` + context
+  reset) — vulkaninfo, vkcube, even Vivaldi/Chrome trip it, so it is never
+  our app. `i915.enable_guc=0` does NOT fix it. Mesa GL/EGL is unaffected:
+  virgl guests (`virtio-vga-gl` + `-spice gl=on,rendernode=…`) still work —
+  look for `egl_dmabuf_export_texture` in run/qemu.log. Only Vulkan is
+  toxic: the wgpu host app when it picks Intel, and `venus` guests.
+  Mitigate: let `power_preference:high-performance` pick the dGPU, pin Mesa
+  back to 25.0.x, or boot the 6.8 GA kernel.
+- There is NO software fallback: lavapipe
+  (`VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json`) creates a wgpu
+  adapter+device but the window surface reports zero usable formats on
+  BOTH Wayland and X11. `MESA_VK_DEVICE_SELECT` doesn't filter either, and
+  the engine's wgpu shim only exposes `power_preference` — no adapter-name
+  env override exists.
+- `pickRenderNode` intentionally routes virgl guests to the i915 rendernode
+  (NVIDIA's EGL dmabuf path is excluded by design). So on a broken-i915
+  hybrid box the split is: dGPU for the app window's Vulkan, i915 GL for
+  guest display — both have to be healthy for their own API.
+- Qt6-only hosts: noble has no `qdbus` binary — `qt6-tools-dev-tools`
+  ships `qdbus6`. Doctor and `host-int/kde.ts` probe `qdbus6` first, then
+  `qdbus`; don't gate on the Qt5 name.
+- Shipping the `opt/` toolchain to a same-family host works (34M tar), but
+  watch runtime deps: `libcapstone.so.4` and versioned
+  `SPICE_SERVER_0.16` symbols were missing on noble. `resolve.ts`'s
+  `ldLibraryPath` already covers `opt/{virglrenderer,spice}/lib/
+  x86_64-linux-gnu` — drop stray .so's in there rather than installing
+  system packages.
+- GNOME Remote Desktop severs clients every time the session idles/locks.
+  Headless unlock: `gdbus call --session -d org.gnome.ScreenSaver
+  -o /org/gnome/ScreenSaver -m org.gnome.ScreenSaver.SetActive false`
+  with `XDG_RUNTIME_DIR`+`DBUS_SESSION_BUS_ADDRESS` set. Xwayland windows
+  need `XAUTHORITY=/run/user/1000/.mutter-Xwaylandauth*` to be
+  wmctrl-visible from ssh.

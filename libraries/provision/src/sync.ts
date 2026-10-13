@@ -37,9 +37,9 @@ import {
     type ColorScheme,
 } from "../../host-int/src/appearance";
 import {
-    hostAgentSock, hostCaCerts, hostGitIdentity, hostKeyboard, hostLocale,
+    hostAgentSock, hostCaCerts, hostDisplayScale, hostGitIdentity, hostKeyboard, hostLocale,
     hostProxy, hostTimezone,
-    type GitIdentity, type HostKeymap, type HostProxy,
+    type GitIdentity, type HostKeymap, type HostProxy, type HostScale,
 } from "../../host-int/src/hoststate";
 
 export type { ColorScheme };
@@ -71,17 +71,19 @@ export interface HostSnapshot {
     timezone?: string;
     locale?: string;
     keyboard?: HostKeymap;
+    scale?: HostScale;
 }
 
 export async function gatherHostSync(spec: VmSpec): Promise<HostSnapshot> {
     const e = (id: SyncId) => syncEnabled(spec, id);
-    const [scheme, accent, contrast, timezone, locale, keyboard] = await Promise.all([
+    const [scheme, accent, contrast, timezone, locale, keyboard, scale] = await Promise.all([
         e("theme") ? hostColorScheme() : null,
         e("accentColor") ? hostAccentColor() : null,
         e("contrast") ? hostContrast() : null,
         e("timezone") ? hostTimezone() : null,
         e("locale") ? hostLocale() : null,
         e("keyboard") ? hostKeyboard() : null,
+        e("scale") ? hostDisplayScale() : null,
     ]);
     return {
         scheme: scheme ?? undefined,
@@ -90,6 +92,7 @@ export async function gatherHostSync(spec: VmSpec): Promise<HostSnapshot> {
         timezone: timezone ?? undefined,
         locale: locale ?? undefined,
         keyboard: keyboard ?? undefined,
+        scale: scale ?? undefined,
     };
 }
 
@@ -219,6 +222,28 @@ if command -v plasma-apply-colorscheme >/dev/null 2>&1; then
 fi`;
 }
 
+/** host display + font scale → guest. GNOME: text-scaling-factor carries
+ *  the font multiplier (a fractional display scale folds into it — mutter
+ *  ignores scaling-factor on Wayland anyway); scaling-factor only when the
+ *  host scale is integral. Per-monitor scale rides the monitors channel
+ *  (monitors.xml / kscreen-doctor). KDE: kcmfonts forceFontDPI (0 = off). */
+export function guestScaleScript(spec: VmSpec, s: HostScale): string {
+    const scale = s.scale ?? 1, text = s.text ?? 1;
+    const tsf = Number.isInteger(scale) && scale >= 1 ? text : scale * text;
+    const dpi = Math.round(96 * scale * text);
+    return `# host display scale → guest (scale=${scale}, text=${text}, dpi=${dpi})
+${preamble(spec)}
+if command -v gsettings >/dev/null 2>&1; then
+    RUNU gsettings set org.gnome.desktop.interface text-scaling-factor ${tsf} 2>/dev/null || \\
+    runuser -u "$U" -- dbus-run-session -- gsettings set org.gnome.desktop.interface text-scaling-factor ${tsf} 2>/dev/null || true
+${Number.isInteger(scale) && scale >= 1 ? `    RUNU gsettings set org.gnome.desktop.interface scaling-factor 'uint32 ${scale}' 2>/dev/null || \\
+    runuser -u "$U" -- dbus-run-session -- gsettings set org.gnome.desktop.interface scaling-factor 'uint32 ${scale}' 2>/dev/null || true` : ""}
+fi
+if command -v kwriteconfig6 >/dev/null 2>&1; then
+    RUNU kwriteconfig6 --file kcmfonts --group General --key forceFontDPI ${dpi === 96 ? 0 : dpi} 2>/dev/null || true
+fi`;
+}
+
 /** host git identity → guest (~/.gitconfig user.name/user.email). */
 export function guestGitScript(spec: VmSpec, id: GitIdentity): string {
     const lines = ["# host git identity → guest", preamble(spec), "if command -v git >/dev/null 2>&1; then"];
@@ -299,6 +324,20 @@ elif [ -d /etc/pki/ca-trust/source/anchors ]; then
 fi`;
 }
 
+/**
+ * Fill missing per-monitor scale from the host's global display scale —
+ * xrandr has no scale concept, so an X11 host's MonitorInfo comes back
+ * scale-less even when the desktop runs at 2×. Callers: provision's
+ * monitorsXml and the session monitors oneshot. Gated on the `scale`
+ * channel; a probe miss leaves the list untouched.
+ */
+export async function applyHostScale<T extends { scale?: number }>(spec: VmSpec, mons: T[]): Promise<T[]> {
+    if (!syncEnabled(spec, "scale") || mons.every((m) => m.scale !== undefined)) return mons;
+    const hs = await hostDisplayScale().catch(() => null);
+    if (hs?.scale) mons.forEach((m) => { m.scale ??= hs.scale; });
+    return mons;
+}
+
 /** monitors.xml staged at /tmp/cruiser-monitors.xml → ~/.config (GNOME guests). */
 export function guestMonitorScript(spec: VmSpec): string {
     return `# host monitor topology → guest monitors.xml
@@ -314,7 +353,7 @@ fi`;
  *  kscreen-doctor (monitors.xml is GNOME/mutter-only). Output i (Virtual-N)
  *  maps to host monitor i — the same order buildArgs writes outputs[] in.
  *  Positions are normalized to the composite's top-left. */
-export function guestKdeMonitorsScript(spec: VmSpec, host: { x: number; y: number; w: number; h: number; primary: boolean }[]): string {
+export function guestKdeMonitorsScript(spec: VmSpec, host: { x: number; y: number; w: number; h: number; primary: boolean; scale?: number }[]): string {
     const ox = Math.min(...host.map((m) => m.x));
     const oy = Math.min(...host.map((m) => m.y));
     const args: string[] = [];
@@ -324,6 +363,7 @@ export function guestKdeMonitorsScript(spec: VmSpec, host: { x: number; y: numbe
         // resolution the EDID-preferred mode; only positions need pushing.
         args.push(`${o}.enable`, `${o}.position.${m.x - ox},${m.y - oy}`);
         if (m.primary) args.push(`${o}.priority.1`);
+        if (m.scale) args.push(`${o}.scale.${m.scale}`);
     });
     return `# host monitor topology → guest kscreen layout (KDE)
 ${preamble(spec)}
@@ -432,6 +472,7 @@ export function guestSyncScript(spec: VmSpec, s: HostSnapshot): string {
     if (s.scheme) parts.push(guestThemeScript(spec, s.scheme));
     if (s.accent) parts.push(guestAccentScript(spec, s.accent));
     if (s.contrast !== undefined) parts.push(guestContrastScript(spec, s.contrast, s.scheme ?? "light"));
+    if (s.scale) parts.push(guestScaleScript(spec, s.scale));
     return parts.join("\n\n");
 }
 
@@ -669,6 +710,10 @@ export class SessionSyncs {
             jobs.push(hostLocale().then((v) => tryChan("locale", v,
                 () => pushScript(this.h, guestLocaleScript(v!), "locale"))));
         }
+        if (syncEnabled(spec, "scale")) {
+            jobs.push(hostDisplayScale().then((v) => tryChan("scale", v,
+                () => pushScript(this.h, guestScaleScript(spec, v!), "scale"))));
+        }
         if (syncEnabled(spec, "keyboard")) {
             jobs.push(hostKeyboard().then((v) => tryChan("keyboard", v,
                 () => pushScript(this.h, guestKeyboardScript(spec, v!), "keyboard"))));
@@ -708,7 +753,7 @@ export class SessionSyncs {
             jobs.push((async () => {
                 const adapter = detectAdapter();
                 if (!adapter.caps.monitors) return;
-                const host = await adapter.monitors().catch(() => []);
+                const host = await applyHostScale(spec, await adapter.monitors().catch(() => []));
                 if (!host.length) return;
                 if (spec.os.desktop === "kde") {
                     // hash includes the QEMU pid — the guest re-derives its

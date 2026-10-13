@@ -380,6 +380,7 @@ function create(s: CruiserState): string {
         ${checkRow("Locale", "syncLocale", f.syncLocale, "host LANG → guest localectl")}
         ${checkRow("Keyboard layout", "syncKeyboard", f.syncKeyboard, "host X11 keymap → guest input sources")}
         ${checkRow("Monitor topology", "syncMonitors", f.syncMonitors, "host layout + scale → guest monitors.xml (GNOME guests)")}
+        ${checkRow("Display scale", "syncScale", f.syncScale, "host display scale → guest monitor scale + font DPI")}
         ${checkRow("Host wallpaper", "syncHostWallpaper", f.syncHostWallpaper, "host's wallpaper as the composite source — an explicit wallpaper path always wins")}
         ${checkRow("Share mounts", "syncShares", f.syncShares, "reconciles the shared-folders fstab inside the guest whenever the share list changes")}
         ${checkRow("Git identity", "syncGit", f.syncGit, "pushes host ~/.gitconfig user.name/email into the guest")}

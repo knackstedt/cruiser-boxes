@@ -30,6 +30,7 @@ export const SYNC_CHANNELS = [
     { id: "locale",        formKey: "syncLocale",       env: "CRUISER_SYNC_LOCALE",        def: true,  label: "host LANG" },
     { id: "keyboard",      formKey: "syncKeyboard",     env: "CRUISER_SYNC_KEYBOARD",      def: true,  label: "host keymap" },
     { id: "monitors",      formKey: "syncMonitors",     env: "CRUISER_SYNC_MONITORS",      def: true,  label: "host monitor topology" },
+    { id: "scale",         formKey: "syncScale",        env: "CRUISER_SYNC_SCALE",         def: true,  label: "host display scale + font DPI" },
     { id: "hostWallpaper", formKey: "syncHostWallpaper", env: "CRUISER_SYNC_HOST_WALLPAPER", def: true,  label: "host wallpaper as composite source" },
     { id: "shares",        formKey: "syncShares",       env: "CRUISER_SYNC_SHARES",        def: true,  label: "guest fstab/mount reconcile for spec.shares" },
     // ── default-off: these move host identity, trust, or credentials ──
