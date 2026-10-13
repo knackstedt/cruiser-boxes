@@ -9,7 +9,7 @@
 //     CRUISER_LOG_FILE, CRUISER_FAKE_BUSY=sec)         preselect a route
 //   CRUISER_INPUT_SCRIPT=/path.json (+CRUISER_UI_ZOOM, CRUISER_INPUT_DELAY)
 //     scripted input through the real InputBus — wait/shot/route/down/move/
-//     up/click/key/type/wheel/siv/scl/sve/probe steps
+//     up/click/key/type/wheel/siv/scl/sve/probe/termrect steps
 //   CRUISER_WIN_W/CRUISER_WIN_H, CRUISER_SMOKE_MS      (consumed by the entry)
 // ============================================================================
 
@@ -173,6 +173,50 @@ function runInputScript({ store, bus, shell, shotRequests }: DevHarnessCtx, env:
                         const uiHost = (shell as unknown as { host: { panels: Map<string, { editing: boolean }> } }).host;
                         const editing = [...uiHost.panels.values()].map((p) => p.editing);
                         log.info("cruiser", `[probe:${i}] ${s.label ?? ""} focused=${fn} editing=${JSON.stringify(editing)}`);
+                        break;
+                    }
+                    case "termrect": {
+                        // Resize the live TermView without a window resize —
+                        // exercises bridge.resize → page refit → size msg →
+                        // PTY resize (guest `stty size`). w/h are fractions
+                        // of the current rect; no args → syncRect() restores.
+                        const mgr = (shell as unknown as { termMgr: unknown }).termMgr as {
+                            entries: Map<string, { view: { setRect(r: { x: number; y: number; w: number; h: number }): void; comp: { rect: { x: number; y: number; w: number; h: number } } } }>;
+                            syncRect(): Promise<void>;
+                        };
+                        const name = s.vm ?? store.getState().selectedVm;
+                        const e = name ? mgr.entries.get(name) : undefined;
+                        if (!e) throw new Error(`no term view for ${name}`);
+                        if (s.w === undefined && s.h === undefined) { await mgr.syncRect(); break; }
+                        const r = { ...e.view.comp.rect };
+                        r.w = Math.max(40, Math.round(r.w * (s.w ?? 1)));
+                        r.h = Math.max(40, Math.round(r.h * (s.h ?? 1)));
+                        e.view.setRect(r);
+                        break;
+                    }
+                    case "termeval": {
+                        // Eval JS inside the live term view's page (xterm's
+                        // `term`/`fit` bindings are global) and log the result.
+                        const mgr = (shell as unknown as { termMgr: unknown }).termMgr as {
+                            entries: Map<string, { view: { id: string; bridge: { eval(id: string, js: string): Promise<unknown> } } }>;
+                        };
+                        const name = s.vm ?? store.getState().selectedVm;
+                        const e = name ? mgr.entries.get(name) : undefined;
+                        if (!e) throw new Error(`no term view for ${name}`);
+                        const r = await e.view.bridge.eval(e.view.id, String(s.js ?? "null")).catch((err) => `eval failed: ${err}`);
+                        log.info("cruiser", `[termeval:${i}] ${JSON.stringify(r)}`);
+                        break;
+                    }
+                    case "termstat": {
+                        // Native-side frame state: texture-source dims vs the
+                        // bridge's reported view dims + comp rect.
+                        const mgr = (shell as unknown as { termMgr: unknown }).termMgr as {
+                            entries: Map<string, { view: { id: string; src: { width: number; height: number; hasFrame: boolean }; comp: { rect: { x: number; y: number; w: number; h: number } }; bridge: { getDimensions(id: string): { w: number; h: number } | null; pending?(id: string): boolean } } }>;
+                        };
+                        const name = s.vm ?? store.getState().selectedVm;
+                        const e = name ? mgr.entries.get(name) : undefined;
+                        if (!e) throw new Error(`no term view for ${name}`);
+                        log.info("cruiser", `[termstat:${i}] src=${e.view.src.width}x${e.view.src.height} hasFrame=${e.view.src.hasFrame} rect=${JSON.stringify(e.view.comp.rect)} dims=${JSON.stringify(e.view.bridge.getDimensions(e.view.id))}`);
                         break;
                     }
                 }
