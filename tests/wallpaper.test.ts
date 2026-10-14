@@ -53,10 +53,16 @@ describe("watermark text", () => {
         expect(watermarkLines(s).map((x) => x.text).join(" ")).toContain("ctrl+alt+enter");
     });
     test("shortcutsDoc lists keys, kill command, and TTY fallback", () => {
-        const d = shortcutsDoc(spec());
+        const d = shortcutsDoc(spec(), true);
         expect(d).toContain("ctrl+alt+delete");
         expect(d).toContain("cruiser vm kill testvm");
         expect(d).toContain("ctrl+alt+F3");
+    });
+    test("shortcutsDoc admits when the host WM can't bind shortcuts", () => {
+        const d = shortcutsDoc(spec(), false);
+        expect(d).toContain("no keybinding API");
+        expect(d).not.toContain("ctrl+alt+delete");
+        expect(d).toContain("cruiser vm kill testvm");
     });
 });
 

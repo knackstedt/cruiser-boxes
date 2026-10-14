@@ -76,13 +76,18 @@ export function watermarkLines(spec: VmSpec): { text: string; kind: "title" | "d
     return lines;
 }
 
-/** The "~/Desktop/VM Shortcuts.md" cheat sheet — UTF-8, full detail. */
-export function shortcutsDoc(spec: VmSpec): string {
+/**
+ * The "~/Desktop/VM Shortcuts.md" cheat sheet — UTF-8, full detail.
+ * `bindable` overrides the live adapter probe — callers that already know
+ * the session's shortcut capability (or tests, which must not depend on
+ * the ambient host session) pass it explicitly.
+ */
+export function shortcutsDoc(spec: VmSpec, bindable?: boolean): string {
     const n = spec.name;
     const dmabuf = spec.display.viewer === "dmabuf";
     // The doc promises keys the host actually binds — a session whose
     // adapter can't install global shortcuts gets the honest answer.
-    const bindable = (() => { try { return detectAdapter().caps.shortcuts; } catch { return true; } })();
+    bindable ??= (() => { try { return detectAdapter().caps.shortcuts; } catch { return true; } })();
     const esc = !escapesActive(spec)
         ? `None — this VM's head mode is \`${spec.display.headMode}\`${spec.display.grabKeyboard ? " with keyboard grab on" : ""}, so no host bindings are installed.`
         : !bindable
