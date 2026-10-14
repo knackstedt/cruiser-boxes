@@ -221,19 +221,22 @@ async function build(): Promise<number> {
         if (existsSync(marker) && !FORCE) { msg("skip", `${name} already installed at ${prefix} (--force to rebuild)`); continue; }
 
         const env = { PKG_CONFIG_PATH: pkgConfigPath() };
+        // exec.ts's run() defaults to a 120s timeout — a from-source compile
+        // (esp. QEMU's ninja) needs hours, not minutes, on a CI runner.
+        const long = { env, timeoutMs: 4 * 60 * 60 * 1000 };
 
         if (c.kind === "meson" || c.kind === "cmake") {
             if (c.kind === "meson") {
                 if (!existsSync(buildDir) || FORCE) {
-                    await run(meson[0], [meson[1], "setup", buildDir, src, `--prefix=${prefix}`, ...(c.mesonArgs ?? [])], { env });
+                    await run(meson[0], [meson[1], "setup", buildDir, src, `--prefix=${prefix}`, ...(c.mesonArgs ?? [])], long);
                 }
-                await run(meson[0], [meson[1], "compile", "-C", buildDir], { env });
-                await run(meson[0], [meson[1], "install", "-C", buildDir], { env });
+                await run(meson[0], [meson[1], "compile", "-C", buildDir], long);
+                await run(meson[0], [meson[1], "install", "-C", buildDir], long);
             } else {
                 await mkdir(buildDir, { recursive: true });
-                await run("cmake", ["-S", src, "-B", buildDir, `-DCMAKE_INSTALL_PREFIX=${prefix}`, "-DCMAKE_BUILD_TYPE=Release", ...(c.cmakeArgs ?? [])], { env });
-                await run("cmake", ["--build", buildDir, "-j"], { env });
-                await run("cmake", ["--install", buildDir], { env });
+                await run("cmake", ["-S", src, "-B", buildDir, `-DCMAKE_INSTALL_PREFIX=${prefix}`, "-DCMAKE_BUILD_TYPE=Release", ...(c.cmakeArgs ?? [])], long);
+                await run("cmake", ["--build", buildDir, "-j"], long);
+                await run("cmake", ["--install", buildDir], long);
             }
         } else if (c.kind === "qemu") {
             // QEMU wants its own configure inside a build dir (not meson directly).
@@ -246,10 +249,10 @@ async function build(): Promise<number> {
                 await run(join(src, "configure"), [
                     `--prefix=${prefix}`,
                     ...(c.configureArgs ?? []),
-                ], { cwd: buildDir, env });
+                ], { ...long, cwd: buildDir });
             }
-            await run("ninja", ["-C", buildDir], { env });
-            await run("ninja", ["-C", buildDir, "install"], { env });
+            await run("ninja", ["-C", buildDir], long);
+            await run("ninja", ["-C", buildDir, "install"], long);
         }
         await mkdir(prefix, { recursive: true });
         await writeFile(marker, `${name} ${c.version}\n`);
