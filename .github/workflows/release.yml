@@ -38,6 +38,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install X11/GLES dev libs
+        # viewer-dd's own #[link] externs need the dev .so symlinks
+        # (-lGLESv2, -lX11) — cargo check passes without them, the release
+        # link doesn't.
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libgles-dev
+
       - name: Build + stage viewer-dd
         # native/dist/<plat>-<arch>/ is copied to <appdir>/native/ by the
         # packager's game-native convention; ddViewerPath() probes it there.
