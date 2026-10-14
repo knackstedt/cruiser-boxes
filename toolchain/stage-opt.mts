@@ -14,8 +14,9 @@
 // GPL-family binaries (QEMU) can't ship without them.
 // ============================================================================
 
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -114,6 +115,34 @@ rmSync(join(OUT, "freerdp", "lib", "cmake"), { recursive: true, force: true });
     };
     walk(join(OUT, "spice"), false); walk(join(OUT, "virglrenderer"), false); walk(join(OUT, "freerdp"), false);
     strip(elfs);
+}
+
+// ── relativize absolute symlinks ──
+// meson/cmake install .so version links as ABSOLUTE paths into the build
+// machine's opt/ (e.g. libspice-server.so.1 -> /home/runner/…/opt/spice/…).
+// cpSync under Bun preserves them verbatim; on an end-user machine they
+// dangle and the loader falls back to system libs (the AppImage bug where
+// qemu loaded the host's libspice 0.15). Rewrite any absolute link to a
+// same-dir relative link — all our version chains are siblings.
+{
+    const walk = (d: string) => {
+        if (!existsSync(d)) return;
+        for (const e of readdirSync(d, { withFileTypes: true }).values()) {
+            const p = join(d, e.name);
+            if (e.isDirectory()) { walk(p); continue; }
+            if (!e.isSymbolicLink()) continue;
+            const t = readlinkSync(p);
+            if (!isAbsolute(t)) continue;
+            const rel = basename(t);
+            if (existsSync(join(d, rel))) {
+                rmSync(p);
+                symlinkSync(rel, p);
+            } else {
+                msg("warn", `absolute symlink ${p} -> ${t} has no staged target`);
+            }
+        }
+    };
+    walk(OUT);
 }
 
 // ── licenses + notices ──
