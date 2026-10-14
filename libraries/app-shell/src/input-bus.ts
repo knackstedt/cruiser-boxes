@@ -28,6 +28,11 @@ export class InputBus implements RendererInputBus {
     private seq = 0;
     /** Whether the last dispatched event was consumed (stopPropagation). */
     consumed = false;
+    /** Whether the most recent pointerdown was consumed — mirrors the
+     *  engine bus's pointerDownConsumed (pointer-lock layer reads it). */
+    private pdownConsumed = false;
+
+    wasPointerDownConsumed(): boolean { return this.pdownConsumed; }
 
     private add(kind: string, fn: (e: never, c: InputEventControl) => void, prio = 100) {
         const s: Sub = { fn, prio, seq: this.seq++ };
@@ -63,7 +68,10 @@ export class InputBus implements RendererInputBus {
     }
 
     pointerMove(x: number, y: number) { this.dispatch("pmove", { clientX: x, clientY: y }); }
-    pointerDown(x: number, y: number, button = 0) { this.dispatch("pdown", { clientX: x, clientY: y, button }); }
+    pointerDown(x: number, y: number, button = 0) {
+        this.dispatch("pdown", { clientX: x, clientY: y, button });
+        this.pdownConsumed = this.consumed;
+    }
     pointerUp(x: number, y: number, button = 0) { this.dispatch("pup", { clientX: x, clientY: y, button }); }
     wheel(x: number, y: number, dx: number, dy: number) { this.dispatch("wheel", { clientX: x, clientY: y, deltaX: dx, deltaY: dy }); }
     key(down: boolean, key: string, code: string, mods?: { ctrlKey?: boolean; shiftKey?: boolean; altKey?: boolean; metaKey?: boolean }) {
