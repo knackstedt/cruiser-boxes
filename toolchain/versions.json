@@ -10,7 +10,9 @@
     },
     "spice-protocol": {
       "version": "0.14.5",
-      "url": "https://www.spice-space.org/download/spice-protocol/spice-protocol-0.14.5.tar.xz",
+      "url": "https://gitlab.freedesktop.org/spice/spice-protocol/-/archive/v0.14.5/spice-protocol-v0.14.5.tar.gz",
+      "dir": "spice-protocol-v0.14.5",
+      "sha256": "1be179b3dfbb23946432275f4b7a4b59bb5e9acc25c3128bc930b8264a9f0a20",
       "kind": "meson",
       "prefix": "spice",
       "mesonArgs": [],
@@ -49,8 +51,9 @@
       "why": "distro 8.2.2 GL module is broken (qemu_egl_display) and too old for Venus"
     },
     "waypipe": {
-      "version": "1.10.4",
-      "url": "https://gitlab.freedesktop.org/mstoeckl/waypipe/-/archive/v1.10.4/waypipe-v1.10.4.tar.gz",
+      "version": "0.11.2",
+      "url": "https://gitlab.freedesktop.org/mstoeckl/waypipe/-/archive/v0.11.2/waypipe-v0.11.2.tar.gz",
+      "dir": "waypipe-v0.11.2",
       "kind": "meson",
       "prefix": "waypipe",
       "mesonArgs": ["-Dwith_video=disabled", "-Dwith_dmabuf=enabled", "-Dwith_lz4=enabled", "-Dwith_zstd=enabled"],
