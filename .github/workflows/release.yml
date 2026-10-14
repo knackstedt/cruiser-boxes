@@ -94,4 +94,10 @@ jobs:
           fi
           args=(--title "$TAG" --generate-notes)
           [[ "$TAG" == *-* ]] && args+=(--prerelease)
-          gh release create "$TAG" "${args[@]}" "${artifacts[@]}"
+          # Idempotent: a moved tag re-runs this job against an existing
+          # release — upload --clobber instead of dying on "already exists".
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber "${artifacts[@]}"
+          else
+            gh release create "$TAG" "${args[@]}" "${artifacts[@]}"
+          fi
