@@ -214,7 +214,11 @@ async function build(): Promise<number> {
 
         const prefix = join(OPT_DIR, c.prefix ?? name);
         const buildDir = join(src, "build");
-        if (existsSync(prefix) && !FORCE) { msg("skip", `${name} already installed at ${prefix} (--force to rebuild)`); continue; }
+        // Per-component marker — NOT prefix existence: spice-protocol and
+        // spice-server share prefix opt/spice, so the first install would
+        // make the second silently skip on a clean machine.
+        const marker = join(prefix, `.built-${name}`);
+        if (existsSync(marker) && !FORCE) { msg("skip", `${name} already installed at ${prefix} (--force to rebuild)`); continue; }
 
         const env = { PKG_CONFIG_PATH: pkgConfigPath() };
 
@@ -235,7 +239,9 @@ async function build(): Promise<number> {
             // QEMU wants its own configure inside a build dir (not meson directly).
             // pkg-config reach into opt/ comes from env.PKG_CONFIG_PATH — QEMU
             // 11's configure has no --with-pkgconfigpath flag.
-            if (!existsSync(buildDir) || FORCE) {
+            // build.ninja (not dir existence) marks a completed configure —
+            // a failed configure leaves build/ behind and must be retried.
+            if (!existsSync(join(buildDir, "build.ninja")) || FORCE) {
                 await mkdir(buildDir, { recursive: true });
                 await run(join(src, "configure"), [
                     `--prefix=${prefix}`,
@@ -245,6 +251,8 @@ async function build(): Promise<number> {
             await run("ninja", ["-C", buildDir], { env });
             await run("ninja", ["-C", buildDir, "install"], { env });
         }
+        await mkdir(prefix, { recursive: true });
+        await writeFile(marker, `${name} ${c.version}\n`);
         msg("ok", `${name} ${c.version} -> ${prefix}`);
     }
     msg("done", `toolchain in ${OPT_DIR}`);

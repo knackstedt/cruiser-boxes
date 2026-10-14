@@ -5,6 +5,7 @@
     "meson": {
       "version": "1.12.0",
       "url": "https://github.com/mesonbuild/meson/releases/download/1.12.0/meson-1.12.0.tar.gz",
+      "sha256": "88afe0c20e52030218924ac37d0c81c59b4b5f3ae3752c8c6d7470c7d365886c",
       "kind": "tool",
       "why": "system meson <1.5 is too old for QEMU 11"
     },
@@ -21,6 +22,7 @@
     "spice-server": {
       "version": "0.16.0",
       "url": "https://www.spice-space.org/download/releases/spice-server/spice-0.16.0.tar.bz2",
+      "sha256": "0a6ec9528f05371261bbb2d46ff35e7b5c45ff89bb975a99af95a5f20ff4717d",
       "kind": "meson",
       "prefix": "spice",
       "mesonArgs": ["-Dgstreamer=1.0", "-Dsasl=false"],
@@ -30,6 +32,7 @@
     "virglrenderer": {
       "version": "1.3.0",
       "url": "https://gitlab.freedesktop.org/virgl/virglrenderer/-/archive/1.3.0/virglrenderer-1.3.0.tar.gz",
+      "sha256": "065bc56e89e6f631f96101cd62eba0748e48eb888b434edc86e89d05395e76f3",
       "kind": "meson",
       "prefix": "virglrenderer",
       "mesonArgs": ["-Dvenus=true"],
@@ -39,6 +42,7 @@
     "qemu": {
       "version": "11.1.1",
       "url": "https://download.qemu.org/qemu-11.1.1.tar.xz",
+      "sha256": "079ffbff8a7111bbc89022107cbabf3bbfd614d5fc9d7cc675991196aca12482",
       "kind": "qemu",
       "prefix": "qemu-11",
       "patches": ["qemu-11.1.1-dbus-refresh-10ms.patch"],
@@ -94,7 +98,7 @@
   },
   "aptBuildDeps": [
     "build-essential", "pkg-config", "ninja-build", "python3-pip", "python3-setuptools",
-    "python3-venv", "python3-pyparsing", "python3-yaml", "liblz4-dev",
+    "python3-venv", "python3-pyparsing", "python3-yaml", "liblz4-dev", "git", "libfdt-dev",
     "libglib2.0-dev", "libpixman-1-dev", "libslirp-dev", "libepoxy-dev", "libgbm-dev",
     "libdrm-dev", "libvulkan-dev", "libgtk-3-dev", "libseccomp-dev", "libcapstone-dev",
     "libcap-ng-dev", "libzstd-dev", "zlib1g-dev", "libaio-dev", "liburing-dev",
