@@ -23,7 +23,7 @@ const BOOL_FIELDS: Set<string> = new Set([
     "snap", "extraFonts", "autologin", "nestedVirt",
     "syncTheme", "syncAccent", "syncContrast", "syncTimezone", "syncLocale",
     "syncKeyboard", "syncMonitors", "syncHostWallpaper", "syncScale", "syncShares",
-    "syncGit", "syncProxy", "syncCa", "syncAgent",
+    "syncGit", "syncProxy", "syncCa", "syncAgent", "syncGitKey",
 ]);
 
 const SPIN = ["◐", "◓", "◑", "◒"];
@@ -219,6 +219,7 @@ export class CruiserShell {
                 syncScale: sy.scale ?? true,
                 syncGit: sy.gitIdentity ?? false, syncProxy: sy.proxy ?? false,
                 syncCa: sy.caCerts ?? false, syncAgent: sy.sshAgent ?? false,
+                syncGitKey: sy.gitKey ?? false,
                 syncShares: sy.shares ?? true,
             });
             st().setVmDesc(vm.description);

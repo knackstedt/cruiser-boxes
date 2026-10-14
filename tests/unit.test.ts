@@ -13,7 +13,7 @@ import { guestThemeScript } from "../libraries/provision/src/theme";
 import { pickImageFromIndex, supportsKrdp, defaultRelease } from "../libraries/provision/src/distros";
 import { freerdpArgs } from "../libraries/host-int/src/freerdp";
 import { parseEscapeAction } from "../libraries/host-int/src/session";
-import { kdeKeys, kglobalConflicts, khotkeysDataGroups, khotkeysDropGroups, khotkeysUuid, unwrapShC } from "../libraries/host-int/src/kde";
+import { kdeDesktopsRc, kdeKeys, kglobalConflicts, khotkeysDataGroups, khotkeysDropGroups, khotkeysUuid, KWIN_VD_UUID, unwrapShC } from "../libraries/host-int/src/kde";
 
 // ── schema ──
 
@@ -485,5 +485,29 @@ describe("escape shortcuts", () => {
         expect(u).toBe(khotkeysUuid("8debf92e"));
         expect(u).toMatch(/^\{[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\}$/);
         expect(u).not.toBe(khotkeysUuid("deadbeef"));
+    });
+    test("kdeDesktopsRc parses kwinrc [Desktops] ids/names/count", () => {
+        const src = [
+            "[Compositing]", "Enabled=true",
+            "[Desktops]",
+            "Id_1=a46cda41-13d3-409e-b502-70dbede2bbf0",
+            "Id_2=62147591-461b-47e7-8288-8dad37fa57d2",
+            "Id_3=c73d3134-b190-481e-bee2-c12152f01a4d",
+            "Name_1=Desktop 1", "Name_2=work",
+            "Number=3", "Rows=1",
+            "[Windows]", "FocusPolicy=ClickToFocus",
+        ].join("\n");
+        expect(kdeDesktopsRc(src)).toEqual([
+            { index: 1, id: "a46cda41-13d3-409e-b502-70dbede2bbf0", name: "Desktop 1" },
+            { index: 2, id: "62147591-461b-47e7-8288-8dad37fa57d2", name: "work" },
+            { index: 3, id: "c73d3134-b190-481e-bee2-c12152f01a4d", name: undefined },
+        ]);
+        expect(kdeDesktopsRc("")).toEqual([]);
+        expect(kdeDesktopsRc("[Other]\nx=1\n")).toEqual([]);
+    });
+    test("KWIN_VD_UUID rejects bare EWMH indexes (the desktops= poisoning bug)", () => {
+        expect(KWIN_VD_UUID.test("62147591-461b-47e7-8288-8dad37fa57d2")).toBe(true);
+        expect(KWIN_VD_UUID.test("1")).toBe(false);
+        expect(KWIN_VD_UUID.test("")).toBe(false);
     });
 });

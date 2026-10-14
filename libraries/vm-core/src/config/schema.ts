@@ -260,6 +260,10 @@ export const VmSpec = z.object({
         username: z.string().regex(/^[a-z_][a-z0-9_-]{0,31}$/).default("cruiser"),
         /** Path to a 0600 file holding the RDP/SSH password (never inline). */
         passwordFile: z.string().optional(),
+        /** Host path to a private SSH key the gitKey channel installs in
+         *  the guest. Unset → ~/.ssh/<git user.email>, then the usual
+         *  id_ed25519/id_rsa/id_ecdsa defaults. */
+        gitSshKeyPath: z.string().optional(),
     }).prefault({}),
 
     autostart: z.boolean().default(false),

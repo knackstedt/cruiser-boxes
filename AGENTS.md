@@ -69,6 +69,21 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   on every boot) and guest journalctl with filters over QGA, falling back to
   ssh+sudo when `guestAgentContext` reports a confined agent (also used by
   guest-setup).
+  virtiofsd (vm.ts): shares get one `--socket-path` daemon each, spawned
+  DETACHED like QEMU's -daemonize — a non-detached daemon dies with the
+  launcher's process group and leaves every guest mount I/O-hung in
+  D-state. virtiofsd writes `<sock>.pid` itself; `killVfsd` reaps both
+  children and pidfile-discovered strays (also on start(), before
+  spawning — a crashed launcher leaves orphans, and QEMU's vhost-user
+  device does its one handshake at machine init so a stale listener
+  breaks the boot with "Failed to set msg fds"). `watchVfsd` polls the
+  pidfiles every 10s and respawns dead daemons — QEMU 11 does NOT re-pair
+  a fresh daemon on the existing chardev (reconnect-ms is broken for
+  vhost-user: the eager parse-time connect exhausts virtiofsd's
+  single-shot listener), so a mid-run crash still needs a VM restart;
+  the respawn only keeps the backend present for cleanup + logging.
+  --sandbox=namespace makes each daemon a supervisor+worker pair —
+  two procs per socket is normal.
 - `libraries/host-int` — WmAdapter impls (kde-x11 full; kde-wayland partial;
   gnome-x11; gnome-wayland — shortcuts via gsettings work there since gsd is
   session-level; only window ops are stubbed), xfreerdp viewer + ViewerSession.
@@ -84,6 +99,18 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   works on Wayland clients too. Rules register in `[General] rules=`/`count`
   + `qdbus org.kde.KWin /KWin reconfigure`; kwriteconfig5 has no
   --delete-group so uninstall drops the ini section by rewrite.
+  `desktops=` accepts ONLY a VD UUID — never a numeric index: the kde-x11
+  `desktops()` x11 fallback reports `id=String(idx)` which once wrote a dead
+  `desktops=1` rule (heads mapped on the current VD anyway). Guards:
+  `kdeDesktops` falls back to kwinrc `[Desktops] Id_N=` when the dbus probe
+  flakes, session.ts requires `KWIN_VD_UUID` before passing `desktopId`, and
+  the installer throws on non-UUID ids. The group hash keys on
+  (title,class,desktop) so a changed VD target would orphan a stale rule —
+  install sweeps same-window `cruiser-*` groups. Window finding: dmabuf
+  heads are minifb windows — the toolkit sets neither WM_CLASS nor
+  _NET_WM_PID (viewer-dd sets both via FFI after create) and all heads share
+  one pid, so the session matches the anchored title regex
+  `^cruiser:<vm>(:\d+)?$`, not pid.
   viewer-dd (dmabuf): QEMU's @dbus-display keeps effectively ONE client
   channel — the enumeration conn dies after RegisterListener and extra
   add_client channels EPIPE at the p2p handshake, so all per-console
@@ -116,12 +143,25 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   reconnect — "AIIEEE lost spice client connection" in the daemon log is
   this, not a real failure). Our Request handler answers QEMU's SYNC
   main-loop call — read parked state only, never block on the worker.
+  On `register` (QEMU's serial-reset signal) viewer-dd also clears the
+  parked text — the guest's clipboard state dies with the port bounce, and
+  a live echo guard would block re-pushing it.
   Host side = arboard (x11rb/wl-clipboard-rs) polled 300ms — no change
   watcher exists; a parked `host_text` echo guard stops guest→host writes
   re-grabbing back. Text only (text/plain;charset=utf-8) — QEMU's dbus
   clipboard knows no other MIME. Guest caveat: spice-vdagent is X11-only,
   so on Wayland sessions host→guest reaches native apps (KWin bridges the
-  X11 selection) but guest→host only sees X11/XWayland copies.
+  X11 selection) but guest→host only sees X11/XWayland copies. KWin also
+  internally bridges REAL wayland-app copies into the X11 selection — but
+  it rejects set_selection from unfocused clients, so `wl-copy` injected
+  over ssh is silently dropped and misleading for testing (use `xclip`
+  with the session's XAUTHORITY, detached so it outlives the channel —
+  a dead selection owner shows up as QEMU "Cancelled clipboard request").
+  `guestClipBridgeScript` (sync.ts, auto-pushed when display.clipboard is
+  on for dmabuf viewers) additionally installs an autostart
+  `wl-paste --watch`→`xclip` mirror for compositors that expose
+  data-control (wlroots) — on KWin it exits instantly since data-control
+  is trusted-client-only.
   `appearance.ts` — xdg-desktop-portal settings: `color-scheme`/`accent-color`/
   `contrast` reads (busctl, gdbus fallback) + one dbus-monitor SettingChanged
   watcher shared by all portal channels. `hoststate.ts` — the non-portal
@@ -142,14 +182,14 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   `QT_QPA_PLATFORM=offscreen` in the QGA/ssh context — no DISPLAY/
   WAYLAND_DISPLAY means the Qt xcb plugin aborts and the `|| true` eats it,
   silently leaving the guest on BreezeLight.
-  `sync.ts` — the host→guest sync engine. `spec.sync` gates thirteen channels
+  `sync.ts` — the host→guest sync engine. `spec.sync` gates fifteen channels
   declared in the single-definition registry
   `vm-core/src/config/sync-channels.ts` (id/env kill/spec default/create-form
   key — schema.ts, store.ts, service.ts, and the cli all derive from it):
   ten default-on (theme, accentColor, contrast, timezone, locale, keyboard,
-  monitors, scale, hostWallpaper, shares) and four default-off
+  monitors, scale, hostWallpaper, shares) and five default-off
   security-sensitive ones
-  (gitIdentity, proxy, caCerts, sshAgent). `SessionSyncs` (viewer lifetime,
+  (gitIdentity, proxy, caCerts, sshAgent, gitKey). `SessionSyncs` (viewer lifetime,
   wired by provision/session.ts's `openVmSession` — the shared
   viewer+syncs+wallpaper kit used by service.ensureViewer AND cli
   `vm start|view`) runs one shared portal
@@ -172,6 +212,14 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   fstab block reconciled against spec.shares (stale virtfs mounts unmounted,
   `ro` written for direction:"host-to-guest") — the same script guest-setup
   bakes at provision, so editing shares converges the guest on the next pass.
+  The `gitKey` channel pushes a host private key into the guest —
+  `credentials.gitSshKeyPath` if set, else `hostGitSshKey` (hoststate.ts)
+  falls back to `~/.ssh/<git email>` / the github/gitlab-suffixed names —
+  installed as `~/.ssh/cruiser-git-key` (0600) + a
+  `# >>> cruiser-git-key >>>` ssh config block (IdentityFile+IdentitiesOnly
+  for github/gitlab/bitbucket). This is the reliable git path: the
+  sshAgent channel only works while a session is open AND the host agent
+  actually holds a key.
   `filesync.ts` — copy-mode shares (`mode:"copy"`): rsync over the ssh hostfwd
   + `ensureKeypair` key. direction "both" = `--update` push+pull (newest wins,
   no deletes); "host-to-guest" = authoritative push (+`--delete` when

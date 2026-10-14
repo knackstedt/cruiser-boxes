@@ -9,8 +9,9 @@ import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { vmPaths } from "../../vm-core/src/paths";
-import type { EscapeActionSpec, WindowHandle, WmAdapter } from "./types";
+import type { EscapeActionSpec, WindowHandle, WindowMatcher, WmAdapter } from "./types";
 import { detectAdapter } from "./detect";
+import { KWIN_VD_UUID } from "./kde";
 import { launchFreerdp, rdpTlsOnly, waitRdpPort } from "./freerdp";
 import { launchDdViewer, waitMonitorSock } from "./ddviewer";
 import { run } from "../../sys/src/exec";
@@ -19,6 +20,8 @@ export interface ViewerSessionOpts {
     adapter?: WmAdapter;
     rdpWaitMs?: number;
     windowWaitMs?: number;
+    /** Progress/diag sink (provision/session forwards it from both surfaces). */
+    log?: (msg: string) => void;
 }
 
 export class ViewerSession extends EventEmitter {
@@ -79,7 +82,7 @@ export class ViewerSession extends EventEmitter {
         // "viewer crash" on every fresh session's view click. Zombies
         // (process up, window gone) still fall through to the reaper.
         if (!this.window)
-            this.window = await this.adapter.findWindow({ title: `cruiser:${this.spec.name}` }, 1_500).catch(() => null);
+            this.window = await this.adapter.findWindow({ title: this.titleRe() }, 1_500).catch(() => null);
         if (!this.window) {
             // Reap stale viewers for this VM — an orphaned viewer (dead UI
             // session, closed cli) would otherwise stay stacked on the target
@@ -95,7 +98,10 @@ export class ViewerSession extends EventEmitter {
             // for adapters without a rules api — and for adopted windows).
             if (this.adapter.installWindowRule && d.headMode === "virtual-desktop") {
                 const vd = (await this.adapter.desktops().catch(() => [])).find((x) => x.index === d.virtualDesktop);
-                if (vd?.id) {
+                // kwinrulesrc's `desktops` only accepts a VD UUID — the x11
+                // desktops() fallback reports a bare EWMH index as id, which
+                // would write a rule KWin can never satisfy.
+                if (vd?.id && KWIN_VD_UUID.test(vd.id)) {
                     const un = await this.adapter.installWindowRule({
                         titleRegex: `^cruiser:${escapeRegex(this.spec.name)}(:[0-9]+)?$`,
                         wmClass: dmabuf ? undefined : "xfreerdp",
@@ -103,6 +109,9 @@ export class ViewerSession extends EventEmitter {
                         description: `cruiser: ${this.spec.name} → desktop ${vd.index}${vd.name ? ` (${vd.name})` : ""}`,
                     }).catch(() => null);
                     if (un) this.uninstallers.push(un);
+                    else this.opts.log?.(`window rule for '${this.spec.name}' failed to install — heads will be moved post-map`);
+                } else {
+                    this.opts.log?.(`no VD uuid for desktop ${d.virtualDesktop} — post-map placement only`);
                 }
             }
 
@@ -119,22 +128,25 @@ export class ViewerSession extends EventEmitter {
                 child.on("exit", (c) => { this.child = null; this.emit("closed", c); this.cleanupDone = this.cleanup(); });
                 const exited = new Promise<null>((r) => child.once("exit", () => r(null)));
 
-                // Find OUR window by pid — title matching races with other viewers.
-                // Racing against child exit keeps a dead viewer from burning the
-                // whole window-wait timeout.
+                // Find OUR window. freerdp: by pid — title matching races
+                // with other viewers. viewer-dd: minifb sets no _NET_WM_PID
+                // and all heads share one pid anyway, so match the per-VM
+                // title — the stale-viewer reaper above guarantees it's ours.
+                // Racing against child exit keeps a dead viewer from burning
+                // the whole window-wait timeout.
+                const matcher: WindowMatcher = dmabuf
+                    ? { title: this.titleRe() }
+                    : { pid: child.pid, ...(wmClass ? { wmClass } : {}) };
                 this.window = await Promise.race([
-                    this.adapter.findWindow(
-                        { pid: child.pid, ...(wmClass ? { wmClass } : {}) },
-                        this.opts.windowWaitMs ?? 15_000,
-                    ).catch(() => null),
+                    this.adapter.findWindow(matcher, this.opts.windowWaitMs ?? 15_000).catch(() => null),
                     exited,
                 ]);
 
-                if (!this.window && this.child) {
-                    // Wayland findWindow is limited — retry on the viewer title
-                    // ("cruiser:<vm>"), then give up gracefully.
+                if (!this.window && this.child && !dmabuf) {
+                    // Wayland findWindow is limited — retry on the viewer
+                    // title, then give up gracefully.
                     this.window = await Promise.race([
-                        this.adapter.findWindow({ title: `cruiser:${this.spec.name}` }, 5_000).catch(() => null),
+                        this.adapter.findWindow({ title: this.titleRe() }, 5_000).catch(() => null),
                         exited,
                     ]);
                 }
@@ -156,7 +168,7 @@ export class ViewerSession extends EventEmitter {
         if (dmabuf && this.window && this.adapter.findWindows) {
             const hostMons0 = await this.adapter.monitors().catch(() => []);
             const want = d.monitors === "all" ? hostMons0.length : Math.max(1, d.monitors.length);
-            const all = await this.adapter.findWindows({ title: `cruiser:${this.spec.name}` }, 6_000, Math.max(1, want)).catch(() => []);
+            const all = await this.adapter.findWindows({ title: this.titleRe() }, 6_000, Math.max(1, want)).catch(() => []);
             if (all.length) this.windows = all;
         }
         if (!this.windows.length && this.window) this.windows = [this.window];
@@ -225,7 +237,7 @@ export class ViewerSession extends EventEmitter {
      *  entry and relaunch). */
     async windowGone(): Promise<boolean> {
         if (this.child || !this.window) return false;
-        return !await this.adapter.findWindow({ title: `cruiser:${this.spec.name}` }, 1_000).catch(() => null);
+        return !await this.adapter.findWindow({ title: this.titleRe() }, 1_000).catch(() => null);
     }
 
     async close(): Promise<void> {
@@ -251,6 +263,13 @@ export class ViewerSession extends EventEmitter {
     async exited(): Promise<void> {
         if (this.child) await new Promise<void>((r) => this.once("closed", () => r()));
         await this.cleanupDone;
+    }
+
+    /** Anchored viewer-title matcher — "cruiser:<vm>" or "cruiser:<vm>:<i>".
+     *  A bare substring would also catch a different VM whose NAME has this
+     *  one as a prefix ("devinbox" matching "cruiser:devinbox2:0"). */
+    private titleRe(): RegExp {
+        return new RegExp(`^cruiser:${escapeRegex(this.spec.name)}(:\\d+)?$`);
     }
 
     private async cleanup(): Promise<void> {

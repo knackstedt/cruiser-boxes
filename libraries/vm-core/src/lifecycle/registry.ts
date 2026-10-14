@@ -16,8 +16,12 @@ import { VmHandle, type VmState } from "./vm";
 import { VmSpec, parseVmSpec } from "../config/schema";
 import { readFile } from "node:fs/promises";
 
-const SSH_PORT_BASE = 2222;
-const RDP_PORT_BASE = 3390;
+// Random-allocation band for auto hostfwd host ports. Deliberately below
+// the default Linux ephemeral range (32768–60999) so a transient outbound
+// connection can't be squatting on a candidate between our bind probe and
+// QEMU's own bind at start.
+const HOSTFWD_PORT_MIN = 20000;
+const HOSTFWD_PORT_MAX = 31999;
 
 /** Try binding 127.0.0.1:port — free means usable for hostfwd. */
 async function portFree(port: number): Promise<boolean> {
@@ -83,18 +87,25 @@ export class VmRegistry extends EventTarget {
         return h;
     }
 
-    /** Next free host port for this forward kind — registry scan + bind probe
-     *  (something outside cruiser may already hold the port, e.g. the devvm). */
+    /** Next free host port for this forward kind — random pick in
+     *  [HOSTFWD_PORT_MIN, HOSTFWD_PORT_MAX], checked against the registry's
+     *  allocations + a bind probe (something outside cruiser may already
+     *  hold the port, e.g. the devvm). */
     private async nextPort(kind: "ssh" | "rdp"): Promise<number> {
-        const base = kind === "ssh" ? SSH_PORT_BASE : RDP_PORT_BASE;
         const used = new Set<number>();
         this.vms.forEach((v) => {
             const p = kind === "ssh" ? v.spec.network.sshPort : v.spec.network.rdpPort;
             if (p) used.add(p);
         });
-        let p = base;
-        while (used.has(p) || !(await portFree(p))) p++;
-        return p;
+        for (let i = 0; i < 50; i++) {
+            const p = HOSTFWD_PORT_MIN
+                + Math.floor(Math.random() * (HOSTFWD_PORT_MAX - HOSTFWD_PORT_MIN + 1));
+            if (!used.has(p) && await portFree(p)) return p;
+        }
+        // Pathological band exhaustion — sweep linearly before giving up.
+        for (let p = HOSTFWD_PORT_MIN; p <= HOSTFWD_PORT_MAX; p++)
+            if (!used.has(p) && await portFree(p)) return p;
+        throw new Error(`no free host port for '${kind}' hostfwd`);
     }
 
     async remove(name: string, { deleteDisk = false } = {}): Promise<void> {

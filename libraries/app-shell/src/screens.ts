@@ -396,7 +396,8 @@ function create(s: CruiserState): string {
         ${checkRow("Git identity", "syncGit", f.syncGit, "pushes host ~/.gitconfig user.name/email into the guest")}
         ${checkRow("Proxy settings", "syncProxy", f.syncProxy, "pushes host proxy config (gsettings/kioslaverc + /etc/environment) into the guest")}
         ${checkRow("Custom CA roots", "syncCa", f.syncCa, "pushes host /usr/local/share/ca-certificates + pki anchors into the guest trust store")}
-        ${checkRow("SSH agent", "syncAgent", f.syncAgent, "forwards the host agent socket into the guest via ssh -R — held for the viewer session; guest processes can use your host keys")}`;
+        ${checkRow("SSH agent", "syncAgent", f.syncAgent, "forwards the host agent socket into the guest via ssh -R — held for the viewer session; guest processes can use your host keys")}
+        ${checkRow("Git SSH key", "syncGitKey", f.syncGitKey, "installs a host private key into the guest (credentials.gitSshKeyPath, else ~/.ssh/<git email>) + an ssh config block for the common forges")}`;
     const usbSection = `<div class="h2">USB passthrough</div>
         ${s.usbDevices.length
             ? `<div class="opts wrap">${s.usbDevices.map((d) =>

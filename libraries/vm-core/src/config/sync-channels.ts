@@ -38,6 +38,7 @@ export const SYNC_CHANNELS = [
     { id: "proxy",         formKey: "syncProxy",        env: "CRUISER_SYNC_PROXY",         def: false, credential: true, label: "host proxy config" },
     { id: "caCerts",       formKey: "syncCa",           env: "CRUISER_SYNC_CA_CERTS",      def: false, credential: true, label: "host custom CA roots" },
     { id: "sshAgent",      formKey: "syncAgent",        env: "CRUISER_SYNC_SSH_AGENT",     def: false, credential: true, label: "ssh -R forward of the host agent socket" },
+    { id: "gitKey",        formKey: "syncGitKey",       env: "CRUISER_SYNC_GIT_KEY",       def: false, credential: true, label: "host ssh private key installed for git remotes" },
 ] as const;
 
 // Shape validation — `as const` keeps the literal ids; this line checks

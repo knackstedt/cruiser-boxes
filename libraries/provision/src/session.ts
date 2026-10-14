@@ -11,10 +11,7 @@ import { ViewerSession, type ViewerSessionOpts } from "../../host-int/src/sessio
 import { SessionSyncs } from "./sync";
 import { FileSyncs } from "./filesync";
 
-export interface VmSessionOpts extends ViewerSessionOpts {
-    /** Progress/diag — the service routes it to store status, cli to console. */
-    log?: (msg: string) => void;
-}
+export type VmSessionOpts = ViewerSessionOpts;
 
 export interface VmSession {
     readonly viewer: ViewerSession;

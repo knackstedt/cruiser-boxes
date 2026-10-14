@@ -177,6 +177,14 @@ impl ClipPeer {
     /// Register call and any later session reset.
     fn register(&mut self) {
         self.serial.store(0, Ordering::Relaxed);
+        // QEMU bounced the vdagent port: the guest's clipboard state reset
+        // with the serial — it no longer holds whatever host text we last
+        // grabbed. Clear the echo guards so the poller re-pushes it on the
+        // next tick, or the guest stays silently empty until the host
+        // copies something new.
+        let mut st = self.st.lock().unwrap();
+        st.host_text.clear();
+        st.serving = None;
         eprintln!("[clip] serial reset by qemu");
     }
     fn unregister(&mut self) {}
@@ -299,8 +307,43 @@ fn qnum_for(k: minifb::Key) -> Option<u32> {
         RightCtrl => 0x9d, RightAlt => 0xb8, Home => 0xc7, Up => 0xc8, PageUp => 0xc9,
         Left => 0xcb, Right => 0xcd, End => 0xcf, Down => 0xd0, PageDown => 0xd1,
         Insert => 0xd2, Delete => 0xd3, LeftSuper => 0xdb, RightSuper => 0xdc,
+        NumLock => 0x45, ScrollLock => 0x46,
+        NumPad7 => 0x47, NumPad8 => 0x48, NumPad9 => 0x49, NumPadMinus => 0x4a,
+        NumPad4 => 0x4b, NumPad5 => 0x4c, NumPad6 => 0x4d, NumPadPlus => 0x4e,
+        NumPad1 => 0x4f, NumPad2 => 0x50, NumPad3 => 0x51, NumPad0 => 0x52,
+        NumPadDot => 0x53, NumPadAsterisk => 0x37, NumPadEnter => 0x9c,
+        NumPadSlash => 0xb5,
         _ => return None,
     })
+}
+
+#[link(name = "X11")]
+extern "C" {
+    fn XOpenDisplay(name: *const u8) -> *mut std::ffi::c_void;
+    fn XCloseDisplay(d: *mut std::ffi::c_void) -> i32;
+    fn XInternAtom(d: *mut std::ffi::c_void, name: *const u8, only_if_exists: i32) -> u64;
+    fn XChangeProperty(d: *mut std::ffi::c_void, w: u64, prop: u64, typ: u64,
+                       fmt: i32, mode: i32, data: *const u8, nelem: i32);
+    fn XFlush(d: *mut std::ffi::c_void);
+    fn XkbGetNamedIndicator(d: *mut std::ffi::c_void, device_spec: u32, name: u64,
+                            ndx: *mut i32, state: *mut i32, map: *mut std::ffi::c_void) -> i32;
+}
+
+/// Host NumLock via the XKB "Num Lock" virtual indicator (XkbUseCoreKbd
+/// device). Going through the named indicator instead of locked_mods &
+/// Mod2 keeps working if the numlock modifier got remapped.
+fn host_numlock(dpy: *mut std::ffi::c_void, num_atom: u64) -> Option<bool> {
+    if dpy.is_null() || num_atom == 0 { return None; }
+    let mut ndx = 0i32;
+    let mut st = 0i32;
+    unsafe {
+        if XkbGetNamedIndicator(dpy, 0x0100, num_atom, &mut ndx, &mut st,
+                                std::ptr::null_mut()) != 0 {
+            Some(st != 0)
+        } else {
+            None
+        }
+    }
 }
 
 /// (pid, /proc starttime) of the QEMU that owns this display — None when the
@@ -360,12 +403,40 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     let mut win = Window::new(title, w, h, WindowOptions { resize: true, ..WindowOptions::default() })?;
     win.limit_update_rate(Some(std::time::Duration::from_micros(2000)));
 
+    // persistent X conn: EWMH identity sets at init, then polled for the
+    // host's NumLock state in the event loop (see below)
+    let mut xdpy: *mut std::ffi::c_void = std::ptr::null_mut();
+    let mut num_atom = 0u64;
+
     // GL worker owns the EGL context — all device calls are single-threaded
     {
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         let wh = win.window_handle().unwrap();
         if let RawWindowHandle::Xlib(xw) = wh.as_raw() {
             let xid = xw.window;
+            // EWMH identity: minifb never sets WM_CLASS or _NET_WM_PID, which
+            // leaves the heads invisible to pid/class lookups (wmctrl -p,
+            // xdotool --pid, KWin wmclass rules). A second X connection is
+            // fine — property sets are server-side.
+            unsafe {
+                let d = XOpenDisplay(std::ptr::null());
+                if !d.is_null() {
+                    const XA_CARDINAL: u64 = 6;
+                    const XA_STRING: u64 = 31;
+                    const PROP_MODE_REPLACE: i32 = 0;
+                    let pid = std::process::id();
+                    XChangeProperty(d, xid,
+                        XInternAtom(d, c"_NET_WM_PID".as_ptr().cast(), 0), XA_CARDINAL,
+                        32, PROP_MODE_REPLACE, &pid as *const u32 as *const u8, 1);
+                    const CLS: &[u8] = b"cruiser-dd\0cruiser-dd\0";
+                    XChangeProperty(d, xid,
+                        XInternAtom(d, c"WM_CLASS".as_ptr().cast(), 0), XA_STRING,
+                        8, PROP_MODE_REPLACE, CLS.as_ptr(), CLS.len() as i32);
+                    num_atom = XInternAtom(d, c"Num Lock".as_ptr().cast(), 0);
+                    XFlush(d);
+                    xdpy = d;
+                }
+            }
             let t = title.to_string();
             std::thread::spawn(move || {
                 let mut xegl = match egl::x11_present_init(xid, w as i32, h as i32) {
@@ -415,12 +486,14 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     // EPIPE'd at the p2p handshake
     let (itx, irx) = std::sync::mpsc::channel::<In>();
     let cp = console_path.to_string();
-    std::thread::spawn(move || input_worker(iconn, cp, irx));
+    let ic2 = iconn.clone();
+    std::thread::spawn(move || input_worker(ic2, cp, irx));
 
     let mut mouse = (-1.0f32, -1.0f32);
     let mut btns = [false; 3];
     let mut last_pos_send = std::time::Instant::now() - std::time::Duration::from_secs(1);
     let mut pending_abs: Option<(f32, f32)> = None;
+    let mut scroll_acc = 0.0f32;
 
     // window px → guest scanout px through the same letterbox viewport the
     // renderer uses — then console-local → composite fraction → rescaled
@@ -463,6 +536,19 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     }
     win.set_input_callback(Box::new(KbCb(itx2)));
 
+    // numlock reconcile — guest lock state is exposed as the Keyboard
+    // "Modifiers" property (Scroll|Num|Caps = bits 0|1|2). NumLock presses
+    // while focused ride the normal key path, but toggles made while
+    // unfocused (and the guest's boot default) never reach the guest, so
+    // poll host XKB state vs the property and inject a NumLock pulse when
+    // they diverge. Console 0 only: NumLock is guest-global and N heads
+    // reconciling could double-toggle inside one application window.
+    let kbd_iface = if console_idx == 0 {
+        zbus::blocking::Proxy::new(&iconn, "org.qemu", console_path,
+            "org.qemu.Display1.Keyboard").ok()
+    } else { None };
+    let mut last_num_sync = std::time::Instant::now() - std::time::Duration::from_secs(1);
+
     while win.is_open() {
         win.update(); // events only — EGL renders into this window directly
         if let Some((mx, my)) = win.get_mouse_pos(minifb::MouseMode::Pass) {
@@ -486,6 +572,42 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                 let _ = itx.send(In::Btn(i as u8, d));
             }
         }
+        // wheel scroll — QEMU models scroll as wheel-button pulses (up=3,
+        // down=4; see ui/dbus-display1.xml). The virtio tablet only maps
+        // vertical (REL_WHEEL is its sole rel axis — REL_HWHEEL would log
+        // "unmapped button"), so horizontal deltas are dropped. minifb
+        // gives ±1.0 per notch on X11; accumulate so any sub-notch delta
+        // still converges on a full pulse.
+        if let Some((_sx, sy)) = win.get_scroll_wheel() {
+            scroll_acc += sy;
+        }
+        while scroll_acc.abs() >= 1.0 {
+            // land the pending position first — the wheel acts wherever
+            // the tablet's abs pointer currently sits
+            if let Some((ax, ay)) = pending_abs.take() {
+                let (gx, gy) = to_guest(&win, ax, ay);
+                let _ = itx.send(In::Move(gx, gy));
+                last_pos_send = std::time::Instant::now();
+            }
+            let b = if scroll_acc > 0.0 { 3u8 } else { 4u8 };
+            let _ = itx.send(In::Btn(b, true));
+            let _ = itx.send(In::Btn(b, false));
+            scroll_acc -= scroll_acc.signum();
+        }
+        if let Some(kbd) = &kbd_iface {
+            if last_num_sync.elapsed().as_millis() >= 500 {
+                last_num_sync = std::time::Instant::now();
+                let mods = kbd.get_property::<u32>("Modifiers").ok();
+                if let (Some(host), Some(m)) = (host_numlock(xdpy, num_atom), mods) {
+                    if host != (m & 0x2 != 0) {
+                        let _ = itx.send(In::Key(0x45, true));  // Q_KEY_CODE num_lock
+                        let _ = itx.send(In::Key(0x45, false));
+                        eprintln!("[input] numlock sync: host={host} guest={} — toggled",
+                            m & 0x2 != 0);
+                    }
+                }
+            }
+        }
         // coalesce position events — ~120Hz is enough for absolute pointer
         if let Some((ax, ay)) = pending_abs {
             if last_pos_send.elapsed().as_millis() > 8 {
@@ -496,6 +618,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
             }
         }
     }
+    if !xdpy.is_null() { unsafe { XCloseDisplay(xdpy); } }
     Ok(())
 }
 

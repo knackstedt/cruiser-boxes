@@ -17,8 +17,47 @@ async function qdbus(args: string[]): Promise<string> {
     return r.stdout.trim();
 }
 
-/** KWin virtual desktops — UUIDs + names, works on X11 and Wayland. */
+const KWIN_RC = () => join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "kwinrc");
+
+/** KWin VD UUID — the only value kwinrulesrc's `desktops` key accepts.
+ *  Anything else (an EWMH index, an empty string) makes a placement rule
+ *  silently never match. */
+export const KWIN_VD_UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+/**
+ * Parse kwinrc's `[Desktops]` block (Number= / Id_N= / Name_N=). KWin
+ * persists VD UUIDs there, so a session that can't reach the
+ * VirtualDesktopManager over dbus can still resolve real ids — the fallback
+ * that matters for window rules, where an EWMH index is NOT a valid id.
+ * Exported for tests.
+ */
+export function kdeDesktopsRc(src: string): DesktopInfo[] {
+    let inSec = false;
+    const ids = new Map<number, string>(), names = new Map<number, string>();
+    let count = 0;
+    for (const line of src.split("\n")) {
+        const t = line.trim();
+        if (t.startsWith("[")) { inSec = t === "[Desktops]"; continue; }
+        if (!inSec) continue;
+        const kv = /^(Id|Name)_(\d+)=(.*)$/.exec(t);
+        if (kv) {
+            (kv[1] === "Id" ? ids : names).set(Number(kv[2]), kv[3]!.trim());
+            continue;
+        }
+        const n = /^Number=(\d+)$/.exec(t);
+        if (n) count = Number(n[1]);
+    }
+    const n = Math.max(count, ...ids.keys(), ...names.keys(), 0);
+    const out: DesktopInfo[] = [];
+    for (let i = 1; i <= n; i++) out.push({ index: i, id: ids.get(i), name: names.get(i) });
+    return out;
+}
+
+/** KWin virtual desktops — UUIDs + names, works on X11 and Wayland. Falls
+ *  back to kwinrc when the dbus probe fails (transient KWin/dbus hiccup at
+ *  viewer launch) so callers still get real VD UUIDs. */
 export async function kdeDesktops(): Promise<DesktopInfo[]> {
+    const fromRc = async () => kdeDesktopsRc(await readFile(KWIN_RC(), "utf8").catch(() => ""));
     try {
         // `desktops` is a(uss) = (position, uuid, name)[] — plain qdbus can't
         // render it; --literal prints `N, "uuid", "name"` tuples.
@@ -32,12 +71,17 @@ export async function kdeDesktops(): Promise<DesktopInfo[]> {
         while ((mm = re.exec(literal)) !== null)
             out.push({ index: Number(mm[1]) + 1, id: mm[2], name: mm[3], current: mm[2] === cur });
         if (!out.length) {
+            const rc = await fromRc();
+            if (rc.length) {
+                for (let i = 0; i < rc.length; i++) rc[i]!.current = !!cur && rc[i]!.id === cur;
+                return rc;
+            }
             const count = await qdbus(["org.kde.KWin", "/VirtualDesktopManager", "org.freedesktop.DBus.Properties.Get", "org.kde.KWin.VirtualDesktopManager", "count"]).catch(() => "0");
             for (let i = 0; i < Number(count); i++) out.push({ index: i + 1, current: i === 0 });
         }
         return out;
     } catch {
-        return [];
+        return fromRc();
     }
 }
 
@@ -472,6 +516,30 @@ async function kwinRulesList(kr: string): Promise<string[]> {
         ? v.split(",").filter(Boolean) : [];
 }
 
+/** Drop groups from [General] rules=/count= and rewrite the ini without
+ *  their sections (kwriteconfig5 has no --delete-group — same approach as
+ *  khotkeysUninstall). No-op when none are registered. */
+async function kwinRulesDrop(kc: string, kr: string, groups: string[]): Promise<void> {
+    const cur = await kwinRulesList(kr);
+    const next = cur.filter((g) => !groups.includes(g));
+    if (next.length !== cur.length) {
+        await run(kc, ["--file", KWIN_RULES, "--group", "General", "--key", "rules", next.join(",")], { noThrow: true });
+        await run(kc, ["--file", KWIN_RULES, "--group", "General", "--key", "count", String(next.length)], { noThrow: true });
+    }
+    const drop = new Set(groups);
+    let src = "";
+    try { src = await readFile(KWINRULES_RC(), "utf8"); } catch { /* gone */ }
+    if (src) {
+        const kept: string[] = [];
+        let skipping = false;
+        for (const line of src.split("\n")) {
+            if (line.startsWith("[")) skipping = drop.has(line.trim().slice(1, -1));
+            if (!skipping) kept.push(line);
+        }
+        await writeFile(KWINRULES_RC(), kept.join("\n")).catch(() => {});
+    }
+}
+
 /**
  * Install a KWin window rule (kwinrulesrc) matched on title regex and/or
  * exact wmclass, applied at initial mapping. Works identically for X11 and
@@ -485,6 +553,10 @@ async function kwinRulesList(kr: string): Promise<string[]> {
 export async function kdeInstallWindowRule(spec: WindowRuleSpec): Promise<() => Promise<void>> {
     const kc = (await which("kwriteconfig6")) ?? (await which("kwriteconfig5")) ?? (await which("kwriteconfig"));
     if (!kc) throw new Error("kwriteconfig not found");
+    // A non-UUID desktopId (e.g. an EWMH index from a degraded desktops()
+    // probe) would write a rule KWin can never satisfy — fail loudly so the
+    // caller falls back to post-map placement instead of trusting a dead rule.
+    if (!KWIN_VD_UUID.test(spec.desktopId)) throw new Error(`desktopId '${spec.desktopId}' is not a KWin VD uuid`);
     const kr = (await which("kreadconfig6")) ?? (await which("kreadconfig5")) ?? (await which("kreadconfig")) ?? kc;
     const group = `cruiser-${createHash("sha256")
         .update(`${spec.titleRegex ?? ""}${spec.wmClass ?? ""}${spec.desktopId}`).digest("hex").slice(0, 8)}`;
@@ -507,27 +579,21 @@ export async function kdeInstallWindowRule(spec: WindowRuleSpec): Promise<() => 
         await run(kc, ["--file", KWIN_RULES, "--group", "General", "--key", "rules", rules.join(",")], { noThrow: true });
         await run(kc, ["--file", KWIN_RULES, "--group", "General", "--key", "count", String(rules.length)], { noThrow: true });
     }
+    // Sweep superseded cruiser rules for the same window — the group id is
+    // keyed on (title, class, desktop), so a changed target desktop leaves an
+    // orphaned rule that keeps forcing windows to the OLD desktop forever.
+    const stale = (await kwinRulesList(kr)).filter((g) => g.startsWith("cruiser-") && g !== group);
+    const dead: string[] = [];
+    for (let i = 0; i < stale.length; i++) {
+        const g = stale[i]!;
+        const t = await run(kr, ["--file", KWIN_RULES, "--group", g, "--key", "title"], { noThrow: true });
+        const wc = await run(kr, ["--file", KWIN_RULES, "--group", g, "--key", "wmclass"], { noThrow: true });
+        if (t.stdout.trim() === (spec.titleRegex ?? "") && wc.stdout.trim() === (spec.wmClass ?? "")) dead.push(g);
+    }
+    if (dead.length) await kwinRulesDrop(kc, kr, dead);
     await qdbus(["org.kde.KWin", "/KWin", "reconfigure"]).catch(() => {});
     return async () => {
-        const cur = await kwinRulesList(kr);
-        const next = cur.filter((g) => g !== group);
-        if (next.length !== cur.length) {
-            await run(kc, ["--file", KWIN_RULES, "--group", "General", "--key", "rules", next.join(",")], { noThrow: true });
-            await run(kc, ["--file", KWIN_RULES, "--group", "General", "--key", "count", String(next.length)], { noThrow: true });
-        }
-        // kwriteconfig5 has no --delete-group — drop the ini section
-        // directly (same approach as khotkeysUninstall).
-        let src = "";
-        try { src = await readFile(KWINRULES_RC(), "utf8"); } catch { /* gone */ }
-        if (src) {
-            const kept: string[] = [];
-            let skipping = false;
-            for (const line of src.split("\n")) {
-                if (line.startsWith("[")) skipping = line.trim() === `[${group}]`;
-                if (!skipping) kept.push(line);
-            }
-            await writeFile(KWINRULES_RC(), kept.join("\n")).catch(() => {});
-        }
+        await kwinRulesDrop(kc, kr, [group]);
         await qdbus(["org.kde.KWin", "/KWin", "reconfigure"]).catch(() => {});
     };
 }

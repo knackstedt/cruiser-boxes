@@ -3,19 +3,19 @@ import { defaultSpec, parseVmSpec } from "../libraries/vm-core/src/config/schema
 import { guestLayoutFromHost } from "../libraries/provision/src/monitors";
 import {
     AgentForward, guestAccentScript, guestAgentEnvScript, guestCaCertsScript,
-    guestContrastScript, guestGitScript, guestKeyboardScript, guestLocaleScript,
-    guestMonitorScript, guestProxyScript, guestSyncScript, guestTimezoneScript,
-    nearestGnomeAccent, syncEnabled, SYNC_IDS,
+    guestClipBridgeScript, guestContrastScript, guestGitKeyScript, guestGitScript,
+    guestKeyboardScript, guestLocaleScript, guestMonitorScript, guestProxyScript,
+    guestSyncScript, guestTimezoneScript, nearestGnomeAccent, syncEnabled, SYNC_IDS,
 } from "../libraries/provision/src/sync";
 
 const spec = () => defaultSpec("testvm");
 
 describe("sync schema", () => {
-    test("defaults: eight true, four security-sensitive false", () => {
+    test("defaults: ten true, five security-sensitive false", () => {
         const s = spec().sync;
-        (["theme", "accentColor", "contrast", "timezone", "locale", "keyboard", "monitors", "hostWallpaper"] as const)
+        (["theme", "accentColor", "contrast", "timezone", "locale", "keyboard", "monitors", "hostWallpaper", "scale", "shares"] as const)
             .forEach((id) => expect(s[id]).toBe(true));
-        (["gitIdentity", "proxy", "caCerts", "sshAgent"] as const)
+        (["gitIdentity", "proxy", "caCerts", "sshAgent", "gitKey"] as const)
             .forEach((id) => expect(s[id]).toBe(false));
     });
     test("old vm.json without sync parses with defaults", () => {
@@ -131,6 +131,25 @@ describe("guest scripts", () => {
         expect(sh).toContain("SSH_AUTH_SOCK");
         expect(sh).toContain("cruiser-agent.sock");
         expect(sh).toContain("/etc/profile.d/cruiser-agent.sh");
+    });
+    test("git key: installs a 0600 key + managed ssh config block", () => {
+        const sh = guestGitKeyScript(spec(), {
+            priv: "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n",
+            pub: "ssh-ed25519 AAAA test@x",
+        });
+        expect(sh).toContain("cruiser-git-key");
+        expect(sh).toContain("chmod 600 \"$UHOME/.ssh/cruiser-git-key\"");
+        expect(sh).toContain("# >>> cruiser-git-key >>>");
+        expect(sh).toContain("Host github.com gitlab.com bitbucket.org");
+        expect(sh).toContain("IdentitiesOnly yes");
+        expect(sh).not.toContain("BEGIN OPENSSH PRIVATE KEY");
+    });
+    test("clip bridge: wl-paste→xclip autostart + mid-session launcher", () => {
+        const sh = guestClipBridgeScript(spec());
+        expect(sh).toContain("cruiser-clipbridge.desktop");
+        expect(sh).toContain("wl-paste --type text --watch");
+        expect(sh).toContain("xclip -selection clipboard -i");
+        expect(sh).toContain("cruiser-clip-launch");
     });
     test("guestSyncScript composes only resolved channels", () => {
         const all = guestSyncScript(spec(), {

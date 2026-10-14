@@ -76,7 +76,7 @@ usage: cruiser <area> <command> [args]
   vm sync <name> <channel> on|off     toggle a channel (--apply pushes it now if running)
                                       channels: theme accentColor contrast timezone locale
                                       keyboard monitors hostWallpaper shares | gitIdentity
-                                      proxy caCerts sshAgent   (last four default off —
+                                      proxy caCerts sshAgent gitKey   (last five default off —
                                       they push host credentials/identity/trust into the guest)
   vm logs <name> [--file cruiser|qemu|serial|install-serial] [--lines N]
            [--journal] [--unit U] [--priority P] [--boot N] [--since X] [--grep PAT]

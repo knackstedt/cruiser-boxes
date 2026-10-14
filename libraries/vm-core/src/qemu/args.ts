@@ -189,6 +189,12 @@ export function buildArgs(
         if (opts.virtiofs) {
             const sock = `${paths.vfsSock}.${i}`;
             virtiofsd.push({ socket: sock, sharedDir: s.hostPath, tag: s.tag });
+            // NOTE: no reconnect-ms — QEMU 11's reconnecting chardev does an
+            // eager connect at parse time that exhausts virtiofsd's
+            // single-shot listener before the device's real handshake
+            // ("Failed to set msg fds" at init). A dead daemon still needs
+            // a VM restart to re-pair; detached spawn + the lifecycle
+            // watchdog keep it from dying in the first place.
             push("-chardev", `socket,id=vfs${i},path=${sock}`);
             push("-device", `vhost-user-fs-pci,queue-size=1024,chardev=vfs${i},tag=${s.tag}`);
         } else {

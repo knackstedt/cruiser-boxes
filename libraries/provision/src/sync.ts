@@ -37,7 +37,7 @@ import {
     type ColorScheme,
 } from "../../host-int/src/appearance";
 import {
-    hostAgentSock, hostCaCerts, hostDisplayScale, hostGitIdentity, hostKeyboard, hostLocale,
+    hostAgentSock, hostCaCerts, hostDisplayScale, hostGitIdentity, hostGitSshKey, hostKeyboard, hostLocale,
     hostProxy, hostTimezone,
     type GitIdentity, type HostKeymap, type HostProxy, type HostScale,
 } from "../../host-int/src/hoststate";
@@ -460,6 +460,92 @@ systemctl daemon-reload 2>/dev/null || true`;
 }
 
 /**
+ * Host git SSH key → guest ~/.ssh/cruiser-git-key (0600) plus a managed
+ * ~/.ssh/config block binding it to the common git forges. IdentitiesOnly
+ * matters: a stale forwarded-agent socket (dead session) would otherwise
+ * wedge auth behind publickey failures. The private key rides the same
+ * QGA/ssh channel as every other script — base64 in a heredoc, no quoting
+ * pitfalls.
+ */
+export function guestGitKeyScript(spec: VmSpec, key: { priv: string; pub: string | null }): string {
+    const b64 = Buffer.from(key.priv.trimEnd() + "\n").toString("base64");
+    return `# host git ssh key → guest
+${preamble(spec)}
+mkdir -p "$UHOME/.ssh"
+base64 -d > "$UHOME/.ssh/cruiser-git-key" <<'CRUISERKEY'
+${b64}
+CRUISERKEY
+chmod 700 "$UHOME/.ssh" && chmod 600 "$UHOME/.ssh/cruiser-git-key"
+${key.pub ? `cat > "$UHOME/.ssh/cruiser-git-key.pub" <<'CRUISERPUB'\n${key.pub}\nCRUISERPUB\nchmod 644 "$UHOME/.ssh/cruiser-git-key.pub"` : ""}
+touch "$UHOME/.ssh/config"
+sed -i '/# >>> cruiser-git-key/,/# <<< cruiser-git-key/d' "$UHOME/.ssh/config"
+cat >> "$UHOME/.ssh/config" <<'CRUISERCFG'
+# >>> cruiser-git-key >>>
+Host github.com gitlab.com bitbucket.org
+  IdentityFile ~/.ssh/cruiser-git-key
+  IdentitiesOnly yes
+# <<< cruiser-git-key <<<
+CRUISERCFG
+chmod 600 "$UHOME/.ssh/config"
+chown -R "$U":"$U" "$UHOME/.ssh"`;
+}
+
+/**
+ * Wayland → X11 clipboard bridge for the dmabuf viewer — deployed by
+ * runOneshots (not a sync channel) whenever display.clipboard is on.
+ * spice-vdagent is X11-only: on a Wayland guest session it sees XWayland
+ * copies but native Wayland copies never reach the QEMU clipboard, so
+ * guest→host is dead for native apps. This autostart entry mirrors each
+ * Wayland text offer into the X11 selection via xclip; the sha guard
+ * stops host→guest echoes from bouncing back. No-op on X11 sessions —
+ * wl-paste exits instantly without a wayland socket. The push lands
+ * mid-session, so the script also launches the bridge immediately with
+ * env borrowed from a live session process — autostart alone would leave
+ * the current session unbridged.
+ */
+const CLIPBRIDGE_V = "v4";
+export function guestClipBridgeScript(spec: VmSpec): string {
+    return `# wayland→x11 clipboard bridge for spice-vdagent (${CLIPBRIDGE_V})
+${preamble(spec)}
+if command -v wl-paste >/dev/null 2>&1 && command -v xclip >/dev/null 2>&1; then
+    mkdir -p "$UHOME/.local/bin" "$UHOME/.config/autostart"
+    cat > "$UHOME/.local/bin/cruiser-clip-in" <<'CLIPIN'
+#!/bin/sh
+d=$(cat); [ -z "$d" ] && exit 0
+f="\${XDG_RUNTIME_DIR:-/tmp}/cruiser-clip.last"
+h=$(printf %s "$d" | sha256sum | cut -d" " -f1)
+[ "$h" = "$(cat "$f" 2>/dev/null)" ] && exit 0
+printf %s "$h" > "$f"
+printf %s "$d" | xclip -selection clipboard -i
+CLIPIN
+    chmod 755 "$UHOME/.local/bin/cruiser-clip-in"
+    # mid-session deploys can't wait for the next autostart scan — this
+    # launcher borrows the session env off the pid it's handed (desktop
+    # shell or systemd --user), then detaches so runuser can return.
+    cat > "$UHOME/.local/bin/cruiser-clip-launch" <<'CLIPLN'
+#!/bin/sh
+export $(tr '\0' '\n' < /proc/$1/environ | grep -E '^(WAYLAND_DISPLAY|XDG_RUNTIME_DIR|DISPLAY|XAUTHORITY|DBUS_SESSION_BUS_ADDRESS)=')
+setsid wl-paste --type text --watch "$(dirname "$0")/cruiser-clip-in" >/dev/null 2>&1 </dev/null &
+CLIPLN
+    cat > "$UHOME/.config/autostart/cruiser-clipbridge.desktop" <<CLIPDSK
+[Desktop Entry]
+Type=Application
+Name=Cruiser clipboard bridge
+Comment=Mirror the Wayland clipboard into X11 for spice-vdagent host sync
+Exec=wl-paste --type text --watch $UHOME/.local/bin/cruiser-clip-in
+X-GNOME-Autostart-enabled=true
+CLIPDSK
+    chown -R "$U":"$U" "$UHOME/.local/bin" "$UHOME/.config/autostart"
+    # launch now too — pgreps match comm only, -f would self-match this
+    # script's own cmdline text.
+    if ! pgrep -u "$U" -x wl-paste >/dev/null 2>&1; then
+        SPID=$(pgrep -u "$U" -n "^(plasmashell|gnome-shell|xfce4-session|kwin_wayland|kwin_x11|sway|labwc|weston|cinnamon|mate-session|lxqt-session|systemd)$" | head -1)
+        [ -n "$SPID" ] && runuser -u "$U" -- "$UHOME/.local/bin/cruiser-clip-launch" "$SPID" || true
+    fi
+fi`;
+}
+
+/**
  * Provision-bake script — every enabled channel with a resolved host value,
  * concatenated. Sections are individually `|| true`-gated so a sync failure
  * can't abort guest-setup's `set -eu`.
@@ -748,6 +834,34 @@ export class SessionSyncs {
             const mounts = spec.shares.filter((s) => s.enabled !== false && s.mode !== "copy");
             jobs.push(tryChan("shares", mounts, () =>
                 pushScript(this.h, guestSharesScript(spec), "shares")));
+        }
+        if (syncEnabled(spec, "gitKey")) {
+            jobs.push((async () => {
+                const key = await hostGitSshKey(spec);
+                if (!key) {
+                    this.log?.("gitKey: no host key resolved — set credentials.gitSshKeyPath or drop the key at ~/.ssh/<git email>");
+                    return;
+                }
+                // hash the private half — a rotated key re-pushes
+                await tryChan("gitKey", `${key.path}:${createHash("sha256").update(key.priv).digest("hex").slice(0, 16)}`,
+                    () => pushScript(this.h, guestGitKeyScript(spec, key), "git key"));
+            })());
+        }
+        // Not a channel — a display.clipboard fixture the dmabuf viewer
+        // needs; the same hash gate makes it idempotent and reaches
+        // already-provisioned VMs on their next session.
+        if (spec.display.clipboard && spec.display.viewer === "dmabuf") {
+            jobs.push((async () => {
+                const key = chanHash(CLIPBRIDGE_V);
+                if (state.clipBridge === key) return;
+                try {
+                    await pushScript(this.h, guestClipBridgeScript(spec), "clipboard bridge");
+                    state.clipBridge = key;
+                    this.log?.("clipboard bridge synced into guest");
+                } catch (e) {
+                    this.log?.(`clipBridge: ${e instanceof Error ? e.message : e}`);
+                }
+            })());
         }
         if (syncEnabled(spec, "monitors") && (spec.os.desktop === "gnome" || spec.os.desktop === "kde")) {
             jobs.push((async () => {

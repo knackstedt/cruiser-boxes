@@ -5,6 +5,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, writeFile, readFile, copyFile, rm } from "node:fs/promises";
+import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 
 import type { VmSpec } from "../config/schema";
@@ -85,6 +86,7 @@ export class VmHandle {
 
     async probe(): Promise<VmState> {
         if (!this.isRunning()) return "stopped";
+        this.watchVfsd();   // adopted QEMU — cover daemon crashes too
         try {
             const st = await this.withQmp((q) => q.queryStatus());
             if (st.status === "paused" || st.status === "prelaunch") return "paused";
@@ -169,47 +171,52 @@ export class VmHandle {
         const built = await this.buildArgv(opts);
         void appendVmLog(this.paths, `start: mode=${opts.mode ?? "run"} persist=${this.spec.persist} gpu=${this.spec.gpu.mode}`);
 
-        // virtiofsd daemons must be up before QEMU opens the sockets.
+        // virtiofsd daemons must be up before QEMU opens the sockets —
+        // the vhost-user device's handshake happens at machine init.
+        // Reap strays of a dead launcher first or they'd keep their
+        // listeners + pidfiles.
+        this.killVfsd();
         const vfsdBin = built.virtiofsd.length ? await virtiofsdPath() : null;
-        for (let i = 0; i < built.virtiofsd.length; i++) {
-            const v = built.virtiofsd[i]!;
-            await rm(v.socket, { force: true });
-            const c = spawnChild(vfsdBin!, [
-                `--socket-path=${v.socket}`, `--shared-dir=${v.sharedDir}`,
-                "--cache=auto", "--sandbox=namespace",
-            ]);
-            this.vfsChildren.push(c);
-        }
+        for (let i = 0; i < built.virtiofsd.length; i++)
+            if (vfsdBin) await this.spawnVfsd(built.virtiofsd[i]!, vfsdBin);
 
         const env = { ...process.env, ...built.env };
-        if (this.spec.persist === "daemonize") {
-            // QEMU -daemonize: spawn returns after the daemon fork.
-            await run(this.toolchain.qemu, built.argv, { env });
-        } else {
-            this.qemuChild = spawnChild(this.toolchain.qemu, built.argv, { env, stdio: "ignore" });
-            this.qemuChild.on("exit", (code) => {
-                this.qemuChild = null;
-                void appendVmLog(this.paths, `qemu exited (code ${code})`);
-            });
-            this.qemuChild.unref();
-        }
+        try {
+            if (this.spec.persist === "daemonize") {
+                // QEMU -daemonize: spawn returns after the daemon fork.
+                await run(this.toolchain.qemu, built.argv, { env });
+            } else {
+                this.qemuChild = spawnChild(this.toolchain.qemu, built.argv, { env, stdio: "ignore" });
+                this.qemuChild.on("exit", (code) => {
+                    this.qemuChild = null;
+                    void appendVmLog(this.paths, `qemu exited (code ${code})`);
+                });
+                this.qemuChild.unref();
+            }
 
-        // Wait for the monitor socket, then QMP handshake.
-        const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
-        for (;;) {
-            if (existsSync(this.paths.monitorSock)) {
-                try {
-                    await this.withQmp((q) => q.queryStatus());
-                    void appendVmLog(this.paths, `started: pid ${this.pid()}`);
-                    return;
-                } catch { /* not ready */ }
+            // Wait for the monitor socket, then QMP handshake.
+            const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
+            for (;;) {
+                if (existsSync(this.paths.monitorSock)) {
+                    try {
+                        await this.withQmp((q) => q.queryStatus());
+                        void appendVmLog(this.paths, `started: pid ${this.pid()}`);
+                        this.watchVfsd();
+                        return;
+                    } catch { /* not ready */ }
+                }
+                if (Date.now() > deadline) {
+                    const tail = existsSync(this.paths.log) ? readFileSync(this.paths.log, "utf-8").slice(-2000) : "";
+                    void appendVmLog(this.paths, `start timed out after ${opts.timeoutMs ?? 30000}ms`);
+                    throw new Error(`qemu did not come up in ${opts.timeoutMs ?? 30000}ms\n${tail}`);
+                }
+                await new Promise((r) => setTimeout(r, 250));
             }
-            if (Date.now() > deadline) {
-                const tail = existsSync(this.paths.log) ? readFileSync(this.paths.log, "utf-8").slice(-2000) : "";
-                void appendVmLog(this.paths, `start timed out after ${opts.timeoutMs ?? 30000}ms`);
-                throw new Error(`qemu did not come up in ${opts.timeoutMs ?? 30000}ms\n${tail}`);
-            }
-            await new Promise((r) => setTimeout(r, 250));
+        } catch (e) {
+            // QEMU never came up — the detached daemons we just spawned are
+            // orphans (and a retry would stack dup listeners on the sockets).
+            this.killVfsd();
+            throw e;
         }
     }
 
@@ -270,8 +277,94 @@ export class VmHandle {
     }
 
     private cleanupRunDir(): void {
+        this.killVfsd();
+        if (this.vfsdTimer) { clearInterval(this.vfsdTimer); this.vfsdTimer = null; }
+    }
+
+    /** Kill every virtiofsd for this VM — both children this handle spawned
+     *  and daemons only reachable via their pidfiles (orphans of a dead
+     *  launcher, strays of a failed start). Without QEMU they're orphans
+     *  serving nothing. */
+    private killVfsd(): void {
         this.vfsChildren.forEach((c) => c.kill());
         this.vfsChildren = [];
+        this.vfsdTargets().forEach((v) => {
+            try {
+                const pid = Number(readFileSync(`${v.socket}.pid`, "utf-8").trim());
+                if (pid && readFileSync(`/proc/${pid}/comm`, "utf-8").trim() === "virtiofsd")
+                    try { process.kill(pid, "SIGTERM"); } catch { /* gone */ }
+            } catch { /* no pidfile */ }
+        });
+    }
+
+    // ── virtiofsd ──
+
+    /** virtiofsd for one share — detached like the viewer: QEMU (-daemonize)
+     *  outlives the launching session, and a non-detached daemon dies with
+     *  its launcher's process group, leaving every guest mount hung in
+     *  D-state. stderr lands in run/virtiofsd-<tag>.log. */
+    private async spawnVfsd(v: { socket: string; sharedDir: string; tag: string }, bin?: string): Promise<void> {
+        const b = bin ?? await virtiofsdPath();
+        if (!b) return;
+        await rm(v.socket, { force: true });
+        const c = spawnChild(b, [
+            `--socket-path=${v.socket}`, `--shared-dir=${v.sharedDir}`,
+            "--cache=auto", "--sandbox=namespace",
+        ], { detached: true, logFile: join(this.paths.run, `virtiofsd-${v.tag}.log`) });
+        this.vfsChildren.push(c);
+        this.vfsdSpawned.set(v.socket, Date.now());
+    }
+
+    /** Mount-mode shares expecting a virtiofsd backend — the same
+     *  filter/index order buildArgs uses (socket i ↔ filtered share i). */
+    private vfsdTargets(): { socket: string; sharedDir: string; tag: string }[] {
+        return this.spec.shares
+            .filter((s) => s.enabled !== false && s.mode !== "copy")
+            .map((s, i) => ({ socket: `${this.paths.vfsSock}.${i}`, sharedDir: s.hostPath, tag: s.tag }));
+    }
+
+    /** virtiofsd writes <socket>.pid itself — live pid + comm match means
+     *  the backend is up (pid reuse can't fake the comm). */
+    private vfsdAlive(socket: string): boolean {
+        try {
+            const pid = Number(readFileSync(`${socket}.pid`, "utf-8").trim());
+            return !!pid && readFileSync(`/proc/${pid}/comm`, "utf-8").trim() === "virtiofsd";
+        } catch { return false; }
+    }
+
+    /** Respawn dead virtiofsd while this QEMU lives. QEMU can't re-pair a
+     *  fresh daemon on the existing chardev (see args.ts), so the mount
+     *  still needs a VM restart — the respawn exists to keep the backend
+     *  present for stop-time cleanup and to surface the loss in the log. */
+    private vfsdSpawned = new Map<string, number>();
+    private vfsdTimer: ReturnType<typeof setInterval> | null = null;
+    private vfsdTicking = false;
+
+    private watchVfsd(): void {
+        if (this.vfsdTimer) return;
+        const entries = this.vfsdTargets();
+        if (!entries.length) return;
+        const tick = async () => {
+            if (this.vfsdTicking) return;
+            this.vfsdTicking = true;
+            try {
+                if (!this.isRunning()) {
+                    if (this.vfsdTimer) { clearInterval(this.vfsdTimer); this.vfsdTimer = null; }
+                    return;
+                }
+                for (let i = 0; i < entries.length; i++) {
+                    const v = entries[i]!;
+                    if (this.vfsdAlive(v.socket)) continue;
+                    // a just-spawned daemon needs a beat to write its
+                    // pidfile — don't double-spawn on top of it
+                    if (Date.now() - (this.vfsdSpawned.get(v.socket) ?? 0) < 15_000) continue;
+                    await this.spawnVfsd(v).catch(() => {});
+                    void appendVmLog(this.paths, `virtiofsd for share '${v.tag}' respawned after death`);
+                }
+            } finally { this.vfsdTicking = false; }
+        };
+        this.vfsdTimer = setInterval(() => void tick(), 10_000);
+        this.vfsdTimer.unref();
     }
 
     async suspend(): Promise<void> { await this.withQmp((q) => q.stop()); }

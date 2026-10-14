@@ -293,3 +293,34 @@ export function hostAgentSock(): string | null {
     const s = process.env.SSH_AUTH_SOCK;
     return s && s.startsWith("/") ? s : null;
 }
+
+export interface HostSshKey { path: string; priv: string; pub: string | null }
+
+/**
+ * Host SSH key for the gitKey channel — a private key from ~/.ssh the
+ * guest can offer to git remotes. Resolution order: the spec's explicit
+ * credentials.gitSshKeyPath, then ~/.ssh/<git user.email> (the common
+ * "email-named key" layout), then the default identity names. First
+ * readable private key wins; the .pub is optional.
+ */
+export async function hostGitSshKey(
+    spec: { credentials: { gitSshKeyPath?: string } },
+): Promise<HostSshKey | null> {
+    const home = homedir();
+    const email = (await hostGitIdentity())?.email;
+    const cands = [
+        spec.credentials.gitSshKeyPath,
+        email ? join(home, ".ssh", email) : undefined,
+        join(home, ".ssh", "id_ed25519"),
+        join(home, ".ssh", "id_rsa"),
+        join(home, ".ssh", "id_ecdsa"),
+    ].filter((p): p is string => !!p);
+    for (let i = 0; i < cands.length; i++) {
+        const p = cands[i]!;
+        const priv = await readFile(p, "utf-8").catch(() => null);
+        if (!priv || !/PRIVATE KEY/.test(priv)) continue;
+        const pub = await readFile(`${p}.pub`, "utf-8").then((t) => t.trim()).catch(() => null);
+        return { path: p, priv, pub };
+    }
+    return null;
+}
