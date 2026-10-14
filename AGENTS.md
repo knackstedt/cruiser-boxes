@@ -355,6 +355,34 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   builds `WITH_GFX_H264=OFF` — use `opt/freerdp` (toolchain cmake build,
   ffmpeg backend); `freerdpSupportsH264` gates and `launchFreerdp` throws a
   clear error for KDE guests without it.
+  KWallet on Plasma ≥6.5: `ksecretd` is the daemon — it owns
+  org.freedesktop.secrets + secretservicecompat + the kwallet portal backend,
+  and stores wallets under `~/.local/share/kwalletd/` (NOT kwallets/).
+  "Cannot create wallet save location!" = it can't mkpath that dir —
+  check ~{,.local,.local/share} ownership: any `mkdir -p` under $UHOME run
+  as root (krdpserver dir, share mountpoints, clipbridge, wallpaper) strands
+  intermediates root-owned. All such mkdirs must `runuser -u "$U" --`.
+  Autologin: pam_kwallet5 gets an empty authtok and does NOTHING
+  ("Empty or missing password, doing nothing" → no wallet, first access
+  pops the new-wallet wizard). Fix = wallet created with EMPTY password —
+  ksecretd's internalOpen tries `open("")` before prompting, so it then
+  auto-unlocks silently forever. `provision/src/keyrings.ts` seeds it at
+  guest-setup (KDE+autologin only): dbus pamOpen is a no-op on running
+  daemons, so the script replays the real handshake — 56 random bytes to
+  `kwalletd/kdewallet.salt`, spawn `ksecretd --pam-login <pipefd>
+  <sockfd>` with PAM_KWALLET5_LOGIN set, write
+  `pbkdf2_hmac("sha512", b"", salt, 50000, 56)` to the pipe, dump `env`
+  to the unix socket (that's all pam_kwallet_init does). pamOpen hash
+  MUST be 56 bytes (PBKDF2) — it rejects other sizes silently.
+  GNOME equivalent (autologin): gkr-pam can't unlock either, and
+  `gnome-keyring-daemon --login/--unlock` refuse an empty stdin password
+  while CreateCollection goes through gcr-prompter — but a blank-password
+  keyring is a plaintext GKeyFile (`[keyring]` group, display-name/
+  ctime/mtime/lock-* keys — gkm-secret-textual.c), so keyrings.ts seeds an
+  empty `~/.local/share/keyrings/login.keyring` and restarts the daemon.
+  NOTE: blank password = secrets stored in plaintext on disk — inherent
+  to zero-touch autologin on both desktops (the KDE empty-password wallet
+  is equivalent).
 - Fedora confines qemu-ga under SELinux (`virt_qemu_ga_t`): guest-exec is
   uid-0 but can't usermod/write /var/lib/daemon-reload — even reading
   ~user/.ssh fails. `runGuestSetup` probes /proc/self/attr/current and falls

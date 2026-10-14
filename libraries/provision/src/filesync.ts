@@ -86,7 +86,9 @@ export function guestFileSyncPrepScript(spec: VmSpec): string {
     const u = spec.credentials.username;
     const dirs = copyEntries(spec).map((s) => guestTarget(spec, s));
     const mk = dirs.map((d) =>
-        `mkdir -p ${sq(d)} 2>/dev/null; chown ${sq(u)}:${sq(u)} ${sq(d)} 2>/dev/null || true`).join("\n");
+        // runuser first so dirs under ~ get user-owned intermediates; a root
+        // mkdir -p leaf-owns only and strands e.g. ~/.local as root:root
+        `runuser -u ${sq(u)} -- mkdir -p ${sq(d)} 2>/dev/null || mkdir -p ${sq(d)} 2>/dev/null; chown ${sq(u)}:${sq(u)} ${sq(d)} 2>/dev/null || true`).join("\n");
     return `# copy-share prep — rsync in guest + target dirs
 command -v rsync >/dev/null 2>&1 || {
     if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y rsync 2>/dev/null || true

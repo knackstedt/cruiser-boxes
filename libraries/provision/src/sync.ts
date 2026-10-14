@@ -432,7 +432,7 @@ export function guestSharesScript(spec: VmSpec): string {
     else
         echo '${s.tag} ${mpFstab} 9p ${opts9p} 0 0'
     fi
-    mkdir -p ${sq(mp)}
+    case ${sq(mp)} in "$UHOME"/*) runuser -u "$U" -- mkdir -p ${sq(mp)};; *) mkdir -p ${sq(mp)};; esac
     grep -qs '^${s.tag} ' /proc/mounts || {
         if [ "$SHARE_FSTYPE" = virtiofs ]; then
             mount -t virtiofs -o ${ro ? "ro" : "rw"} ${sq(s.tag)} ${sq(mp)} 2>/dev/null
@@ -508,7 +508,7 @@ export function guestClipBridgeScript(spec: VmSpec): string {
     return `# wayland→x11 clipboard bridge for spice-vdagent (${CLIPBRIDGE_V})
 ${preamble(spec)}
 if command -v wl-paste >/dev/null 2>&1 && command -v xclip >/dev/null 2>&1; then
-    mkdir -p "$UHOME/.local/bin" "$UHOME/.config/autostart"
+    runuser -u "$U" -- mkdir -p "$UHOME/.local/bin" "$UHOME/.config/autostart"
     cat > "$UHOME/.local/bin/cruiser-clip-in" <<'CLIPIN'
 #!/bin/sh
 d=$(cat); [ -z "$d" ] && exit 0

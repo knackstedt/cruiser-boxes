@@ -319,7 +319,8 @@ U=${sq(spec.credentials.username)}
 UHOME=$(getent passwd "$U" | cut -d: -f6)
 UUID=$(id -u "$U")
 WPDIR="$UHOME/.local/share/cruiser"
-mkdir -p "$WPDIR" || exit 1
+# runuser: a root mkdir -p leaves ~/.local{,/share} root-owned
+runuser -u "$U" -- mkdir -p "$WPDIR" || exit 1
 if [ -f ${GUEST_STAGE} ]; then
     cp ${GUEST_STAGE} "$WPDIR/wallpaper.png" && rm -f ${GUEST_STAGE}
 fi
@@ -330,7 +331,7 @@ WPURI="file://$WPDIR/wallpaper.png"
 # shortcuts cheat sheet on the user's XDG desktop
 DESKTOP=$(runuser -u "$U" -- xdg-user-dir DESKTOP 2>/dev/null) || DESKTOP=
 [ -n "$DESKTOP" ] || DESKTOP="$UHOME/Desktop"
-mkdir -p "$DESKTOP" 2>/dev/null || true
+runuser -u "$U" -- mkdir -p "$DESKTOP" 2>/dev/null || true
 cat > "$DESKTOP/VM Shortcuts.md" <<'CRUISER_DOC'
 ${doc}
 CRUISER_DOC

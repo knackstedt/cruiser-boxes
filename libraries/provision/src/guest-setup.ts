@@ -12,6 +12,7 @@ import type { VmSpec } from "../../vm-core/src/config/schema";
 import { guestAgentContext } from "../../vm-core/src/logs";
 import { profileFromSpec, resolvePackages, resolveFlatpaks } from "./packages";
 import { guestSyncScript, guestSharesScript, type HostSnapshot } from "./sync";
+import { guestKwalletScript, guestGnomeKeyringScript } from "./keyrings";
 
 /**
  * Wait until the QEMU guest agent answers (guest booted + agent installed).
@@ -217,7 +218,9 @@ if [ -z "$rdpok" ]; then echo "GRD RDP server is not listening on 3389"; exit 1;
 # SystemUserEnabled lets RDP clients authenticate with the system password;
 # the permission-set preseed suppresses the portal allow/deny prompt.
 KDIR="$UHOME/.local/share/krdpserver"
-mkdir -p "$KDIR"
+# mkdir as the user — a root mkdir -p leaves ~/.local{,/share} root-owned,
+# which breaks kwalletd ("Cannot create wallet save location!") etc.
+runuser -u "$U" -- mkdir -p "$KDIR"
 [ -f "$KDIR/krdp.crt" ] || openssl req -nodes -new -x509 \\
     -keyout "$KDIR/krdp.key" -out "$KDIR/krdp.crt" -days 3650 -batch -subj ${sq(`/CN=${spec.name}`)}
 chown -R "$U":"$U" "$KDIR"
@@ -245,6 +248,12 @@ KUSR flatpak permission-set kde-authorized remote-desktop org.kde.krdpserver yes
 ${p.autologin
     ? `if [ -z "$rdpok" ]; then echo "krdpserver is not listening on 3389 (needs a running Plasma session)"; exit 1; fi`
     : `if [ -z "$rdpok" ]; then echo "krdpserver not listening yet — autologin is off, so it binds once a user logs into the console session"; fi`}`;
+
+    // Seed a silently-unlocking secret store for autologin sessions — runs
+    // after the rdp section's :3389 wait, which guarantees the autologged-in
+    // session (and its user bus/user manager) is up. KDE gets an
+    // empty-password kdewallet, GNOME a blank-password login keyring.
+    const walletSection = !p.autologin ? "" : gnome ? guestGnomeKeyringScript() : guestKwalletScript();
 
     const lockSection = gnome ? `# no lock/suspend inside the VM (user session bus may not exist pre-login)
 runuser -u "$U" -- env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/"$UUID"/bus \\
@@ -288,6 +297,8 @@ ${shareSection}
 ${dmSection}
 
 ${rdpSection}
+
+${walletSection}
 
 ${lockSection}
 
