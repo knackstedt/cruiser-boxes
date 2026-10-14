@@ -233,13 +233,13 @@ async function build(): Promise<number> {
             }
         } else if (c.kind === "qemu") {
             // QEMU wants its own configure inside a build dir (not meson directly).
+            // pkg-config reach into opt/ comes from env.PKG_CONFIG_PATH — QEMU
+            // 11's configure has no --with-pkgconfigpath flag.
             if (!existsSync(buildDir) || FORCE) {
                 await mkdir(buildDir, { recursive: true });
-                const spicePc = join(OPT_DIR, "spice", "lib", "x86_64-linux-gnu", "pkgconfig");
                 await run(join(src, "configure"), [
                     `--prefix=${prefix}`,
                     ...(c.configureArgs ?? []),
-                    `--with-pkgconfigpath=${spicePc}`,
                 ], { cwd: buildDir, env });
             }
             await run("ninja", ["-C", buildDir], { env });

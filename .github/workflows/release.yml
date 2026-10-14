@@ -52,6 +52,7 @@ jobs:
         # vm-core's optDir() probes dirname(process.execPath)/opt.
         run: |
           bun run toolchain build
+          bun run toolchain build --component freerdp
           bun run opt:stage
 
       - name: Install X11/GLES dev libs
