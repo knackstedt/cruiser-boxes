@@ -8,12 +8,26 @@
 // shares, qemu-xhci + at-boot usb-host devices, autoinstall extras.
 // ============================================================================
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { VmSpec } from "../config/schema";
-import { diskPath, type VmPaths } from "../paths";
+import { diskPath, optDir, type VmPaths } from "../paths";
 
-export const OVMF_CODE = "/usr/share/OVMF/OVMF_CODE_4M.fd";
-export const OVMF_VARS_TEMPLATE = "/usr/share/OVMF/OVMF_VARS_4M.fd";
+const SYS_OVMF_CODE = "/usr/share/OVMF/OVMF_CODE_4M.fd";
+const SYS_OVMF_VARS_TEMPLATE = "/usr/share/OVMF/OVMF_VARS_4M.fd";
+
+/** UEFI firmware resolution: distro ovmf package first, then the toolchain's
+ *  bundled edk2 images (packaged builds carry them — see stage-opt.mts).
+ *  QEMU's firmware descriptors pair the x86_64 code fd with the i386 vars
+ *  template (share/qemu/firmware/60-edk2-x86_64.json). */
+export function ovmfCode(): string {
+    if (existsSync(SYS_OVMF_CODE)) return SYS_OVMF_CODE;
+    return join(optDir(), "qemu-11", "share", "qemu", "edk2-x86_64-code.fd");
+}
+export function ovmfVarsTemplate(): string {
+    if (existsSync(SYS_OVMF_VARS_TEMPLATE)) return SYS_OVMF_VARS_TEMPLATE;
+    return join(optDir(), "qemu-11", "share", "qemu", "edk2-i386-vars.fd");
+}
 
 export interface GuestMonitor { name: string; xres: number; yres: number }
 
@@ -86,7 +100,7 @@ export function buildArgs(
     const nestedFlag = spec.resources.nestedVirt ? hostVirtFlag() : null;
     push("-cpu", `host${nestedFlag ? `,+${nestedFlag}` : ""}`);
     push("-smp", `${cpus},sockets=${spec.resources.sockets},cores=${cpus},threads=${spec.resources.threads}`);
-    push("-drive", `if=pflash,format=raw,unit=0,readonly=on,file=${OVMF_CODE}`);
+    push("-drive", `if=pflash,format=raw,unit=0,readonly=on,file=${ovmfCode()}`);
     push("-drive", `if=pflash,format=raw,unit=1,file=${paths.ovmfVars}`);
     push("-drive", `file=${disk},if=virtio,format=${spec.disk.format},discard=unmap`);
 

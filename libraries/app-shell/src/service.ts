@@ -888,7 +888,8 @@ export class CruiserService {
             rows.push({ label: "tool: gh (gist push)", ok: !!(await which("gh")), fix: "apt install gh + gh auth login, or set GITHUB_TOKEN" });
             const tc = await resolveToolchain().catch(() => null);
             rows.push({ label: "qemu toolchain", ok: !!tc, fix: "cruiser toolchain build" });
-            rows.push({ label: "OVMF firmware", ok: existsSync("/usr/share/OVMF/OVMF_CODE_4M.fd"), fix: "apt install ovmf" });
+            const { ovmfCode } = await import("../../vm-core/src/qemu/args");
+            rows.push({ label: "OVMF firmware", ok: existsSync(ovmfCode()), fix: "apt install ovmf" });
             const usbDevs = await listUsbDevices().catch(() => []);
             const blocked = usbDevs.filter((d) => !d.writable).length;
             rows.push({ label: `usb passthrough (${blocked}/${usbDevs.length} blocked)`, ok: blocked === 0,

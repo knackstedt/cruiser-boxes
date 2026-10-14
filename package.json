@@ -13,6 +13,7 @@
     "viewer-dd:stage": "bun run toolchain/stage-viewer-dd.mts",
     "term-dd:stage": "bun run toolchain/stage-term-dd.mts",
     "term:bundle": "bun run toolchain/build-term-page.mts",
+    "opt:stage": "bun run toolchain/stage-opt.mts",
     "lint": "oxlint",
     "test": "bun test tests/",
     "typecheck": "tsc --noEmit"
@@ -39,6 +40,9 @@
   "build": {
     "appId": "dev.cruiser.app",
     "productName": "Cruiser",
+    "files": [
+      { "from": "release/opt", "to": "opt" }
+    ],
     "linux": {
       "target": [
         "deb",

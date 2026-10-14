@@ -14,8 +14,9 @@
 //   <repo>/opt/                   toolchain binaries (CRUISER_OPT override)
 // ============================================================================
 
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const HOME = homedir();
 const x = (env: string, dflt: string) => process.env[env] || dflt;
@@ -75,9 +76,14 @@ export function vmPaths(name: string): VmPaths {
     };
 }
 
-/** Toolchain opt/ dir: repo-local build output, overridable. */
+/** Toolchain opt/ dir: packaged appdir first, then repo-local build output. */
 export function optDir(): string {
     if (process.env.CRUISER_OPT) return process.env.CRUISER_OPT;
+    // Packaged layout: launcher script, runtime binary, and opt/ are siblings
+    // under dirname(process.execPath) — the same anchor native/ + dd-assets/
+    // use. In dev, dirname(bun|node)/opt never exists and we fall through.
+    const appdir = join(dirname(process.execPath), "opt");
+    if (existsSync(appdir)) return appdir;
     // <repo>/opt — this file lives at libraries/vm-core/src/paths.ts
     return join(fileDir(), "..", "..", "..", "opt");
 }

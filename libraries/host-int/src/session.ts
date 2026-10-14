@@ -5,7 +5,7 @@
 
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { vmPaths } from "../../vm-core/src/paths";
@@ -302,15 +302,18 @@ export function parseEscapeAction(s: string): EscapeActionSpec | null {
 }
 
 /** What `{cli}` expands to in escape-shortcut commands — dev trees resolve
- *  to the repo's cli.ts via bun; packaged builds don't ship it, so the
- *  installed `cruiser` binary is assumed on PATH. Shortcut daemons (gsd,
- *  kglobalaccel) exec through `sh -c` with the SESSION's PATH — which may
- *  lack ~/.bun/bin — so the running bun is referenced by absolute path and
- *  both paths are single-quoted for the shell. */
+ *  to the repo's cli.ts via bun; packaged builds dispatch cli areas off the
+ *  appdir launcher (`$DIR/cruiser vm …`, sibling of the runtime binary).
+ *  Shortcut daemons (gsd, kglobalaccel) exec through `sh -c` with the
+ *  SESSION's PATH — which may lack ~/.bun/bin — so binaries are referenced
+ *  by absolute path and single-quoted for the shell. */
 export function cruiserCliPrefix(): string {
-    const cli = new URL("../../../src/cli.ts", import.meta.url).pathname;
-    if (!existsSync(cli)) return "cruiser";
     const q = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
+    const cli = new URL("../../../src/cli.ts", import.meta.url).pathname;
+    if (!existsSync(cli)) {
+        const launcher = join(dirname(process.execPath), "cruiser");
+        return existsSync(launcher) ? q(launcher) : "cruiser";
+    }
     const bun = /bun/.test(process.execPath.split("/").pop() ?? "") ? q(process.execPath) : "bun";
     return `${bun} run ${q(cli)}`;
 }

@@ -38,6 +38,22 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install toolchain build deps
+        # aptBuildDeps in toolchain/versions.json — the QEMU 11 source build
+        # below needs them (system qemu is too old to ship).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y $(node -e 'console.log(JSON.parse(require("fs").readFileSync("toolchain/versions.json","utf8")).aptBuildDeps.join(" "))')
+
+      - name: Build + stage the opt/ toolchain
+        # From-source QEMU 11 + virglrenderer/spice/freerdp (~30-60min), then
+        # pruned to release/opt/ (x86_64 only, stripped, licenses collected).
+        # package.json build.files copies release/opt → <appdir>/opt where
+        # vm-core's optDir() probes dirname(process.execPath)/opt.
+        run: |
+          bun run toolchain build
+          bun run opt:stage
+
       - name: Install X11/GLES dev libs
         # viewer-dd's own #[link] externs need the dev .so symlinks
         # (-lGLESv2, -lX11) — cargo check passes without them, the release

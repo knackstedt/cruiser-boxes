@@ -39,6 +39,18 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   `<appdir>/native/`, where `dirname(process.execPath)` anchors
   `ddViewerPath()`/`termDdPath()`'s probe
   (PATH → packaged appdir → repo `<name>-dd/target/{release,debug}`).
+  release.yml also builds the opt/ toolchain from source
+  (`bun run toolchain build` — QEMU 11 + pinned virglrenderer/spice, the
+  aptBuildDeps from versions.json are apt-installed first) and stages it via
+  `bun run opt:stage` → `release/opt/` (x86-only firmware prune, stripped,
+  ~60M, license texts under licenses/ + THIRD_PARTY_NOTICES.md);
+  package.json `build.files` copies it to `<appdir>/opt/` — the same
+  `dirname(process.execPath)` anchor `optDir()` probes before falling back
+  to `<repo>/opt` (CRUISER_OPT overrides both). The packaged binary is also
+  the CLI: native-entry.ts dispatches argv to src/cli.ts when arg1 is a cli
+  area (`cruiser vm start x`, `cruiser doctor`), so OVMF_CODE/OVMF_VARS
+  resolve system-first then opt's edk2 fds, and {cli} shortcuts expand to
+  the appdir launcher.
 - CI does NOT use the sibling `file:` engine checkout —
   `.github/actions/downdraft-deps` rewrites `@downdraft/*` to the published
   npm version (`^0.3.0` by default). Engine changes must be **published to

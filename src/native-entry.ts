@@ -24,6 +24,21 @@ const log = createLogger("info");
 // Runtime boot + module-graph eval happened before this line ran.
 mark("entry-module");
 
+// Single-binary dispatch: the packaged launcher always execs this entry, so
+// `cruiser vm start x` / `cruiser doctor` must route to the headless CLI
+// (src/cli.ts) instead of opening a window. Dev parity: the same dispatch
+// applies under `bun run src/native-entry.ts`. `cli` is an explicit prefix
+// (stripped before cli.ts sees argv) for future area-name collisions.
+const CLI_AREAS = new Set([
+    "vm", "usb", "toolchain", "doctor", "provision", "app", "host",
+    "cli", "help", "--help", "-h", "--version",
+]);
+if (process.argv[2] && CLI_AREAS.has(process.argv[2])) {
+    if (process.argv[2] === "cli") process.argv.splice(2, 1);
+    await import("./cli"); // runs the command, then exits — never returns
+    process.exit(0);
+}
+
 // dev harness knob: CRUISER_WIN_W/CRUISER_WIN_H override the initial size
 const WIDTH = Number(process.env.CRUISER_WIN_W ?? 1100);
 const HEIGHT = Number(process.env.CRUISER_WIN_H ?? 720);

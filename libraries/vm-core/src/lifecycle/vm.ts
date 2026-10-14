@@ -11,7 +11,7 @@ import type { ChildProcess } from "node:child_process";
 import type { VmSpec } from "../config/schema";
 import { parseVmSpec } from "../config/schema";
 import { vmPaths, diskPath as resolveDiskPath, type VmPaths } from "../paths";
-import { buildArgs, OVMF_VARS_TEMPLATE, type BuildOpts, type BuiltArgs } from "../qemu/args";
+import { buildArgs, ovmfVarsTemplate, type BuildOpts, type BuiltArgs } from "../qemu/args";
 import { resolveToolchain, type Toolchain } from "../qemu/resolve";
 import { QmpClient } from "../qmp/client";
 import { QgaClient } from "../qga/client";
@@ -166,7 +166,7 @@ export class VmHandle {
         if (!existsSync(this.diskPath())) throw new Error(`no disk at ${this.diskPath()} — provision first`);
         this.toolchain ??= await resolveToolchain();
         await mkdir(this.paths.run, { recursive: true });
-        if (!existsSync(this.paths.ovmfVars)) await copyFile(OVMF_VARS_TEMPLATE, this.paths.ovmfVars);
+        if (!existsSync(this.paths.ovmfVars)) await copyFile(ovmfVarsTemplate(), this.paths.ovmfVars);
 
         const built = await this.buildArgv(opts);
         void appendVmLog(this.paths, `start: mode=${opts.mode ?? "run"} persist=${this.spec.persist} gpu=${this.spec.gpu.mode}`);

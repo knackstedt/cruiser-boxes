@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 // ============================================================================
 // cli.ts — headless control surface for cruiser.
 //
@@ -581,7 +580,8 @@ async function doctor() {
         checks.push([`qemu: ${v.stdout.split("\n")[0] || v.stderr.slice(0, 120)}`, v.code === 0, "cruiser toolchain build"]);
         checks.push([`xfreerdp: ${tc.xfreerdp}`, true, ""]);
     }
-    checks.push(["OVMF firmware", existsSync("/usr/share/OVMF/OVMF_CODE_4M.fd"), "apt install ovmf"]);
+    const { ovmfCode } = await import("../libraries/vm-core/src/qemu/args");
+    checks.push(["OVMF firmware", existsSync(ovmfCode()), "apt install ovmf"]);
     // Nested virt only fails doctor when a VM actually asks for it — the
     // flag is opt-in per spec.
     const kvmMod = ["kvm_intel", "kvm_amd"].find((m) => existsSync(`/sys/module/${m}/parameters/nested`));
