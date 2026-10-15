@@ -51,6 +51,13 @@ ${body}
   u_path 'export PATH="$HOME/.dotnet:$PATH"'`);
 
     // ── cli & shell ──
+    add("shell", `  # deb-family renames — bridge the canonical names users expect
+  command -v bat >/dev/null 2>&1 || ! command -v batcat >/dev/null 2>&1 || ln -sf "$(command -v batcat)" /usr/local/bin/bat
+  command -v fd >/dev/null 2>&1 || ! command -v fdfind >/dev/null 2>&1 || ln -sf "$(command -v fdfind)" /usr/local/bin/fd
+  # ubuntu doesn't ship zellij — upstream musl static build (rust-triple arch)
+  command -v zellij >/dev/null 2>&1 || \\
+    curl -fsSL "https://github.com/zellij-org/zellij/releases/latest/download/zellij-$(uname -m)-unknown-linux-musl.tar.gz" \\
+      | tar -xzf - -C /usr/local/bin zellij || true`);
     add("yq", `  # the distro 'yq' is a different (python) tool — take mikefarah's binary
   curl -fsSLo /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_$(dl_arch)"
   chmod +x /usr/local/bin/yq`);
@@ -60,7 +67,7 @@ ${body}
     chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \\
         > /etc/apt/sources.list.d/github-cli.list
-    apt-get update -qq
+    apt-get update -qq || true
     apt-get install -y gh
   else
     DNF=dnf5; command -v dnf5 >/dev/null || DNF=dnf
@@ -99,11 +106,15 @@ CURDESK
     add("devin-desktop", `  # windsurf repo is apt-only — nothing to do on rpm guests
   command -v apt-get >/dev/null || { echo "guest-setup: devin-desktop is deb-family only" >&2; exit 0; }
   install -d -m 0755 /etc/apt/keyrings
+  # windsurf.gpg is ascii-armored — a raw copy lands as an "unsupported
+  # filetype" and leaves the repo unsigned (which then fails every later
+  # apt-get update in this script). Dearmor it. --batch --yes so a
+  # re-provision overwrites the keyring instead of dying on "File exists".
   curl -fsSL https://windsurf-stable.codeiumdata.com/wVxQEIWkwPUEAGf3/windsurf.gpg \\
-      -o /etc/apt/keyrings/windsurf-stable.gpg
+      | gpg --batch --yes --dearmor -o /etc/apt/keyrings/windsurf-stable.gpg
   echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/windsurf-stable.gpg] https://windsurf-stable.codeiumdata.com/wVxQEIWkwPUEAGf3/apt stable main" \\
       > /etc/apt/sources.list.d/devin-desktop.list
-  apt-get update -qq
+  apt-get update -qq || true   # an unrelated broken repo mustn't veto the install
   apt-get install -y devin-desktop`);
 
     // ── containers & vms ──
@@ -125,10 +136,10 @@ CURDESK
     . /etc/os-release
     HCSUITE="\${UBUNTU_CODENAME:-\${VERSION_CODENAME:-noble}}"
     curl -fsS -o /dev/null "https://apt.releases.hashicorp.com/dists/$HCSUITE/Release" || HCSUITE=noble
-    curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+    curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --batch --yes --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $HCSUITE main" \\
         > /etc/apt/sources.list.d/hashicorp.list
-    apt-get update -qq
+    apt-get update -qq || true
     apt-get install -y ${want}
   elif command -v dnf5 >/dev/null || command -v dnf >/dev/null; then
     DNF=dnf5; command -v dnf5 >/dev/null || DNF=dnf
@@ -163,12 +174,19 @@ CURDESK
     u_run bash -c "curl -fsSL https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-$GCARCH.tar.gz -o /tmp/gcloud.tgz && tar -xzf /tmp/gcloud.tgz -C \\"\\$HOME\\"" </dev/null
     u_run "$UHOME/google-cloud-sdk/install.sh" -q --usage-reporting=false </dev/null || true
   fi
+  # install.sh -q doesn't reliably wire PATH — do it ourselves
+  u_path 'export PATH="$HOME/google-cloud-sdk/bin:$PATH"'
+  # az: the aka.ms installer wires MS's apt repo — but it has no suite for
+  # brand-new ubuntu/debian releases (install exits 1 leaving nothing).
+  # Fall back to a user-level pipx/pip install on any family.
+  if ! command -v az >/dev/null 2>&1 && command -v apt-get >/dev/null; then
+    bash -c 'curl -fsSL https://aka.ms/InstallAzureCLIDeb | bash' </dev/null || true
+  fi
   if ! command -v az >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null; then
-      bash -c 'curl -fsSL https://aka.ms/InstallAzureCLIDeb | bash' </dev/null || true
-    else
-      u_run pipx install azure-cli 2>/dev/null || u_run python3 -m pip install --user azure-cli 2>/dev/null || true
-    fi
+    command -v pipx >/dev/null 2>&1 || {
+      apt-get install -y pipx 2>/dev/null || dnf5 install -y pipx 2>/dev/null || dnf install -y pipx 2>/dev/null || true; }
+    u_run pipx install azure-cli 2>/dev/null \\
+      || u_run python3 -m pip install --user --break-system-packages azure-cli 2>/dev/null || true
   fi`);
 
     // ── databases ──
@@ -182,17 +200,31 @@ CURDESK
     add("redis", `  systemctl enable --now redis-server 2>/dev/null || systemctl enable --now redis 2>/dev/null || true`);
     add("mongodb", `  if command -v apt-get >/dev/null; then
     . /etc/os-release
-    curl -fsSL https://pgp.mongodb.com/server-8.0.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-server-8.0.gpg
+    curl -fsSL https://pgp.mongodb.com/server-8.0.asc | gpg --batch --yes --dearmor -o /usr/share/keyrings/mongodb-server-8.0.gpg
     if [ "\${ID:-}" = debian ]; then
       MBASE=https://repo.mongodb.org/apt/debian; MC="\${VERSION_CODENAME:-bookworm}"; MCOMP=main; MFALL=bookworm
     else
       MBASE=https://repo.mongodb.org/apt/ubuntu; MC="\${UBUNTU_CODENAME:-\${VERSION_CODENAME:-noble}}"; MCOMP=multiverse; MFALL=noble
     fi
-    # mongo lags brand-new releases — probe the dist, fall back to the last LTS
-    curl -fsS -o /dev/null "$MBASE/dists/$MC/mongodb-org/8.0/Release" || MC=$MFALL
-    echo "deb [signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg] $MBASE $MC/mongodb-org/8.0 $MCOMP" \\
-        > /etc/apt/sources.list.d/mongodb-org-8.0.list
-    apt-get update -qq
+    # mongod 8.0 hard-refuses kernels >= 6.19 (SERVER-121912); 8.2 lifts it.
+    # Prefer 8.0 on older kernels, 8.2 on newer ones.
+    KMAJ="$(uname -r | cut -d. -f1)"; KMIN="$(uname -r | cut -d. -f2)"
+    if [ "$KMAJ" -gt 6 ] || { [ "$KMAJ" -eq 6 ] && [ "$KMIN" -ge 19 ]; }; then
+      MSERIES="8.2 8.0"
+    else
+      MSERIES="8.0 8.2"
+    fi
+    # mongo also publishes STUB suites for brand-new releases — the dist
+    # fetches but Packages holds only atlas-cli/tools, no mongodb-org. Walk
+    # codename/LTS x series until apt sees a real candidate.
+    MOK=""
+    for MCX in "$MC" "$MFALL"; do for MV in $MSERIES; do
+      echo "deb [signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg] $MBASE $MCX/mongodb-org/$MV $MCOMP" \\
+          > /etc/apt/sources.list.d/mongodb-org-8.0.list
+      apt-get update -qq || true
+      apt-cache policy mongodb-org 2>/dev/null | grep "Candidate: [^ (]" >/dev/null && { MOK=1; break 2; }
+    done; done
+    [ -n "$MOK" ] || exit 1
     apt-get install -y mongodb-org || apt-get install -y mongodb-mongosh
   elif command -v dnf5 >/dev/null || command -v dnf >/dev/null; then
     tee /etc/yum.repos.d/mongodb-org-8.0.repo >/dev/null <<'MOREPO'
