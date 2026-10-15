@@ -25,6 +25,7 @@ cruiser <area> <command> [args]
 | `vm snapshot <name> <snap>` | create (VM must be stopped) |
 | `vm restore <name> <snap>` | apply (VM must be stopped) |
 | `vm snapshot-rm <name> <snap>` | delete |
+| `vm clone <name> <new>` | clone a stopped VM — fresh ports, disk reflinked/converted without snapshots |
 | `vm backup <name> <dest.qcow2>` | live blockdev-backup if running, offline convert if stopped |
 | `vm resize <name> <newGiB>` | `qemu-img resize` (grow only) |
 | `vm rm <name> [--disk]` | unregister; `--disk` also deletes `disk.qcow2` |

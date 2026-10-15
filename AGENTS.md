@@ -21,7 +21,9 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 - `CRUISER_SMOKE_MS=N CRUISER_SCREENSHOT=/path.png CRUISER_SHOT_FRAMES=N
   CRUISER_ROUTE=create|vm|settings bun run src/native-entry.ts` — headless-ish
   UI smoke/screenshot harness (still needs a GPU + display; captures the real
-  window surface).
+  window surface). Add `WINIT_X11_SCALE_FACTOR=1` for screenshots: winit's
+  LogicalSize intermittently picks up a sub-1 Xft.dpi (~82dpi via XSETTINGS)
+  and shrinks the window ~15% (e.g. 1280x800 → 1097x686).
 - `DD_STARTUP_PROFILE=1` — boot timing marks (`[startup] label t=Nms` since
   process start): entry/host/shell/service stages in `startup-profile.ts`
   plus per-stage marks inside `createNativeHost` (engine).
@@ -76,6 +78,14 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   for the UI's shareAdd and the cli's --share/`vm share add`;
   `config/portable.ts` owns `loadPortableRef` + `pullConfigFromOrigin`
   (shared by import/`config pull` on both surfaces).
+  `config/boot-diff.ts` (`bootRelevantChanges`) is the single
+  argv-relevant spec diff — it powers mergePulledSpec's needsRestart AND
+  `VmHandle.pendingRestart`: start() snapshots the launched spec to
+  run/launch-spec.json, and the UI diffs it against the saved spec for the
+  "restart pending" marker (vm row/detail) + the edit form's
+  "needs restart"/"applies live" field tags. persist/headMode/sync/
+  copy-shares are LIVE (session-level), resources/gpu/display-viewer/
+  network/usb/mount-shares are boot-frozen.
   `logs.ts` — the Logs screen's backends: run/ file tails (cruiser.log is
   tee'd from lifecycle + provision via `appendVmLog`; serial.log is attached
   on every boot) and guest journalctl with filters over QGA, falling back to
@@ -96,6 +106,18 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   the respawn only keeps the backend present for cleanup + logging.
   --sandbox=namespace makes each daemon a supervisor+worker pair —
   two procs per socket is normal.
+  `lifecycle/autosnap.ts` (`runAutoSnapshot`) is the spec.snapshots
+  {auto,trigger,keep} policy — offline qemu-img internal snaps only, so it
+  fires on the "start"/"stop" edges (never on kill/crash). auto-* prefixed
+  names rotate to keep-N; space preflight wants headroom ≈ the file
+  doubling (pinned-cluster worst case), sacrifices oldest auto-* first,
+  and reports `shortfall{need,free,remaining}` so the UI can park a start
+  on a delete-or-skip prompt (CLI just warns and proceeds).
+  `registry.clone(name,new)` duplicates a stopped VM: fresh ports via
+  create()'s realloc path, disk reflinked (cp --reflink=always) or
+  qemu-img convert'd — internal snapshots never survive (convert drops
+  them; reflink copies then strips them); OVMF_VARS + secrets/ copied,
+  spec.origin cleared (a config pull must not rewrite both VMs).
 - `libraries/host-int` — WmAdapter impls (kde-x11 full; kde-wayland partial;
   gnome-x11; gnome-wayland — shortcuts via gsettings work there since gsd is
   session-level; only window ops are stubbed), xfreerdp viewer + ViewerSession.
@@ -300,7 +322,13 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   `TermView` composites the view via
   WebUiTextureSource+PanelBlitPass over the `#termbox` rect (doc px ×
   CRUISER_UI_ZOOM → buffer px) and grabs input on the bus at −20 (below
-  html-ui's −10). `TermManager` keeps per-VM {session, view} alive across
+  html-ui's −10). The composite rect MUST be integer buffer px (snapRect
+  in term-view.ts + the same edge-rounding in termRect) — PanelBlitPass
+  samples linearly, so a fractional origin/span puts every screen pixel
+  between texels and smears all text (the "blurry terminal" bug); the
+  view rasters at scale=1 so texel:pixel must be exactly 1:1. The page's
+  fontSize is passed as 13×zoom physical px so term text tracks the
+  doc's zoomed type size. `TermManager` keeps per-VM {session, view} alive across
   routes; `svc.term()` falls back to `openHostTerm` (host-int's
   `termemu.ts` DE-aware emulator probe) when the webui backend or term-dd
   is missing. The session spawns term-dd with TERM=xterm-256color

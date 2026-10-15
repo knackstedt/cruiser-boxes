@@ -14,9 +14,45 @@ bun run cli -- vm restore myvm before-upgrade
 bun run cli -- vm snapshot-rm myvm before-upgrade
 ```
 
-These are **qcow2 internal snapshots** (`qemu-img snapshot -c/-a/-d`).
-`qemu-img` needs the disk offline, so snapshot and restore refuse to run
-while the VM is running — `vm stop` first.
+These are **qcow2 internal snapshots** (`qemu-img snapshot -c/-a/-d`) —
+creation is effectively instant. `qemu-img` needs the disk offline, so
+snapshot, restore, and delete all refuse to run while the VM is running —
+`vm stop` first. In the UI, click a snapshot chip to restore it (two-click
+confirm) and use its `✕` to delete it.
+
+## Auto snapshots
+
+The VM settings (`snapshots.auto`, also on the create form and
+`vm create --autosnap`) take an `auto-*` snapshot on a cadence:
+
+- **frequency** — `daily` · `weekly` · `monthly`: a snapshot is taken when
+  the newest `auto-*` one is older than the period.
+- **trigger** — `stop` (after a clean shutdown), `start` (before booting),
+  or `both`.
+- **keep** — how many `auto-*` snapshots are retained; the oldest rotate
+  out. Manual `snap-*` snapshots are never pruned.
+
+Only clean edges can snapshot — `qemu-img` needs the disk offline, so a
+kill, a QEMU crash, or a host power loss leaves no snapshot behind.
+
+Before creating one, cruiser checks the host filesystem has room for the
+worst case (the disk file doubling while the snapshot pins clusters). When
+it's short, the oldest `auto-*` snapshots are deleted first; if that's
+still not enough the UI asks whether to delete the remaining snapshots or
+start without one (the CLI warns and proceeds).
+
+## Cloning a VM
+
+```sh
+bun run cli -- vm clone myvm myvm-copy
+```
+
+Copies the spec (new name, freshly allocated ssh/rdp ports), the disk, the
+OVMF vars, and `secrets/`. **Snapshots are not carried over** — the disk
+is reflinked when the filesystem supports it (`cp --reflink`), falling
+back to `qemu-img convert`; either way internal snapshots are stripped.
+The source VM must be stopped. The clone's `origin` is cleared so a config
+pull can't rewrite both VMs from one source.
 
 ## Backups
 

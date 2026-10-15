@@ -26,6 +26,7 @@ Edit while the VM is stopped; the next `vm start` picks changes up.
 | `sync` | object | | host→guest sync channels — see below |
 | `network` | object | | `hostfwd[]`, `sshPort`, `rdpPort`, `vsock` (dflt true) |
 | `persist` | enum | `daemonize` | `daemonize` · `owned` · `ephemeral` |
+| `snapshots` | object | | `auto` (`off`·`daily`·`weekly`·`monthly`), `trigger` (`start`·`stop`·`both`, dflt `stop`), `keep` (dflt 5 — auto-* rotation bound) |
 | `provisioned` | object | | `method: cloudimg\|iso\|imported`, `source`, `completedAt` — written by provisioning |
 | `credentials` | object | | `username` (POSIX name, dflt `cruiser`), `passwordFile` (0600 path — never an inline password) |
 | `autostart` | bool | `false` | boot when the app starts |

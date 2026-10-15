@@ -29,6 +29,9 @@ bun run cli -- vm create myvm [flags]
 | `--xfonts` | `os.extraFonts` | `false` | CJK + MS core fonts |
 | `--no-autologin` | `os.autologin` | `true`→`false` | KDE guests effectively need autologin (krdpserver is a user-session service) |
 | `--devtools a,b,…` | `os.devtools` | `[]` | see [provisioning → devtools](/guides/provisioning/#developer-tooling) |
+| `--autosnap F` | `snapshots.auto` | `off` | `daily` · `weekly` · `monthly` auto snapshots |
+| `--snap-trigger T` | `snapshots.trigger` | `stop` | `start` · `stop` · `both` — which edge fires the auto snapshot |
+| `--snap-keep N` | `snapshots.keep` | `5` | auto-* snapshots retained; oldest auto-pruned |
 
 Flag values are re-validated against the schema after parsing, so a typo
 (`--distro ubntu`) fails at create time rather than poisoning `vm.json`.
