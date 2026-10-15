@@ -59,7 +59,9 @@
       "depends": [
         "libc6",
         "libstdc++6",
-        "libvulkan1"
+        "libvulkan1",
+        "libusb-1.0-0",
+        "libusbredirparser1t64"
       ]
     }
   }

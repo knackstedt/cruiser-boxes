@@ -249,6 +249,21 @@ export const VmSpec = z.object({
      */
     persist: z.enum(["daemonize", "owned", "ephemeral"]).default("daemonize"),
 
+    /**
+     * Automatic qcow2 internal snapshots (offline qemu-img — the disk must
+     * be idle, so "clean stop" is the only exit that snapshots; a kill or
+     * host power loss can't). auto != "off" fires when the newest auto-*
+     * snapshot is older than the cadence. keep bounds the auto-* rotation —
+     * manual snapshots are never pruned.
+     */
+    snapshots: z.object({
+        auto: z.enum(["off", "daily", "weekly", "monthly"]).default("off"),
+        /** which lifecycle edge auto fires on. */
+        trigger: z.enum(["start", "stop", "both"]).default("stop"),
+        /** auto-* snapshots retained — oldest pruned past this. */
+        keep: z.number().int().min(1).max(50).default(5),
+    }).prefault({}),
+
     provisioned: z.object({
         method: z.enum(["cloudimg", "iso", "imported"]).optional(),
         source: z.string().optional(),

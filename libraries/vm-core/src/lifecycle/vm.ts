@@ -10,6 +10,7 @@ import type { ChildProcess } from "node:child_process";
 
 import type { VmSpec } from "../config/schema";
 import { parseVmSpec } from "../config/schema";
+import { bootRelevantChanges } from "../config/boot-diff";
 import { vmPaths, diskPath as resolveDiskPath, type VmPaths } from "../paths";
 import { buildArgs, ovmfVarsTemplate, type BuildOpts, type BuiltArgs } from "../qemu/args";
 import { resolveToolchain, type Toolchain } from "../qemu/resolve";
@@ -96,6 +97,19 @@ export class VmHandle {
             // "crashed" is only for a dead pid, which isRunning() already excluded.
             return "starting";
         }
+    }
+
+    /** Spec sections changed since this QEMU launched — saved settings
+     *  that can only apply at the next boot (the "restart pending"
+     *  indicator). Empty when the VM isn't running or no launch baseline
+     *  was recorded (VMs started by older builds). */
+    pendingRestart(): string[] {
+        if (!this.isRunning()) return [];
+        try {
+            const launch = parseVmSpec(
+                JSON.parse(readFileSync(this.paths.launchSpec, "utf-8")));
+            return bootRelevantChanges(launch, this.spec);
+        } catch { return []; }
     }
 
     // ── client accessors ──
@@ -201,6 +215,10 @@ export class VmHandle {
                     try {
                         await this.withQmp((q) => q.queryStatus());
                         void appendVmLog(this.paths, `started: pid ${this.pid()}`);
+                        // Snapshot the spec QEMU actually launched with —
+                        // pendingRestart() diffs later saves against it.
+                        await writeFile(this.paths.launchSpec,
+                            JSON.stringify(this.spec)).catch(() => {});
                         this.watchVfsd();
                         return;
                     } catch { /* not ready */ }
@@ -376,6 +394,7 @@ export class VmHandle {
         return resolveDiskPath(this.spec, this.paths.dir);
     }
 
+    async diskInfo() { return disk.diskInfo((await this.tc()).qemuImg, this.diskPath()); }
     async snapshots() { return disk.snapshotList((await this.tc()).qemuImg, this.diskPath()); }
     async snapshot(name: string) {
         if (this.isRunning()) throw new Error("stop the VM before taking a snapshot (qemu-img needs the disk offline)");
@@ -385,7 +404,10 @@ export class VmHandle {
         if (this.isRunning()) throw new Error("stop the VM before restoring a snapshot");
         return disk.snapshotApply((await this.tc()).qemuImg, this.diskPath(), name);
     }
-    async deleteSnapshot(name: string) { return disk.snapshotDelete((await this.tc()).qemuImg, this.diskPath(), name); }
+    async deleteSnapshot(name: string) {
+        if (this.isRunning()) throw new Error("stop the VM before deleting a snapshot");
+        return disk.snapshotDelete((await this.tc()).qemuImg, this.diskPath(), name);
+    }
     async resizeDisk(newSizeGiB: number) {
         if (this.isRunning()) throw new Error("stop the VM before resizing the disk (guest growfs happens next boot)");
         return disk.resizeDisk((await this.tc()).qemuImg, this.diskPath(), newSizeGiB);

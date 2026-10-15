@@ -6,15 +6,16 @@
 // to monitor/qga sockets.
 // ============================================================================
 
-import { readdir } from "node:fs/promises";
+import { readdir, readFile, copyFile, cp, mkdir } from "node:fs/promises";
 import { createServer } from "node:net";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, extname, join } from "node:path";
 
-import { VMS_DIR } from "../paths";
+import { VMS_DIR, vmPaths } from "../paths";
 import { VmHandle, type VmState } from "./vm";
 import { VmSpec, parseVmSpec } from "../config/schema";
-import { readFile } from "node:fs/promises";
+import { cloneDisk } from "../disk/ops";
+import { resolveToolchain } from "../qemu/resolve";
 
 // Random-allocation band for auto hostfwd host ports. Deliberately below
 // the default Linux ephemeral range (32768–60999) so a transient outbound
@@ -106,6 +107,68 @@ export class VmRegistry extends EventTarget {
         for (let p = HOSTFWD_PORT_MIN; p <= HOSTFWD_PORT_MAX; p++)
             if (!used.has(p) && await portFree(p)) return p;
         throw new Error(`no free host port for '${kind}' hostfwd`);
+    }
+
+    /**
+     * Clone a stopped VM under a new name: fresh ssh/rdp ports + their
+     * auto hostfwd (custom forwards carry over — both VMs can't serve the
+     * same port simultaneously, that's on the user), the disk copied via
+     * reflink-or-convert WITHOUT its internal snapshots, OVMF vars and
+     * secrets/ carried over. run/, snapshots/, backups/ and the launch
+     * baseline start clean. spec.origin is dropped — a clone is a fork;
+     * `config pull` must not revert two VMs from one source.
+     */
+    async clone(srcName: string, newName: string): Promise<VmHandle> {
+        const src = this.vms.get(srcName);
+        if (!src) throw new Error(`unknown vm '${srcName}'`);
+        if (src.isRunning()) throw new Error(`stop '${srcName}' before cloning it`);
+        if (this.vms.has(newName)) throw new Error(`vm '${newName}' already exists`);
+        if (!/^[a-z0-9][a-z0-9-]*$/.test(newName))
+            throw new Error("name must be lowercase letters/digits/dashes (e.g. 'dev-box')");
+
+        const spec: VmSpec = JSON.parse(JSON.stringify(src.spec));
+        spec.name = newName;
+        spec.origin = undefined;
+        spec.network.sshPort = undefined;
+        spec.network.rdpPort = undefined;
+        spec.network.hostfwd = spec.network.hostfwd
+            .filter((f) => f.guestPort !== 22 && f.guestPort !== 3389);
+
+        // A disk inside the vm dir (the usual relative disk.file, or an
+        // absolute path that still points there) clones into the new vm
+        // dir; an external custom path clones beside the source.
+        const srcDisk = src.diskPath();
+        if (!existsSync(srcDisk)) throw new Error(`'${srcName}' has no disk to clone — provision or start it first`);
+        const rel = !src.spec.disk.file.startsWith("/");
+        const dstDisk = srcDisk.startsWith(`${src.paths.dir}/`)
+            ? join(vmPaths(newName).dir, srcDisk.slice(src.paths.dir.length + 1))
+            : join(dirname(srcDisk), `${newName}${extname(srcDisk) || ".qcow2"}`);
+        if (existsSync(dstDisk)) throw new Error(`clone target disk already exists: ${dstDisk}`);
+        spec.disk.file = rel ? src.spec.disk.file : dstDisk;
+
+        // secrets/ holds the password file — repoint the spec at the copy.
+        const pw = spec.credentials.passwordFile;
+        if (pw && pw.startsWith(`${src.paths.dir}/`))
+            spec.credentials.passwordFile = join(vmPaths(newName).dir, "secrets", pw.split("/").pop()!);
+
+        const h = await this.create(spec);   // writes vm.json + allocates ports
+        try {
+            const tc = await resolveToolchain();
+            await mkdir(dirname(dstDisk), { recursive: true });
+            await cloneDisk(tc.qemuImg, srcDisk, dstDisk, spec.disk.format);
+            if (existsSync(src.paths.ovmfVars)) await copyFile(src.paths.ovmfVars, h.paths.ovmfVars);
+            const srcSecrets = join(src.paths.dir, "secrets");
+            if (existsSync(srcSecrets)) await cp(srcSecrets, join(h.paths.dir, "secrets"), { recursive: true });
+        } catch (e) {
+            // A failed copy must not leave a registered-but-diskless VM —
+            // nor a half-written external disk file.
+            this.vms.delete(newName);
+            const { rm } = await import("node:fs/promises");
+            await rm(h.paths.dir, { recursive: true, force: true }).catch(() => {});
+            if (!dstDisk.startsWith(`${h.paths.dir}/`)) await rm(dstDisk, { force: true }).catch(() => {});
+            throw e;
+        }
+        return h;
     }
 
     async remove(name: string, { deleteDisk = false } = {}): Promise<void> {

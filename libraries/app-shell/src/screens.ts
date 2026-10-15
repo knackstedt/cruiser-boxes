@@ -90,6 +90,11 @@ input:focus { border-color:#4fc2f7; outline:none; }
    colored fringes. */
 .opt.dim { background:#161b23; color:#4a515d; border-color:#1f252e; }
 .opt.sm { padding:4px 9px; font-size:12px; }
+/* Apply-mode tags on the edit form while the VM runs: boot = frozen into
+   QEMU's launch argv (needs restart), live = takes effect immediately. */
+.aptag { font-size:10px; padding:1px 7px; border-radius:8px; white-space:nowrap; }
+.aptag.boot { color:#f0c98a; border:1px solid #6b5527; }
+.aptag.live { color:#9fd89f; border:1px solid #2f5233; }
 .crumb { display:inline-block; font-size:12px; color:#7fd0ff; margin-bottom:10px; }
 .sharebox { background:#161b23; border:1px solid #2a313c; border-radius:6px;
             padding:10px 14px 2px; margin-top:10px; }
@@ -109,9 +114,12 @@ input:focus { border-color:#4fc2f7; outline:none; }
 .docrow .ok { color:#9fd89f; font-weight:bold; width:40px; }
 .docrow .bad { color:#f08aa8; font-weight:bold; width:40px; }
 .docrow .fix { color:#5d6775; font-size:12px; }
-.snap { display:inline-block; padding:5px 11px; margin:0 6px 6px 0; font-size:12px;
-        background:#212933; border-radius:11px; color:#8a94a3; }
+.snap { display:inline-block; padding:5px 11px; margin:0 0 6px 0; font-size:12px;
+        background:#212933; border-radius:11px 0 0 11px; color:#8a94a3; }
 .snap.armed { background:#3a2e1d; color:#f0c98a; }
+.snapdel { display:inline-block; padding:5px 9px; margin:0 8px 6px 0; font-size:12px;
+        background:#212933; border-radius:0 11px 11px 0; color:#5d6775; }
+.snapdel.armed { background:#3a1d1d; color:#f08aa8; }
 .logbar { display:flex; align-items:center; gap:10px; margin-bottom:12px; flex-wrap:wrap; }
 /* On the logs route the scrollpane is a SIBLING of .content (see RouteParts)
    — patching .content's innerHTML would rebuild a nested .logpre on every
@@ -269,10 +277,12 @@ function vmBtns(vm: VmSummary, s: CruiserState, detail = false): string {
         parts.push(confirm === `vm-kill:${vm.name}`
             ? b("Confirm kill", "vm-kill", "btn sm warn")
             : b("Kill", "vm-kill", "btn sm warn"));
-    if (detail && stopped)
+    if (detail && stopped) {
+        parts.push(b("Clone", "vm-clone", "btn sm dim"));
         parts.push(confirm === `vm-rm:${vm.name}`
             ? b("Confirm delete", "vm-rm", "btn sm warn")
             : b("Delete", "vm-rm", "btn sm warn"));
+    }
     return parts.join("");
 }
 
@@ -294,7 +304,7 @@ function vmRow(vm: VmSummary, s: CruiserState): string {
             <div class="vmname">${esc(vm.name)}</div>
             ${vm.description ? `<div class="vmmode">${esc(vm.description)}</div>` : ""}
             <div class="vmspecs">${esc(specs)}</div>
-            <div class="vmmode">${esc(mode)}${vm.provisioned ? "" : ` · <span style="color:#f0c98a">not provisioned</span>`}</div>
+            <div class="vmmode">${esc(mode)}${vm.provisioned ? "" : ` · <span style="color:#f0c98a">not provisioned</span>`}${vm.pendingRestart?.length ? ` · <span style="color:#f0c98a">restart pending: ${esc(vm.pendingRestart.join(", "))}</span>` : ""}</div>
             ${diskParts ? `<div class="vmdisk">${esc(diskParts)}</div>` : ""}
         </div>
         <div class="pill ${pillClass(vm.state)}">${esc(vm.state)}</div>
@@ -303,34 +313,49 @@ function vmRow(vm: VmSummary, s: CruiserState): string {
     </div>`;
 }
 
+/** The parked auto-snapshot low-space decision — the user picks between
+ *  deleting the remaining snapshots and continuing without one. */
+function autoSnapBanner(s: CruiserState): string {
+    const p = s.autoSnapPrompt;
+    if (!p) return "";
+    const purge = p.remaining.length
+        ? btn(`Delete ${p.remaining.length} snapshot${p.remaining.length === 1 ? "" : "s"}`, "autosnap-purge", attr("vm", p.vm), "btn sm warn")
+        : "";
+    const skip = btn(p.context === "start" ? "Start without snapshot" : "Dismiss", "autosnap-skip", attr("vm", p.vm), "btn sm dim");
+    return `<div class="hostsum" style="border-color:#6b5527;color:#f0c98a">
+        <b>${esc(p.vm)}</b>: an auto snapshot wants ~${fmtBytes(p.needBytes)} free but only ${fmtBytes(p.freeBytes)} is available.
+        ${purge ? "Delete the remaining snapshots to make room, or " : ""}${p.context === "start" ? "start without one." : "skip it."}
+        <div style="margin-top:8px">${purge}${skip}</div></div>`;
+}
+
 function home(s: CruiserState): string {
     const list = s.vms.length
         ? `<div class="vmlist">${s.vms.map((vm) => vmRow(vm, s)).join("")}</div>`
         : `<div class="empty">No VMs yet.
             <div style="margin-top:14px">${btn("+ New VM", "nav", attr("route", "create"))}</div></div>`;
-    return `<div class="vmlist-head"><div class="h1">Virtual Machines</div>
+    return `${autoSnapBanner(s)}<div class="vmlist-head"><div class="h1">Virtual Machines</div>
         ${btn("+ New VM", "nav", attr("route", "create"))}</div>
         ${list}`;
 }
 
 // ── create wizard ──
 
-function field(label: string, key: string, val: string | number, w = 220): string {
+function field(label: string, key: string, val: string | number, w = 220, tag = ""): string {
     return `<div class="row"><div class="lbl">${esc(label)}</div>
-        <input data-field="${esc(key)}" value="${esc(String(val))}" style="width:${w}px"></div>`;
+        <input data-field="${esc(key)}" value="${esc(String(val))}" style="width:${w}px">${tag}</div>`;
 }
 
-function optRow(label: string, key: string, cur: string, choices: [string, string][], action = "set-field"): string {
+function optRow(label: string, key: string, cur: string, choices: [string, string][], action = "set-field", tag = ""): string {
     return `<div class="row"><div class="lbl">${esc(label)}</div><div class="opts">${
         choices.map(([v, l]) =>
             `<div class="opt${cur === v ? " on" : ""}" data-action="${action}" data-field="${esc(key)}" data-value="${esc(v)}">${esc(l)}</div>`).join("")
-    }</div></div>`;
+    }</div>${tag}</div>`;
 }
 
-function checkRow(label: string, key: string, cur: boolean, hint = ""): string {
+function checkRow(label: string, key: string, cur: boolean, hint = "", tag = ""): string {
     return `<div class="row"><div class="lbl">${esc(label)}</div>
         <div class="opt${cur ? " on" : ""}" data-action="set-field" data-field="${esc(key)}" data-value="${!cur}">${cur ? "on" : "off"}</div>
-        ${hint ? `<div class="meta">${esc(hint)}</div>` : ""}</div>`;
+        ${tag}${hint ? `<div class="meta">${esc(hint)}</div>` : ""}</div>`;
 }
 
 const PERSIST_HINT: Record<string, string> = {
@@ -344,6 +369,13 @@ function create(s: CruiserState): string {
     const r = s.hostRes;
     const editing = s.editVm !== null;
     const editTarget = editing ? s.vms.find((v) => v.name === s.editVm) : undefined;
+    // Edit mode on a live VM: tag each field by whether it can apply now —
+    // argv-level fields are frozen until the next boot, the rest take
+    // effect immediately (sync channels on the next session pass).
+    const vmUp = !!editTarget && editTarget.state !== "stopped";
+    const aptag = (kind: "boot" | "live") => vmUp
+        ? `<span class="aptag ${kind}">${kind === "boot" ? "needs restart" : "applies live"}</span>`
+        : "";
     const hostsum = r
         ? `<div class="hostsum">host — <b>${r.cpus}</b> CPUs · <b>${r.memGiB}</b> GiB RAM · <b>${r.diskFreeGiB}</b> GiB free at ${esc(f.diskDir || "default location")}</div>`
         : "";
@@ -352,10 +384,10 @@ function create(s: CruiserState): string {
         <input data-field="memInput" value="${memVal}" style="width:100px">
         <div class="opts">${(["MiB", "GiB"] as const).map((u) =>
             `<div class="opt${f.memUnit === u ? " on" : ""}" data-action="set-field" data-field="memUnit" data-value="${u}">${u}</div>`).join("")}</div>
-        ${r ? `<div class="meta">of ${r.memGiB} GiB</div>` : ""}</div>`;
+        ${r ? `<div class="meta">of ${r.memGiB} GiB</div>` : ""}${aptag("boot")}</div>`;
     const diskRow = `<div class="row"><div class="lbl">Disk GiB</div>
         <input data-field="diskGiB" value="${f.diskGiB}" style="width:100px">
-        ${editing ? `<div class="meta">grow-only</div>` : r ? `<div class="meta">of ${r.diskFreeGiB} GiB free</div>` : ""}</div>
+        ${editing ? `<div class="meta">grow-only</div>` : r ? `<div class="meta">of ${r.diskFreeGiB} GiB free</div>` : ""}${aptag("boot")}</div>
         ${editing ? "" : `<div class="row"><div class="lbl">Disk location</div>
         <div class="meta" style="width:280px">${esc(f.diskDir || `${VMS_DIR}/‹name›/`)}</div>
         <div class="opt" data-action="pick-disk-dir">Choose…</div></div>`}`;
@@ -365,7 +397,7 @@ function create(s: CruiserState): string {
             <div class="vdgrid" style="grid-template-columns:repeat(${Math.max(1, Math.ceil(s.desktops.length / Math.max(1, s.vdRows)))},auto)">
             ${s.desktops.map((d) =>
                 `<div class="opt${f.vd === d.index ? " on" : ""}" data-action="set-vd" data-vd="${d.index}">${esc(d.name || String(d.index))}${d.current ? "•" : ""}</div>`).join("")}
-            </div></div>
+            </div>${aptag("live")}</div>
             <div class="hint">the viewer window lands on this desktop (${s.vdRows > 1 ? `${s.vdRows}×${Math.ceil(s.desktops.length / s.vdRows)} grid` : "row"} layout) — • is where you are now</div>`
         : "";
     const kdeOk = f.distro in DISTROS && supportsKrdp(f.distro as keyof typeof DISTROS, f.release);
@@ -381,7 +413,7 @@ function create(s: CruiserState): string {
                 <input data-field="importPath" value="${esc(f.importPath)}" style="width:340px">
                 <div class="opt" data-action="pick-import">Browse…</div></div>
             <div class="hint">Boots an existing disk image in place (qcow2/raw/vmdk/… — format is auto-detected). Use for images you've already installed elsewhere.</div>` : "";
-    const syncSection = `<div class="h2">Host → guest sync</div>
+    const syncSection = `<div class="h2">Host → guest sync ${aptag("live")}</div>
         <div class="hint" style="margin-left:0">mirrored into the guest while a viewer session is open (and at provision). Turn off per channel.</div>
         ${checkRow("Dark / light theme", "syncTheme", f.syncTheme, "xdg portal color-scheme — watches host changes live")}
         ${checkRow("Accent color", "syncAccent", f.syncAccent, "portal accent-color → nearest GNOME accent / KDE AccentColor")}
@@ -398,7 +430,7 @@ function create(s: CruiserState): string {
         ${checkRow("Custom CA roots", "syncCa", f.syncCa, "pushes host /usr/local/share/ca-certificates + pki anchors into the guest trust store")}
         ${checkRow("SSH agent", "syncAgent", f.syncAgent, "forwards the host agent socket into the guest via ssh -R — held for the viewer session; guest processes can use your host keys")}
         ${checkRow("Git SSH key", "syncGitKey", f.syncGitKey, "installs a host private key into the guest (credentials.gitSshKeyPath, else ~/.ssh/<git email>) + an ssh config block for the common forges")}`;
-    const usbSection = `<div class="h2">USB passthrough</div>
+    const usbSection = `<div class="h2">USB passthrough ${aptag("boot")}</div>
         ${s.usbDevices.length
             ? `<div class="opts wrap">${s.usbDevices.map((d) =>
                 `<div class="opt${f.usb.includes(d.key) ? " on" : ""}${d.writable ? "" : " dim"}" data-action="usb-toggle" data-key="${esc(d.key)}">${esc(d.label)} <span class="meta">${d.vendorId}:${d.productId}${d.writable ? "" : " · no access"}</span></div>`).join("")}</div>
@@ -417,20 +449,26 @@ function create(s: CruiserState): string {
         ${editing
             ? `<div class="row"><div class="lbl">Name</div><div class="meta" style="color:#e8ecf1">${esc(s.editVm ?? "")}</div></div>
         <div class="row"><div class="lbl">Description</div>
-            <input data-field="vm-desc" value="${esc(s.vmDesc)}" style="width:320px"></div>
+            <input data-field="vm-desc" value="${esc(s.vmDesc)}" style="width:320px">${aptag("live")}</div>
         <div class="hint">exported with the config — a one-liner like "work dev box, cuda testing".</div>`
             : field("Name", "name", f.name)}
         <div class="h2">Resources</div>
-        ${field("vCPUs", "cpus", f.cpus, 80)}
+        ${field("vCPUs", "cpus", f.cpus, 80, aptag("boot"))}
         ${memRow}
         ${diskRow}
-        ${checkRow("Nested virtualization", "nestedVirt", f.nestedVirt, "pass the host's vmx/svm flag to the guest — run KVM inside the VM (needs the host kvm module's nested=1, see doctor)")}
+        ${checkRow("Nested virtualization", "nestedVirt", f.nestedVirt, "pass the host's vmx/svm flag to the guest — run KVM inside the VM (needs the host kvm module's nested=1, see doctor)", aptag("boot"))}
         <div class="h2">Graphics &amp; display</div>
-        ${optRow("GPU mode", "gpu", f.gpu, [["venus", "Venus (Vulkan)"], ["virgl", "virgl (GL)"], ["software", "software"]])}
-        ${optRow("Head mode", "headMode", f.headMode, [["virtual-desktop", "virtual desktop"], ["fullscreen-monitor", "fullscreen monitor"], ["windowed", "windowed"], ["app", "app-only"]])}
+        ${optRow("GPU mode", "gpu", f.gpu, [["venus", "Venus (Vulkan)"], ["virgl", "virgl (GL)"], ["software", "software"]], "set-field", aptag("boot"))}
+        ${optRow("Head mode", "headMode", f.headMode, [["virtual-desktop", "virtual desktop"], ["fullscreen-monitor", "fullscreen monitor"], ["windowed", "windowed"], ["app", "app-only"]], "set-field", aptag("live"))}
         ${vdPicker}
-        ${optRow("Persist", "persist", f.persist, [["daemonize", "survives app"], ["owned", "stops with app"], ["ephemeral", "deleted on exit"]])}
+        ${optRow("Persist", "persist", f.persist, [["daemonize", "survives app"], ["owned", "stops with app"], ["ephemeral", "deleted on exit"]], "set-field", aptag("live"))}
         <div class="hint">${PERSIST_HINT[f.persist] ?? ""}</div>
+        <div class="h2">Snapshots ${aptag("live")}</div>
+        ${optRow("Auto snapshot", "snapAuto", f.snapAuto, [["off", "off"], ["daily", "daily"], ["weekly", "weekly"], ["monthly", "monthly"]])}
+        ${f.snapAuto === "off" ? "" : `
+        ${optRow("Take it", "snapTrigger", f.snapTrigger, [["stop", "after shutdown"], ["start", "before start"], ["both", "both"]])}
+        ${field("Keep", "snapKeep", f.snapKeep, 80)}
+        <div class="hint">auto snapshots are named <b>auto-*</b> and rotate down to the keep count — manual snapshots are never pruned. Only a clean edge can snapshot (qemu-img needs the disk offline): a kill or a host power loss can't.</div>`}
         ${editing ? "" : `<div class="h2">Provisioning</div>
         ${optRow("Method", "method", f.method, [["none", "none"], ["cloudimg", "cloud image"], ["iso", "ISO autoinstall"], ["imported", "import existing"]])}
         ${provRows}
@@ -453,8 +491,11 @@ function create(s: CruiserState): string {
         ${editing ? "" : `<div class="h2">Credentials</div>
         ${field("Username", "username", f.username)}
         ${field("Password", "password", f.password)}`}
-        ${editing && editTarget && editTarget.state !== "stopped"
-            ? `<div class="hint" style="margin-left:0">the VM is ${esc(editTarget.state)} — changes apply at the next boot</div>` : ""}
+        ${vmUp
+            ? `<div class="hint" style="margin-left:0">the VM is ${esc(editTarget!.state)} —
+                <span class="aptag boot">needs restart</span> fields are frozen into the running QEMU and apply at the next boot;
+                <span class="aptag live">applies live</span> fields take effect immediately.${editTarget!.pendingRestart?.length
+                    ? ` Already pending from earlier changes: <b>${esc(editTarget!.pendingRestart.join(", "))}</b>.` : ""}</div>` : ""}
         <div style="margin-top:18px">${editing
             ? btn("Save", "vm-save") + btn("Cancel", "nav", attr("route", "vm") + attr("vm", s.editVm ?? ""), "btn dim")
             : btn("Create VM", "vm-create") + btn("Cancel", "nav", attr("route", "home"), "btn dim")}</div>`;
@@ -468,15 +509,20 @@ function vmDetail(s: CruiserState): string {
     const up = vm.state === "running";
     const snaps = vm.snapshots.length
         ? vm.snapshots.map((sn) => {
-            const tok = `vm-restore:${vm.name}:${sn}`;
-            const armed = s.confirm === tok;
-            return `<span class="snap${armed ? " armed" : ""}" data-action="vm-restore" data-vm="${esc(vm.name)}" data-snap="${esc(sn)}">${armed ? `restore ${esc(sn)}?` : esc(sn)}</span>`;
+            const armed = s.confirm === `vm-restore:${vm.name}:${sn}`;
+            const delArmed = s.confirm === `vm-snap-del:${vm.name}:${sn}`;
+            return `<span class="snap${armed ? " armed" : ""}" data-action="vm-restore" data-vm="${esc(vm.name)}" data-snap="${esc(sn)}">${armed ? `restore ${esc(sn)}?` : esc(sn)}</span>` +
+                `<span class="snapdel${delArmed ? " armed" : ""}" data-action="vm-snap-del" data-vm="${esc(vm.name)}" data-snap="${esc(sn)}">${delArmed ? "delete?" : "✕"}</span>`;
         }).join("")
         : `<span class="meta">none</span>`;
+    const autoSpec = vm.snapAuto !== "off"
+        ? `auto: ${esc(vm.snapAuto)} · ${esc({ start: "before start", stop: "after shutdown", both: "start + stop" }[vm.snapTrigger] ?? vm.snapTrigger)} · keep ${vm.snapKeep}`
+        : "";
     const snapSection = up || vm.state === "starting" || vm.state === "stopping"
         ? `<div class="meta">snapshot list + restore appear when the VM is stopped</div>`
         : `<div>${snaps}</div>
-           ${vm.snapshots.length ? `<div class="hint" style="margin-left:0">click a snapshot to restore — restoring overwrites the current disk state</div>` : ""}
+           ${vm.snapshots.length ? `<div class="hint" style="margin-left:0">click a snapshot to restore (overwrites the current disk state) · ✕ deletes it</div>` : ""}
+           ${autoSpec ? `<div class="meta">${autoSpec}</div>` : ""}
            <div style="margin-top:8px">${btn("Take snapshot", "vm-snap", attr("vm", vm.name))}</div>`;
     const diskDetail = [
         vm.hostDiskBytes !== undefined ? `${fmtBytes(vm.hostDiskBytes)} file` : "",
@@ -485,6 +531,10 @@ function vmDetail(s: CruiserState): string {
     return `<div class="crumb" data-action="nav" data-route="home">‹ VMs</div>
         <div class="h1">${esc(vm.name)} <span class="pill ${pillClass(vm.state)}">${esc(vm.state)}</span></div>
         ${vm.description ? `<div class="meta" style="margin:-8px 0 12px">${esc(vm.description)}</div>` : ""}
+        ${vm.pendingRestart?.length
+            ? `<div class="hostsum" style="border-color:#6b5527;color:#f0c98a">restart pending — these changed while the VM was up and only apply at the next boot: <b>${esc(vm.pendingRestart.join(", "))}</b>. Stop &amp; start to apply.</div>`
+            : ""}
+        ${autoSnapBanner(s)}
         <div class="kv">
             <div class="k">resources</div><div>${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB · ${vm.diskGiB} GiB disk${vm.nestedVirt ? " · nested virt" : ""}</div>
             ${diskDetail ? `<div class="k">disk usage</div><div>${esc(diskDetail)}</div>` : ""}

@@ -17,6 +17,7 @@ import { z } from "zod";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { parseVmSpec, VmSpec } from "./schema";
+import { bootRelevantChanges } from "./boot-diff";
 import { readGist } from "../../../sys/src/gist";
 import type { VmHandle } from "../lifecycle/vm";
 
@@ -179,14 +180,7 @@ export function mergePulledSpec(current: VmSpec, incoming: VmSpec): { spec: VmSp
     next.disk.file = current.disk.file;
     next.origin = current.origin;   // pull source is host-local state — survive the merge
 
-    const needsRestart: string[] = [];
-    if (JSON.stringify(current.resources) !== JSON.stringify(next.resources)) needsRestart.push("resources");
-    if (JSON.stringify(current.gpu) !== JSON.stringify(next.gpu)) needsRestart.push("gpu");
-    if (JSON.stringify(current.usb) !== JSON.stringify(next.usb)) needsRestart.push("usb");
-    if (JSON.stringify(current.shares.filter((s) => s.mode === "mount"))
-        !== JSON.stringify(next.shares.filter((s) => s.mode === "mount"))) needsRestart.push("shares (mount)");
-    if (JSON.stringify(current.network.hostfwd) !== JSON.stringify(next.network.hostfwd)) needsRestart.push("port forwards");
-    return { spec: next, needsRestart };
+    return { spec: next, needsRestart: bootRelevantChanges(current, next) };
 }
 
 /** Local hostfwd entries always exist (registry-allocated ssh/rdp); union

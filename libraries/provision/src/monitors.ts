@@ -47,11 +47,13 @@ export function guestLayoutFromHost(vmName: string, host: MonitorInfo[], maxOutp
     const mons = host.slice(0, maxOutputs);
     if (!mons.length) mons.push({ name: "Virtual-1", x: 0, y: 0, w: 1920, h: 1080, primary: true });
 
-    const monitors: GuestMonitor[] = mons.map((m, i) => ({
-        name: `${vmName}-${i + 1}`,
-        xres: m.w,
-        yres: m.h,
-    }));
+    const monitors: GuestMonitor[] = mons.map((m, i) => {
+        // QEMU rejects virtio output names > 12 chars — truncate the vm
+        // part to fit the -N suffix. Cosmetic label only: guest connectors
+        // stay Virtual-N and nothing keys on this string.
+        const suffix = `-${i + 1}`;
+        return { name: `${vmName.slice(0, 12 - suffix.length)}${suffix}`, xres: m.w, yres: m.h };
+    });
 
     const logical = mons.map((m, i) => `    <logicalmonitor>
       <x>${m.x}</x>

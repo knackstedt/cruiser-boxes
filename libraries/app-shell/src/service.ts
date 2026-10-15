@@ -20,6 +20,8 @@ import { mark } from "./startup-profile";
 import { VmMetricsSampler } from "./metrics";
 import type { ActionState, CreateForm, DoctorRow, HostInfo, Store, VmSummary } from "./store";
 import { SYNC_CHANNELS, type SyncId } from "../../vm-core/src/config/sync-channels";
+import { bootRelevantChanges } from "../../vm-core/src/config/boot-diff";
+import { runAutoSnapshot } from "../../vm-core/src/lifecycle/autosnap";
 import type { SyncFormKey } from "./store";
 
 /** create/edit form sync fields → spec.sync keys — derived from the
@@ -206,9 +208,11 @@ export class CruiserService {
                 mode: sh.mode, direction: sh.direction, enabled: sh.enabled, deletions: sh.deletions,
             })),
             snapshots: [],
+            snapAuto: s.snapshots.auto, snapTrigger: s.snapshots.trigger, snapKeep: s.snapshots.keep,
             vd: s.display.virtualDesktop,
             usbKeys: s.usb.autoAttach.map((u) => [u.vendorId, u.productId, u.serial].filter(Boolean).join(":")),
             sync: { ...s.sync },
+            pendingRestart: h.pendingRestart(),
             cpu: [], mem: [], disk: [], net: [], gpu: [],
         };
     }
@@ -443,6 +447,9 @@ export class CruiserService {
             spec.gpu.mode = f.gpu as VmSpec["gpu"]["mode"];
             spec.display.headMode = f.headMode as VmSpec["display"]["headMode"];
             spec.persist = f.persist as VmSpec["persist"];
+            spec.snapshots.auto = f.snapAuto as VmSpec["snapshots"]["auto"];
+            spec.snapshots.trigger = f.snapTrigger as VmSpec["snapshots"]["trigger"];
+            spec.snapshots.keep = f.snapKeep;
             spec.credentials.username = f.username;
             // the ISO autoinstall path is subiquity — ubuntu-only for now;
             // in-guest os-release detection rescues a stale family anyway
@@ -498,8 +505,11 @@ export class CruiserService {
         });
     }
 
-    async start(name: string): Promise<void> {
+    async start(name: string, opts: { skipAutoSnap?: boolean } = {}): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
+        // Auto-snapshot "before start" edge — a space shortfall parks the
+        // start on the user's choice in the prompt banner.
+        if (!opts.skipAutoSnap && !(await this.autoSnapEdge(h, "start"))) return;
         await this.run(`start ${name}`, async () => {
             const { hostMirroredGuestMonitors } = await import("../../provision/src/monitors");
             return h.start({ guestMonitors: await hostMirroredGuestMonitors(h.spec) });
@@ -512,7 +522,7 @@ export class CruiserService {
     async stop(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
         const st = this.store.getState();
-        await this.run(`stop ${name}`, () => {
+        const out = await this.run(`stop ${name}`, () => {
             st.setStatus(`stopping ${name} — sent shutdown request to the guest OS`);
             return h.stop(60_000, (ms) => st.setStatus(
                 `stopping ${name} — guest is shutting down… ${Math.floor(ms / 1000)}s ` +
@@ -524,6 +534,54 @@ export class CruiserService {
                 : `${name} ignored the shutdown request — still running; use Kill to force power off`,
             vm: name, verb: "stopping",
         });
+        // Auto-snapshot "after stop" edge — only a clean power-off qualifies.
+        if (out === "stopped") await this.autoSnapEdge(h, "stop");
+    }
+
+    /** Auto-snapshot hook for the start/stop lifecycle edges. Returns false
+     *  only when a "start" is parked on the low-space prompt — a snapshot
+     *  problem never blocks a stop, and a failed probe never blocks at all. */
+    private async autoSnapEdge(h: VmHandle, trigger: "start" | "stop"): Promise<boolean> {
+        const st = this.store.getState();
+        const r = await runAutoSnapshot(h, trigger).catch((e) => {
+            st.setStatus(`auto snapshot skipped: ${e instanceof Error ? e.message : e}`);
+            return null;
+        });
+        if (!r || r.skipped) return true;
+        if (r.shortfall) {
+            st.setAutoSnapPrompt({ vm: h.spec.name, ...r.shortfall, context: trigger });
+            st.setStatus(`${h.spec.name}: not enough free space for an auto snapshot`);
+            return trigger !== "start";
+        }
+        if (r.created || r.freed.length || r.pruned.length) {
+            const parts = [r.created && `'${r.created}' saved`];
+            if (r.freed.length) parts.push(`${r.freed.length} deleted for space`);
+            if (r.pruned.length) parts.push(`${r.pruned.length} pruned`);
+            st.setStatus(`${h.spec.name}: auto snapshot ${parts.filter(Boolean).join(", ")}`);
+            this.invalidateSnaps(h.spec.name);
+        }
+        return true;
+    }
+
+    /** Space prompt → "start without snapshot" / "dismiss". */
+    async autoSnapSkip(name: string): Promise<void> {
+        const p = this.store.getState().autoSnapPrompt;
+        this.store.getState().setAutoSnapPrompt(null);
+        if (p?.vm === name && p.context === "start") await this.start(name, { skipAutoSnap: true });
+    }
+
+    /** Space prompt → delete the remaining snapshots to make room, then
+     *  retry the parked action. */
+    async autoSnapPurge(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        const p = this.store.getState().autoSnapPrompt;
+        this.store.getState().setAutoSnapPrompt(null);
+        if (!p || p.vm !== name) return;
+        await this.run(`delete ${p.remaining.length} snapshot${p.remaining.length === 1 ? "" : "s"} on ${name}`,
+            async () => { for (let i = 0; i < p.remaining.length; i++) await h.deleteSnapshot(p.remaining[i]!); },
+            { vm: name, verb: "deleting snapshots" });
+        this.invalidateSnaps(name);
+        if (p.context === "start") await this.start(name);
     }
     async kill(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
@@ -605,9 +663,10 @@ export class CruiserService {
             return;
         }
         await this.run(`save ${name}`, async () => {
+            const prev = h.spec;
             // Clone-then-validate: a schema rejection must not leave h.spec
             // half-mutated while the VM keeps running.
-            const spec: VmSpec = JSON.parse(JSON.stringify(h.spec));
+            const spec: VmSpec = JSON.parse(JSON.stringify(prev));
             spec.resources.cpus = f.cpus;
             spec.resources.memoryMiB = f.memMiB;
             spec.resources.nestedVirt = f.nestedVirt;
@@ -616,6 +675,9 @@ export class CruiserService {
             spec.display.headMode = f.headMode as VmSpec["display"]["headMode"];
             if (f.vd > 0) spec.display.virtualDesktop = f.vd;
             spec.persist = f.persist as VmSpec["persist"];
+            spec.snapshots.auto = f.snapAuto as VmSpec["snapshots"]["auto"];
+            spec.snapshots.trigger = f.snapTrigger as VmSpec["snapshots"]["trigger"];
+            spec.snapshots.keep = f.snapKeep;
             spec.usb.autoAttach = f.usb.map((k) => {
                 const [vendorId = "", productId = "", serial = ""] = k.split(":");
                 return { vendorId, productId, ...(serial ? { serial } : {}), atBoot: true };
@@ -628,6 +690,11 @@ export class CruiserService {
             await h.saveSpec();
             st.resetCreate();
             st.setRoute("vm", name);
+            return h.isRunning() ? bootRelevantChanges(prev, spec) : [];
+        }, {
+            done: (pending) => pending?.length
+                ? `saved ${name} — restart to apply: ${pending.join(", ")}`
+                : `saved ${name}`,
         });
     }
 
@@ -712,6 +779,33 @@ export class CruiserService {
         const h = this.handles.get(name); if (!h) return;
         await this.run(`restore ${snap}`, () => h.restoreSnapshot(snap), { vm: name, verb: "restoring" });
         this.invalidateSnaps(name);
+    }
+    async deleteSnapshot(name: string, snap: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        if (h.isRunning()) {
+            this.store.getState().setStatus(`stop ${name} before deleting a snapshot — qemu-img needs the disk offline`);
+            return;
+        }
+        await this.run(`delete snapshot ${snap}`, () => h.deleteSnapshot(snap), { vm: name, verb: "deleting snapshot" });
+        this.invalidateSnaps(name);
+    }
+
+    /** Clone a stopped VM — auto-names '<name>-copy' ('-copy-2'…). The disk
+     *  is reflinked/converted without its snapshots; ports re-allocate. */
+    async cloneVm(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        if (h.isRunning()) {
+            this.store.getState().setStatus(`stop ${name} before cloning it`);
+            return;
+        }
+        let newName = `${name}-copy`;
+        for (let i = 2; this.handles.has(newName); i++) newName = `${name}-copy-${i}`;
+        await this.run(`clone ${name} → ${newName}`, async () => {
+            const nh = await this.registry.clone(name, newName);
+            this.handles.set(newName, nh);
+            this.store.getState().setRoute("vm", newName);
+            return newName;
+        }, { done: (n) => `cloned ${name} → '${n}' (snapshots not carried over)`, vm: name, verb: "cloning" });
     }
 
     async launchApp(name: string, cmd: string): Promise<void> {

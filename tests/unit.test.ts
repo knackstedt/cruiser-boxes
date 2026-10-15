@@ -14,6 +14,8 @@ import { pickImageFromIndex, supportsKrdp, defaultRelease } from "../libraries/p
 import { freerdpArgs } from "../libraries/host-int/src/freerdp";
 import { parseEscapeAction } from "../libraries/host-int/src/session";
 import { kdeDesktopsRc, kdeKeys, kglobalConflicts, khotkeysDataGroups, khotkeysDropGroups, khotkeysUuid, KWIN_VD_UUID, unwrapShC } from "../libraries/host-int/src/kde";
+import { autoSnaps, autoSnapshotDue, autoPruneList } from "../libraries/vm-core/src/lifecycle/autosnap";
+import type { SnapshotInfo } from "../libraries/vm-core/src/disk/ops";
 
 // ── schema ──
 
@@ -299,6 +301,13 @@ describe("guestLayoutFromHost", () => {
         const l = guestLayoutFromHost("t1", []);
         expect(l.monitors[0].xres).toBe(1920);
     });
+    test("output names stay within QEMU's 12-char cap on long vm names", () => {
+        const l = guestLayoutFromHost("devin-test-copy", host);
+        l.monitors.forEach((m) => expect(m.name.length).toBeLessThanOrEqual(12));
+        expect(l.monitors[0].name).toBe("devin-test-1");
+        // the monitors.xml product keeps the full name — it's a free-form label
+        expect(l.xml).toContain("<product>devin-test-copy-1</product>");
+    });
 });
 
 // ── freerdp argv ──
@@ -509,5 +518,55 @@ describe("escape shortcuts", () => {
         expect(KWIN_VD_UUID.test("62147591-461b-47e7-8288-8dad37fa57d2")).toBe(true);
         expect(KWIN_VD_UUID.test("1")).toBe(false);
         expect(KWIN_VD_UUID.test("")).toBe(false);
+    });
+});
+
+// ── auto snapshots ──
+
+describe("autosnap", () => {
+    const snap = (name: string, date: string): SnapshotInfo =>
+        ({ id: "1", name, vmSizeBytes: 0, date, vmClock: "00:00:00" });
+    const DAY = 86_400_000;
+    const NOW = Date.parse("2026-10-14T12:00:00Z");
+
+    test("spec defaults: off / stop / keep 5", () => {
+        const s = defaultSpec("abc");
+        expect(s.snapshots).toEqual({ auto: "off", trigger: "stop", keep: 5 });
+    });
+    test("autoSnaps filters the auto- prefix and sorts oldest first", () => {
+        const list = [
+            snap("auto-2026-10-10", "2026-10-10 00:00:00"),
+            snap("snap-manual", "2026-10-01 00:00:00"),
+            snap("auto-2026-10-12", "2026-10-12 00:00:00"),
+        ];
+        expect(autoSnaps(list).map((s) => s.name)).toEqual(["auto-2026-10-10", "auto-2026-10-12"]);
+    });
+    test("autoSnapshotDue gates on cadence since the newest auto snap", () => {
+        expect(autoSnapshotDue([], "daily", NOW)).toBe(true);
+        const fresh = [snap("auto-new", "2026-10-14 06:00:00")];   // 6h ago
+        expect(autoSnapshotDue(fresh, "daily", NOW)).toBe(false);
+        expect(autoSnapshotDue(fresh, "weekly", NOW)).toBe(false);
+        const stale = [snap("auto-old", "2026-10-10 12:00:00")];  // 4d ago
+        expect(autoSnapshotDue(stale, "daily", NOW)).toBe(true);
+        expect(autoSnapshotDue(stale, "weekly", NOW)).toBe(false);
+        expect(autoSnapshotDue(stale, "monthly", NOW)).toBe(false);
+        const ancient = [snap("auto-old", "2026-09-01 12:00:00")];
+        expect(autoSnapshotDue(ancient, "monthly", NOW)).toBe(true);
+        // due ignores manual snapshots entirely
+        expect(autoSnapshotDue([snap("snap-manual", "2026-10-14 11:59:00")], "daily", NOW)).toBe(true);
+        expect(Date.parse("2026-10-14T06:00:00Z") - NOW).toBe(-6 * 3_600_000); // sanity: test clock
+        expect(NOW - Date.parse("2026-10-10T12:00:00Z")).toBe(4 * DAY);
+    });
+    test("autoPruneList keeps the newest N, spares manual snapshots", () => {
+        const list = [
+            snap("auto-1", "2026-10-08 00:00:00"),
+            snap("auto-2", "2026-10-09 00:00:00"),
+            snap("auto-3", "2026-10-10 00:00:00"),
+            snap("snap-keepme", "2026-09-01 00:00:00"),
+        ];
+        expect(autoPruneList(list, 5)).toEqual([]);
+        expect(autoPruneList(list, 2)).toEqual(["auto-1"]);
+        expect(autoPruneList(list, 1)).toEqual(["auto-1", "auto-2"]);
+        expect(autoPruneList(list, 1)).not.toContain("snap-keepme");
     });
 });

@@ -42,9 +42,15 @@ export interface VmSummary {
     origin?: string;               // "gist:<id>" / "file:<path>" when imported/pushed
     shares: ShareRow[];            // spec.shares
     snapshots: string[];
+    snapAuto: string;              // spec.snapshots.auto — off|daily|weekly|monthly
+    snapTrigger: string;           // spec.snapshots.trigger — start|stop|both
+    snapKeep: number;              // spec.snapshots.keep
     vd: number;                    // display.virtualDesktop (edit form)
     usbKeys: string[];             // spec.usb.autoAttach as "vid:pid:serial" keys
     sync?: Record<string, boolean>; // spec.sync.* — feeds the edit form
+    /** Spec sections changed while running that only apply at next boot
+     *  (VmHandle.pendingRestart) — drives the "restart pending" marker. */
+    pendingRestart?: string[];
     hostDiskBytes?: number;        // real size of the disk image on the host fs
     guestUsedBytes?: number;       // guest fs used (QGA root mount / sum)
     guestTotalBytes?: number;      // guest fs total (≈ diskGiB cap)
@@ -87,6 +93,21 @@ export type CreateForm = SyncFormFields & {
     memUnit: "MiB" | "GiB";        // UI-only — memMiB always stores MiB
     vd: number;                    // virtual-desktop head mode: desktop index (1-based)
     usb: string[];                 // "vid:pid:serial?" keys selected for boot-time passthrough
+    snapAuto: string;              // spec.snapshots.auto — off|daily|weekly|monthly
+    snapTrigger: string;           // spec.snapshots.trigger — start|stop|both
+    snapKeep: number;              // spec.snapshots.keep — auto-* rotation bound
+}
+
+/** Low-disk-space decision parked on the user: an auto snapshot wanted to
+ *  run but the host fs can't cover worst-case growth even after pruning.
+ *  context "start" = a `vm start` is held until the user chooses. */
+export interface AutoSnapPrompt {
+    vm: string;
+    needBytes: number;
+    freeBytes: number;
+    /** snapshot names that could still be deleted to make room. */
+    remaining: string[];
+    context: "start" | "stop";
 }
 
 export interface DoctorRow { label: string; ok: boolean; fix: string }
@@ -192,6 +213,8 @@ export interface CruiserState {
     termLine: string;
     /** The share-add form on the vm detail screen. */
     shareForm: ShareForm;
+    /** Parked auto-snapshot low-space decision (null = none pending). */
+    autoSnapPrompt: AutoSnapPrompt | null;
 }
 
 export interface ShareForm {
@@ -224,6 +247,7 @@ export interface CruiserActions {
     setVmDesc(d: string): void;
     setTermLine(s: string): void;
     setShareForm(p: Partial<ShareForm>): void;
+    setAutoSnapPrompt(p: AutoSnapPrompt | null): void;
 }
 
 export type CruiserStore = CruiserState & CruiserActions;
@@ -244,6 +268,7 @@ const defaultCreate = (): CreateForm => ({
     iso: "", importPath: "", importRef: "", diskDir: "",
     username: "cruiser", password: "",
     memUnit: "GiB", vd: 0, usb: [],
+    snapAuto: "off", snapTrigger: "stop", snapKeep: 5,
 });
 
 export function createCruiserStore() {
@@ -268,6 +293,7 @@ export function createCruiserStore() {
         vmDesc: "",
         termLine: "",
         shareForm: { hostPath: "", guestPath: "", mode: "mount", direction: "both", open: false },
+        autoSnapPrompt: null,
         setRoute: (route, vm = null) => set({ route, selectedVm: vm, confirm: null, editVm: null }),
         setVms: (vms) => set({ vms }),
         setStatus: (status) => set({ status }),
@@ -287,6 +313,7 @@ export function createCruiserStore() {
         setVmDesc: (vmDesc) => set({ vmDesc }),
         setTermLine: (termLine) => set({ termLine }),
         setShareForm: (p) => set((s) => ({ shareForm: { ...s.shareForm, ...p } })),
+        setAutoSnapPrompt: (autoSnapPrompt) => set({ autoSnapPrompt }),
         toggleUsb: (key) => set((s) => ({
             create: {
                 ...s.create,

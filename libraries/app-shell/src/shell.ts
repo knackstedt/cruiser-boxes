@@ -18,7 +18,7 @@ import { mark } from "./startup-profile";
 
 const log = createLogger("info");
 
-const NUM_FIELDS: Set<string> = new Set(["cpus", "memMiB", "diskGiB"]);
+const NUM_FIELDS: Set<string> = new Set(["cpus", "memMiB", "diskGiB", "snapKeep"]);
 const BOOL_FIELDS: Set<string> = new Set([
     "snap", "extraFonts", "autologin", "nestedVirt",
     "syncTheme", "syncAccent", "syncContrast", "syncTimezone", "syncLocale",
@@ -209,6 +209,7 @@ export class CruiserShell {
                 nestedVirt: vm.nestedVirt,
                 gpu: vm.gpuMode, headMode: vm.headMode, persist: vm.persist,
                 vd: vm.vd, usb: [...vm.usbKeys],
+                snapAuto: vm.snapAuto, snapTrigger: vm.snapTrigger, snapKeep: vm.snapKeep,
             });
             const sy = vm.sync;
             if (sy) Object.assign(st().create, {
@@ -241,6 +242,12 @@ export class CruiserShell {
         this.host.onAction("vm-restore", (d) => {
             if (d.vm && d.snap && this.armed(`vm-restore:${d.vm}:${d.snap}`)) svc.restoreSnapshot(d.vm, d.snap);
         });
+        this.host.onAction("vm-snap-del", (d) => {
+            if (d.vm && d.snap && this.armed(`vm-snap-del:${d.vm}:${d.snap}`)) void svc.deleteSnapshot(d.vm, d.snap);
+        });
+        this.host.onAction("vm-clone", (d) => { if (d.vm) void svc.cloneVm(d.vm); });
+        this.host.onAction("autosnap-skip", (d) => { if (d.vm) void svc.autoSnapSkip(d.vm); });
+        this.host.onAction("autosnap-purge", (d) => { if (d.vm) void svc.autoSnapPurge(d.vm); });
         this.host.onAction("doctor", () => { svc.runDoctor(); });
         this.host.onAction("import-config", () => { void svc.importConfig(); });
         this.host.onAction("vm-export", (d) => { if (d.vm) void svc.exportConfig(d.vm); });

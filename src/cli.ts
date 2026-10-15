@@ -65,6 +65,7 @@ usage: cruiser <area> <command> [args]
   vm snapshots <name>                   vm snapshot <name> <snapname>
   vm restore <name> <snapname>          vm snapshot-rm <name> <snapname>
   vm backup <name> <dest.qcow2>         vm resize <name> <newGiB>
+  vm clone <name> <newname>             clone a stopped VM — fresh ports, disk copied without snapshots
   vm rm <name> [--disk]                vm view <name>   launch freerdp viewer + place window
   vm ssh <name> [cmd...]               interactive guest shell (or run cmd) over the cruiser key
   vm term <name>                       open the guest shell in a host terminal emulator window
@@ -131,6 +132,29 @@ async function needVm(name?: string): Promise<VmHandle> {
     return h;
 }
 
+/** CLI side of the auto-snapshot policy — headless, so a space shortfall
+ *  warns and proceeds instead of prompting. A failed autosnap never
+ *  blocks the lifecycle action. */
+async function cliAutoSnap(h: VmHandle, trigger: "start" | "stop"): Promise<void> {
+    const { runAutoSnapshot } = await import("../libraries/vm-core/src/lifecycle/autosnap");
+    const gib = (n: number) => `${(n / 2 ** 30).toFixed(1)} GiB`;
+    const r = await runAutoSnapshot(h, trigger).catch((e) => {
+        console.error(`autosnap skipped: ${e instanceof Error ? e.message : e}`);
+        return null;
+    });
+    if (!r) return;
+    if (r.shortfall) {
+        console.error(`autosnap: low disk space — needs ~${gib(r.shortfall.needBytes)} free, have ${gib(r.shortfall.freeBytes)}; ` +
+            `skipped${r.freed.length ? ` after deleting ${r.freed.length} auto snapshots` : ""} ` +
+            `(free space with 'vm snapshot-rm ${h.spec.name} <snap>')`);
+        return;
+    }
+    if (r.created)
+        console.log(`auto snapshot '${r.created}' saved` +
+            `${r.freed.length ? ` (${r.freed.length} deleted for space)` : ""}` +
+            `${r.pruned.length ? ` (${r.pruned.length} pruned)` : ""}`);
+}
+
 /** `vm config pull` / `vm gist pull` — refetch the spec from its origin and
  *  merge over the local spec (ports/provisioned/credentials preserved). */
 async function configPull(h: VmHandle): Promise<void> {
@@ -178,6 +202,9 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             if (has("--snap")) spec.os.snap = true;
             if (has("--xfonts")) spec.os.extraFonts = true;
             if (has("--no-autologin")) spec.os.autologin = false;
+            const autosnap = flagVal("--autosnap"); if (autosnap) spec.snapshots.auto = autosnap as VmSpec["snapshots"]["auto"];
+            const snapTrig = flagVal("--snap-trigger"); if (snapTrig) spec.snapshots.trigger = snapTrig as VmSpec["snapshots"]["trigger"];
+            if (num("--snap-keep")) spec.snapshots.keep = num("--snap-keep")!;
             const devtools = flagVal("--devtools");
             if (devtools) spec.os.devtools = devtools.split(",").map((s) => s.trim()).filter(Boolean) as VmSpec["os"]["devtools"];
             const wp = flagVal("--wallpaper"); if (wp) spec.display.wallpaper.source = wp;
@@ -232,6 +259,7 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
                 h.spec.display.headMode = m.data;
             }
             const { hostMirroredGuestMonitors } = await import("../libraries/provision/src/monitors");
+            await cliAutoSnap(h, "start");
             await h.start({ guestMonitors: await hostMirroredGuestMonitors(h.spec) });
             console.log(`${h.spec.name} started (pid ${h.pid()})`);
             // Match the UI's Start button: poll for guest login, then launch the
@@ -251,7 +279,21 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             }
             break;
         }
-        case "stop": { const h = await needVm(args[0]); const out = await h.stop(); console.log(out === "stopped" ? "stopped" : "still running — guest ignored shutdown; use kill"); break; }
+        case "stop": {
+            const h = await needVm(args[0]);
+            const out = await h.stop();
+            console.log(out === "stopped" ? "stopped" : "still running — guest ignored shutdown; use kill");
+            if (out === "stopped") await cliAutoSnap(h, "stop");
+            break;
+        }
+        case "clone": {
+            const h = await needVm(args[0]);
+            if (!args[1]) usage();
+            const nh = await registry.clone(h.spec.name, args[1]);
+            console.log(`cloned ${h.spec.name} -> ${nh.spec.name} @ ${nh.paths.dir} (snapshots not carried over)`);
+            console.log(`  ssh:${nh.spec.network.sshPort} rdp:${nh.spec.network.rdpPort}`);
+            break;
+        }
         case "kill": { const h = await needVm(args[0]); await h.kill(); console.log("killed"); break; }
         case "status": { const h = await needVm(args[0]); console.log(await h.probe()); break; }
         case "args": {

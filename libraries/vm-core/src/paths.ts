@@ -8,7 +8,9 @@
 //       OVMF_VARS.fd              per-VM UEFI vars
 //       run/                      monitor.sock, qga.sock, spice.sock,
 //                               virtiofs.sock, qemu.pid, qemu.log,
-//                               serial.log, cruiser.log (runner journal)
+//                               serial.log, cruiser.log (runner journal),
+//                               launch-spec.json (spec QEMU booted with —
+//                               baseline for the restart-pending diff)
 //       snapshots/                (external snapshot files if used)
 //   ~/.cache/cruiser/             cloudimg downloads, seed work dirs
 //   <repo>/opt/                   toolchain binaries (CRUISER_OPT override)
@@ -50,6 +52,8 @@ export interface VmPaths {
     vfsSock: string;
     pidFile: string;
     log: string;
+    /** Spec snapshot taken at launch — VmHandle.pendingRestart's baseline. */
+    launchSpec: string;
     serialLog: string;
     snapshotsDir: string;
     backupsDir: string;
@@ -70,6 +74,7 @@ export function vmPaths(name: string): VmPaths {
         vfsSock: join(run, "virtiofs.sock"),
         pidFile: join(run, "qemu.pid"),
         log: join(run, "qemu.log"),
+        launchSpec: join(run, "launch-spec.json"),
         serialLog: join(run, "serial.log"),
         snapshotsDir: join(dir, "snapshots"),
         backupsDir: join(dir, "backups"),

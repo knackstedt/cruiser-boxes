@@ -15,16 +15,45 @@ export async function createDisk(qemuImg: string, path: string, sizeGiB: number)
 }
 
 export async function diskInfo(qemuImg: string, path: string): Promise<DiskInfo> {
-    const r = await run(qemuImg, ["info", "--output=json", path]);
+    // -U (force-share): reading info off a running VM's image is safe —
+    // qemu-img would otherwise fail on the write lock QEMU holds.
+    const r = await run(qemuImg, ["info", "-U", "--output=json", path]);
     const j = JSON.parse(r.stdout);
     return {
         filename: j.filename, format: j.format,
         virtualSize: j["virtual-size"], actualSize: j["actual-size"],
         snapshots: (j.snapshots ?? []).map((s: any) => ({
             id: s.id, name: s.name, vmSizeBytes: s["vm-state-size"],
-            date: s["date-gmt"], vmClock: s["vm-clock"],
+            // qcow2 json reports date-sec/date-nsec + vm-clock-sec/nsec —
+            // NOT the "date-gmt"/"vm-clock" columns of the human table.
+            date: new Date((s["date-sec"] ?? 0) * 1000 + Math.round((s["date-nsec"] ?? 0) / 1e6)).toISOString(),
+            vmClock: `${s["vm-clock-sec"] ?? 0}.${s["vm-clock-nsec"] ?? 0}`,
         })),
     };
+}
+
+/** Free bytes on the filesystem containing `path` (df -k). -1 when the
+ *  probe fails — callers treat that as "unknown" rather than "empty". */
+export async function freeSpaceBytes(path: string): Promise<number> {
+    const r = await run("df", ["-k", path], { noThrow: true });
+    const kb = Number(r.stdout.trim().split("\n").pop()?.trim().split(/\s+/)[3]);
+    return Number.isFinite(kb) ? kb * 1024 : -1;
+}
+
+/**
+ * Copy a disk image for a VM clone. A reflink (`cp --reflink=always`) is
+ * instant on CoW filesystems; everything else falls back to `qemu-img
+ * convert`. Internal qcow2 snapshots never survive the clone — convert
+ * drops them outright, and a reflinked byte-copy gets them stripped.
+ */
+export async function cloneDisk(qemuImg: string, src: string, dst: string, format = "qcow2"): Promise<void> {
+    const cp = await run("cp", ["--reflink=always", src, dst], { noThrow: true, timeoutMs: 3_600_000 });
+    if (cp.code !== 0) {
+        await run(qemuImg, ["convert", "-O", format, src, dst], { timeoutMs: 3_600_000 });
+        return;
+    }
+    const snaps = await snapshotList(qemuImg, dst);
+    for (let i = 0; i < snaps.length; i++) await snapshotDelete(qemuImg, dst, snaps[i]!.name);
 }
 
 // ── internal qcow2 snapshots (VM off, or via QMP when running) ──

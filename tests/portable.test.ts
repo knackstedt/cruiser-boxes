@@ -4,6 +4,7 @@ import {
     exportPortable, mergePulledSpec, parsePortable, pickConfigFile,
     portableFilename, serializePortable, sniffPortable, toPortableSpec,
 } from "../libraries/vm-core/src/config/portable";
+import { bootRelevantChanges } from "../libraries/vm-core/src/config/boot-diff";
 
 const spec = () => {
     const s = defaultSpec("testvm");
@@ -145,6 +146,55 @@ describe("mergePulledSpec", () => {
         const pulled = parsePortable(serializePortable(exportPortable(local), "json"));
         const { needsRestart } = mergePulledSpec(local, pulled.spec);
         expect(needsRestart).toEqual([]);
+    });
+});
+
+describe("bootRelevantChanges", () => {
+    test("identical specs → empty", () => {
+        expect(bootRelevantChanges(spec(), spec())).toEqual([]);
+    });
+    test("argv fields flag; live-only fields don't", () => {
+        const a = spec();
+        const b = spec();
+        b.display.headMode = "windowed";
+        b.display.virtualDesktop = 3;
+        b.display.wallpaper.position = "center";
+        b.persist = "owned";
+        b.description = "x";
+        b.sync.theme = false;
+        expect(bootRelevantChanges(a, b)).toEqual([]);
+        b.resources.cpus = 8;
+        b.gpu.mode = "virgl";
+        b.display.viewer = "dmabuf";
+        b.display.monitors = ["HDMI-1"];
+        b.network.vsock = false;
+        expect(bootRelevantChanges(a, b)).toEqual(["resources", "gpu", "display", "network"]);
+    });
+    test("mount shares flag on hostPath/tag/membership only", () => {
+        const a = spec();   // one mount share: /home/u/src, tag "src", ro
+        const b = spec();
+        b.shares[0]!.direction = "both";   // fstab-side — reconciles live
+        expect(bootRelevantChanges(a, b)).toEqual([]);
+        b.shares[0]!.hostPath = "/elsewhere";
+        expect(bootRelevantChanges(a, b)).toEqual(["shares"]);
+        const c = spec();
+        c.shares.push({ hostPath: "/tmp/x", tag: "x", mode: "copy", direction: "both", readOnly: false, enabled: true, deletions: false });
+        expect(bootRelevantChanges(a, c)).toEqual([]);   // copy shares sync live
+        const d = spec();
+        d.shares[0]!.enabled = false;    // leaves the launch argv
+        expect(bootRelevantChanges(a, d)).toEqual(["shares"]);
+    });
+    test("usb serial isn't in argv — vendor/product changes flag", () => {
+        const a = spec();
+        const b = spec();
+        a.usb.autoAttach.push({ vendorId: "046d", productId: "c52b", atBoot: true });
+        b.usb.autoAttach.push({ vendorId: "046d", productId: "c52b", serial: "s1", atBoot: true });
+        expect(bootRelevantChanges(a, b)).toEqual([]);
+        b.usb.autoAttach[0]!.productId = "1234";
+        expect(bootRelevantChanges(a, b)).toEqual(["usb"]);
+        const c = spec();
+        c.usb.autoAttach.push({ vendorId: "046d", productId: "c52b", atBoot: false });
+        expect(bootRelevantChanges(spec(), c)).toEqual([]);   // hotplug-only entries aren't argv
     });
 });
 

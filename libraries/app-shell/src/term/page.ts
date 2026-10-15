@@ -29,6 +29,16 @@ html, body { margin:0; padding:0; height:100%; background:#0b0e13; overflow:hidd
           font:${statusPx}px monospace; color:#5d6775; background:#0b0e13;
           border-top:1px solid #212933; white-space:nowrap; overflow:hidden; }
 ${TERM_CSS}
+/* Themed scrollbar — the stock xterm.css ships none, so the webui backend
+   falls back to its unthemed default (a white strip). After TERM_CSS so
+   these win. */
+.xterm .xterm-viewport { scrollbar-width: thin; scrollbar-color: #333d4f transparent; }
+.xterm .xterm-viewport::-webkit-scrollbar { width: 10px; }
+.xterm .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
+.xterm .xterm-viewport::-webkit-scrollbar-thumb {
+    background: #333d4f; border-radius: 5px; border: 2px solid #0b0e13; }
+.xterm .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #46526a; }
+.xterm .xterm-viewport::-webkit-scrollbar-corner { background: transparent; }
 </style></head>
 <body>
 <div id="term"></div>
