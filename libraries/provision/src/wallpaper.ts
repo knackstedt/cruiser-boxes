@@ -237,7 +237,9 @@ export async function renderWallpaper(spec: VmSpec, src?: string | null, target?
     // visible area.
     if (target && target.w > 0 && target.h > 0 &&
         (img.bitmap.width !== target.w || img.bitmap.height !== target.h))
-        img.cover(target.w, target.h);
+        // jimp v1 plugin args are an options object (zod-validated) — the
+        // v0-style cover(w, h) throws "expected object, received number"
+        img.cover({ w: target.w, h: target.h });
 
     if (w.position !== "off") {
         const W = img.bitmap.width, H = img.bitmap.height;

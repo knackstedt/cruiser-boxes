@@ -139,6 +139,12 @@ describe("renderWallpaper", () => {
         const buf = await renderWallpaper(spec());
         expect(buf.subarray(0, 4)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     }, 30_000);
+    test("mismatched target cover-crops (jimp v1 options object, not positional)", async () => {
+        const { Jimp } = await importJimp();
+        const out = await Jimp.read(await renderWallpaper(spec(), null, { w: 1280, h: 720 }));
+        expect(out.bitmap.width).toBe(1280);
+        expect(out.bitmap.height).toBe(720);
+    }, 30_000);
     test("position off skips the watermark but still renders", async () => {
         const s = spec();
         s.display.wallpaper.position = "off";
