@@ -19,13 +19,14 @@ export function termBundleReady(): boolean {
     return TERM_JS.length > 0;
 }
 
-export function termPageHtml(): string {
+export function termPageHtml(fontSize = 13): string {
+    const statusPx = Math.max(10, Math.round(fontSize * 11 / 13));
     return `<!doctype html>
 <html><head><meta charset="utf-8"><style>
 html, body { margin:0; padding:0; height:100%; background:#0b0e13; overflow:hidden; }
 #term { height:100%; width:100%; box-sizing:border-box; padding:8px 10px; }
 #status { position:absolute; left:0; right:0; bottom:0; padding:2px 10px;
-          font:11px monospace; color:#5d6775; background:#0b0e13;
+          font:${statusPx}px monospace; color:#5d6775; background:#0b0e13;
           border-top:1px solid #212933; white-space:nowrap; overflow:hidden; }
 ${TERM_CSS}
 </style></head>
@@ -39,7 +40,7 @@ const b64dec = (s) => decodeURIComponent(escape(atob(s)));
 const term = new Terminal({
     cursorBlink: true,
     fontFamily: "ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace",
-    fontSize: 13,
+    fontSize: ${fontSize},
     scrollback: 5000,
     theme: {
         background: "#0b0e13", foreground: "#c8d2e0",

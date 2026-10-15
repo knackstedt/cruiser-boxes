@@ -22,11 +22,24 @@ export interface TermViewOpts {
     bridge: WebUiHostBridge;
     /** Buffer-px rect the view composites into (input space). */
     rect: { x: number; y: number; w: number; h: number };
+    /** xterm font size in view (physical) px — callers pass 13 × UI zoom
+     *  so term text tracks the doc's zoomed type size. Default 13. */
+    fontSize?: number;
     id?: string;
     /** Page → host message sink — TermManager wires session traffic here. */
     onMessage?: (payload: unknown) => void;
     onStatus?: (status: string) => void;
     onConsole?: (level: number, text: string) => void;
+}
+
+/** Snap a rect to integer buffer px edge-by-edge. The blit pass samples
+ *  linearly — a fractional origin or span puts every screen pixel between
+ *  texels and smears the whole view (blurry text). Raster must equal the
+ *  composite size exactly. */
+function snapRect(r: { x: number; y: number; w: number; h: number }): { x: number; y: number; w: number; h: number } {
+    const x = Math.round(r.x);
+    const y = Math.round(r.y);
+    return { x, y, w: Math.round(r.x + r.w) - x, h: Math.round(r.y + r.h) - y };
 }
 
 export class TermView {
@@ -52,12 +65,13 @@ export class TermView {
     static async create(opts: TermViewOpts): Promise<TermView | null> {
         if (!termBundleReady()) throw new Error("term bundle not built — run `bun run term:bundle`");
         const v = new TermView(opts);
+        const rect = snapRect(opts.rect);
         const ok = await opts.bridge.createView({
             id: v.id,
-            width: Math.round(opts.rect.w),
-            height: Math.round(opts.rect.h),
+            width: Math.max(1, rect.w),
+            height: Math.max(1, rect.h),
             scale: 1,
-            html: termPageHtml(),
+            html: termPageHtml(opts.fontSize),
             transparent: false,
             interactive: true,
             frameRate: 60,
@@ -65,13 +79,13 @@ export class TermView {
         if (!ok) return null;
         // Physical dims are authoritative — CSS size × scale.
         const dims = opts.bridge.getDimensions(v.id)
-            ?? { w: Math.max(1, Math.round(opts.rect.w)), h: Math.max(1, Math.round(opts.rect.h)) };
+            ?? { w: rect.w, h: rect.h };
         v.src = new WebUiTextureSource(opts.device, v.id, dims.w, dims.h, opts.bridge.pixelFormat(v.id));
         const ubo = v.blit.createUbo();
         v.comp = {
             ubo,
             bindGroup: v.blit.createBindGroup(v.src.getTexture(), ubo, v.src.srgbFormat),
-            rect: { ...opts.rect },
+            rect,
         };
         if (opts.onMessage) v.unsubs.push(opts.bridge.onMessage(v.id, (p) => v.pageMessage(p)));
         if (opts.onStatus) v.unsubs.push(opts.bridge.onStatus(v.id, (s) => opts.onStatus?.(s)));
@@ -114,8 +128,9 @@ export class TermView {
 
     setRect(rect: { x: number; y: number; w: number; h: number }): void {
         if (!this.comp) return;
-        this.comp.rect = { ...rect };
-        this.bridge.resize(this.id, Math.round(rect.w), Math.round(rect.h), 1);
+        const r = snapRect(rect);
+        this.comp.rect = r;
+        this.bridge.resize(this.id, r.w, r.h, 1);
     }
 
     // ── input ──

@@ -108,7 +108,8 @@ export class TermManager {
             if (!bridge) { st.setTermLine("webui backend unavailable — use `cruiser vm ssh`"); return; }
             const view = await TermView.create({
                 device: this.device, format: this.format, bus: this.bus, bridge,
-                rect, onMessage: (p) => this.pageMessage(name, p),
+                rect, fontSize: Math.round(13 * this.zoom),
+                onMessage: (p) => this.pageMessage(name, p),
                 onStatus: (s) => { if (s !== "running") this.setLine(name, `webui view ${s}`); },
                 onConsole: (_l, t) => log.info("term", `${name} page: ${t}`),
             }).catch((e) => { this.setLine(name, `view failed: ${(e as Error).message}`); return null; });
@@ -183,7 +184,16 @@ export class TermManager {
         for (let i = 0; i < 40; i++) {
             const r = await panel.getRect("#termbox").catch(() => null);
             if (r && r.w > 10 && r.h > 10) {
-                return { x: r.x * this.zoom, y: r.y * this.zoom, w: r.w * this.zoom, h: r.h * this.zoom };
+                // Snap to integer buffer px — the blit samples linearly and a
+                // fractional composite rect smears every glyph (TermView
+                // snaps too; doing it here keeps the doc-edge intent).
+                const x = Math.round(r.x * this.zoom);
+                const y = Math.round(r.y * this.zoom);
+                return {
+                    x, y,
+                    w: Math.round((r.x + r.w) * this.zoom) - x,
+                    h: Math.round((r.y + r.h) * this.zoom) - y,
+                };
             }
             await new Promise((res) => setTimeout(res, 50));
         }
