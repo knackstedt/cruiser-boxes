@@ -18,7 +18,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { VmRegistry, VmSpec, VmHandle, HeadMode, defaultSpec, type ShareSpec } from "../libraries/vm-core/src/index";
+import { VmRegistry, VmSpec, VmHandle, HeadMode, DevTool, defaultSpec, type ShareSpec } from "../libraries/vm-core/src/index";
 import { makeShare } from "../libraries/vm-core/src/config/shares";
 import type { ViewerSession } from "../libraries/host-int/src/session";
 import { listUsbDevices } from "../libraries/vm-core/src/usb/usb";
@@ -206,7 +206,13 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const snapTrig = flagVal("--snap-trigger"); if (snapTrig) spec.snapshots.trigger = snapTrig as VmSpec["snapshots"]["trigger"];
             if (num("--snap-keep")) spec.snapshots.keep = num("--snap-keep")!;
             const devtools = flagVal("--devtools");
-            if (devtools) spec.os.devtools = devtools.split(",").map((s) => s.trim()).filter(Boolean) as VmSpec["os"]["devtools"];
+            if (devtools) {
+                for (const k of devtools.split(",").map((s) => s.trim()).filter(Boolean)) {
+                    if (!DevTool.safeParse(k).success)
+                        { console.error(`unknown devtool '${k}' — options: ${DevTool.options.join(", ")}`); process.exit(2); }
+                    spec.os.devtools.push(k as VmSpec["os"]["devtools"][number]);
+                }
+            }
             const wp = flagVal("--wallpaper"); if (wp) spec.display.wallpaper.source = wp;
             const wpPos = flagVal("--wallpaper-pos"); if (wpPos) spec.display.wallpaper.position = wpPos as VmSpec["display"]["wallpaper"]["position"];
             const { SYNC_IDS } = await import("../libraries/provision/src/sync");

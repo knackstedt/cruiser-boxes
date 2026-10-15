@@ -10,7 +10,7 @@ import type { CruiserService } from "./service";
 import type { Store, CreateForm } from "./store";
 import { renderRouteParts, type RouteParts } from "./screens";
 import { DISTROS } from "../../provision/src/distros";
-import { DEVTOOLS } from "../../provision/src/packages";
+import { DEVTOOLS, DEVTOOLS_PRESET } from "../../provision/src/packages";
 import { registerUiFonts } from "./fonts";
 import { RenderGate } from "./render-gate";
 import { TermManager } from "./term/term-manager";
@@ -183,10 +183,21 @@ export class CruiserShell {
         this.host.onAction("set-preset", (d) => {
             const preset = d.value === "developer" ? "developer" : "standard";
             st().setField("preset", preset);
-            // developer pre-checks the whole tooling menu; user can untoggle
-            st().setField("devtools", preset === "developer" ? DEVTOOLS.map((t) => t.id) : []);
+            // developer pre-checks a dev-box subset of the checklist — the
+            // heavy/optional entries (db servers, k3s, editors, cloud sdks)
+            // stay opt-in; user can toggle individually or per category.
+            st().setField("devtools", preset === "developer" ? [...DEVTOOLS_PRESET] : []);
         });
         this.host.onAction("devtools-toggle", (d) => { if (d.key) st().toggleDevtool(d.key); });
+        this.host.onAction("devtools-cat", (d) => {
+            if (!d.key) return;
+            const ids: string[] = DEVTOOLS.filter((t) => t.cat === d.key).map((t) => t.id);
+            const cur = new Set(st().create.devtools);
+            // all on → clear the category; otherwise fill in the gaps
+            st().setField("devtools", ids.every((id) => cur.has(id))
+                ? st().create.devtools.filter((k) => !ids.includes(k))
+                : [...st().create.devtools, ...ids.filter((id) => !cur.has(id))]);
+        });
         this.host.onAction("usb-toggle", (d) => {
             if (!d.key) return;
             const dev = st().usbDevices.find((u) => u.key === d.key);

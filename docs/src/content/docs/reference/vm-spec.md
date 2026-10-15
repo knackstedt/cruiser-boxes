@@ -80,7 +80,7 @@ disks the family may be wrong — guest-setup re-detects from
 | `snap` | `false` | install snapd; off = flatpak is the only app channel |
 | `extraFonts` | `false` | CJK + MS core fonts beyond the base bundle |
 | `autologin` | `true` | DM autologin; effectively required for KDE RDP |
-| `devtools` | `[]` | `toolchain` · `python` · `node` · `rust` · `go` · `containers` · `linters` · `debug` · `shell` |
+| `devtools` | `[]` | dev-tools checklist — see [provisioning → devtools](/guides/provisioning/#developer-tooling) for the full grouped list |
 | `extraPackages` | `[]` | extra distro packages, strict-validated names |
 
 ## sync (host → guest)

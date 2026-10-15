@@ -7,7 +7,8 @@ import { appendVmLog, journalArgs, tailFile, runnerLogFiles } from "../libraries
 import { join } from "node:path";
 import { JsonSocket } from "../libraries/vm-core/src/qmp/socket-json";
 import { guestLayoutFromHost } from "../libraries/provision/src/monitors";
-import { profileFromSpec, resolvePackages, resolveFlatpaks, DEVTOOLS } from "../libraries/provision/src/packages";
+import { profileFromSpec, resolvePackages, resolveFlatpaks, DEVTOOLS, DEVTOOLS_PRESET } from "../libraries/provision/src/packages";
+import { guestDevtoolsScript } from "../libraries/provision/src/devtools";
 import { guestSetupScript } from "../libraries/provision/src/guest-setup";
 import { guestThemeScript } from "../libraries/provision/src/theme";
 import { pickImageFromIndex, supportsKrdp, defaultRelease } from "../libraries/provision/src/distros";
@@ -127,13 +128,38 @@ describe("packages", () => {
         expect(rpm).toContain("clippy");
         expect(rpm).toContain("ShellCheck");
         expect(rpm).not.toContain("build-essential");
-        // every DEVTOOLS id must have a manifest entry — a toggle that
-        // installs nothing is a silent bug
+        // every DEVTOOLS id must install *something* — distro pkgs, a
+        // flatpak, or a script block; a toggle that does nothing is a bug
         DEVTOOLS.forEach((t) => {
             const withT = resolvePackages(p({ devtools: [t.id] }), "setup");
             const without = resolvePackages(p({}), "setup");
-            expect(withT.length).toBeGreaterThan(without.length);
+            const extraFlatpaks = resolveFlatpaks(p({ devtools: [t.id] })).length
+                - resolveFlatpaks(p({})).length;
+            const script = guestDevtoolsScript({ ...p({}), devtools: [t.id] });
+            expect(
+                withT.length > without.length || extraFlatpaks > 0 || script.length > 0,
+            ).toBe(true);
         });
+        // the developer preset is a subset — every id must be a real devtool
+        DEVTOOLS_PRESET.forEach((id) => {
+            expect(DEVTOOLS.some((t) => t.id === id)).toBe(true);
+        });
+        // checklist ids stay unique and every one names a category
+        expect(new Set(DEVTOOLS.map((t) => t.id)).size).toBe(DEVTOOLS.length);
+        DEVTOOLS.forEach((t) => expect(t.cat.length).toBeGreaterThan(0));
+    });
+    test("devtools script blocks only fire when selected", () => {
+        expect(guestDevtoolsScript(p({}))).toBe("");
+        const s = guestDevtoolsScript(p({ devtools: ["node", "docker", "mongodb"] }));
+        expect(s).toContain("fnm.vercel.app");
+        expect(s).toContain("usermod -aG docker");
+        expect(s).toContain("repo.mongodb.org");
+        expect(s).not.toContain("get.k3s.io");
+        expect(s).not.toContain("zed.dev");
+    });
+    test("flatpak devtools resolve alongside the browser", () => {
+        expect(resolveFlatpaks(p({ devtools: ["vscode", "dbeaver"], browser: "firefox" })))
+            .toEqual(["org.mozilla.firefox", "com.visualstudio.code", "io.dbeaver.DBeaverCommunity"]);
     });
 });
 

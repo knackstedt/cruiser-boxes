@@ -21,17 +21,77 @@ export type GuestDesktop = z.infer<typeof GuestDesktop>;
 export const GuestBrowser = z.enum(["none", "firefox", "chrome", "chromium", "vivaldi", "brave"]);
 export type GuestBrowser = z.infer<typeof GuestBrowser>;
 
-/** Developer tooling groups — labels/package lists live in provision/packages.ts. */
+/**
+ * Developer tooling checklist — labels/categories/package lists live in
+ * provision/packages.ts (DEVTOOLS); installer snippets for tools with no
+ * distro package live in provision/devtools.ts. Ids are persisted in
+ * vm.json — add new ones freely, never remove/rename (parse would fail).
+ */
 export const DevTool = z.enum([
-    "toolchain",   // compilers + build systems (gcc/clang, make, cmake, ninja, meson)
+    // compilers & build
+    "toolchain",       // gcc/g++/clang, make, cmake, ninja, meson, pkg-config, ccache
+    "jvmbuild",        // maven + gradle
+    "linters",
+    "debug",           // gdb/strace/ltrace/valgrind/perf
+    // languages & runtimes
     "python",
-    "node",
+    "uv",              // uv + pipx
+    "node",            // via fnm (user-level), LTS
+    "bun",
+    "deno",
     "rust",
     "go",
-    "containers",  // podman + buildah + distrobox
-    "linters",
-    "debug",       // gdb/strace/ltrace/valgrind/perf
-    "shell",       // jq, ripgrep, fd, fzf, tmux…
+    "ruby",
+    "java",            // default-jdk / latest openjdk
+    "kotlin",
+    "csharp",          // .NET SDK LTS via dotnet-install.sh
+    "php",             // php-cli + composer
+    "elixir",          // elixir + erlang
+    // cli & shell
+    "shell",           // the bundle: jq, ripgrep, fd, fzf, tmux, tree, btop…
+    "tmux",
+    "fzf",
+    "yq",              // mikefarah's — upstream binary (distro 'yq' is a different tool)
+    "tree",
+    "gh",              // github cli (upstream repo)
+    // editors & ides
+    "neovim",
+    "emacs",
+    "zed",             // zed.dev installer
+    "vscode",          // flatpak
+    "vscodium",        // flatpak
+    "cursor",          // deb/rpm via cursor.com download api
+    "devin-desktop",   // windsurf apt repo — deb-family only
+    "android-studio",  // flatpak
+    // containers & vms
+    "containers",      // podman + buildah + podman-compose + distrobox
+    "docker",          // engine + compose + buildx, user → docker group
+    "virtmanager",     // libvirt + virt-manager + qemu (pair with nestedVirt)
+    "vagrant",         // hashicorp repo
+    // kubernetes
+    "kubectl",
+    "helm",
+    "k9s",
+    "minikube",
+    "kind",
+    "k3s",
+    // cloud & iac
+    "cloudcli",        // awscli + gcloud sdk + azure cli
+    "terraform",       // hashicorp repo
+    "ansible",
+    // databases
+    "sqlite",
+    "mysql",           // server + client + mycli
+    "postgres",        // server + contrib + pgcli
+    "redis",           // server + cli
+    "mongodb",         // mongodb-org + mongosh (upstream repo)
+    "dbeaver",         // flatpak
+    // network & misc tools
+    "nettools",        // nmap, iperf3, mosh, rclone, dnsutils, netcat…
+    "tailscale",
+    "adb",             // android platform tools (adb + fastboot)
+    // ai
+    "ollama",
 ]);
 export type DevTool = z.infer<typeof DevTool>;
 

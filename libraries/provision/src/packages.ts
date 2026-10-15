@@ -37,17 +37,99 @@ export function profileFromSpec(spec: VmSpec): GuestProfile {
     };
 }
 
-/** The "Developer" preset menu — id/label/desc shown as toggles in the UI. */
-export const DEVTOOLS: readonly { id: DevTool; label: string; desc: string }[] = [
-    { id: "toolchain",  label: "Compilers & build", desc: "gcc/g++/clang, make, cmake, ninja, meson, pkg-config, ccache" },
-    { id: "python",     label: "Python",            desc: "python3 + pip, venv, dev headers" },
-    { id: "node",       label: "Node.js",           desc: "nodejs + npm (distro release)" },
-    { id: "rust",       label: "Rust",              desc: "rustc, cargo, rustfmt, clippy" },
-    { id: "go",         label: "Go",                desc: "golang toolchain" },
-    { id: "containers", label: "Containers",        desc: "podman, buildah, distrobox — distrobox shells into other distros" },
-    { id: "linters",    label: "Linters",           desc: "shellcheck, yamllint, clang-format/tidy" },
-    { id: "debug",      label: "Debug tools",       desc: "gdb, strace, ltrace, valgrind, perf" },
-    { id: "shell",      label: "Shell extras",      desc: "jq, ripgrep, fd, fzf, tmux, tree, btop" },
+/**
+ * The devtools checklist — grouped by `cat` (category headers render in
+ * first-seen order, so keep the array category-sorted). Install route per
+ * item: a PACKAGES entry (distro pkgs), a `flatpak` here (Flathub via
+ * resolveFlatpaks), and/or a snippet in devtools.ts (upstream installers,
+ * third-party repos, /usr/local/bin drops — anything the distro won't do).
+ */
+export interface DevToolDef {
+    id: DevTool;
+    cat: string;
+    label: string;
+    desc: string;
+    flatpak?: string;
+}
+
+export const DEVTOOLS: readonly DevToolDef[] = [
+    // ── compilers & build ──
+    { id: "toolchain",      cat: "Compilers & build", label: "gcc + clang",     desc: "make, cmake, ninja, meson, pkg-config, ccache" },
+    { id: "jvmbuild",       cat: "Compilers & build", label: "maven + gradle",  desc: "java build tools — pair with the JDK item" },
+    { id: "linters",        cat: "Compilers & build", label: "linters",         desc: "shellcheck, yamllint, clang-format/tidy" },
+    { id: "debug",          cat: "Compilers & build", label: "debug tools",     desc: "gdb, strace, ltrace, valgrind, perf" },
+    // ── languages & runtimes ──
+    { id: "python",         cat: "Languages", label: "python",      desc: "python3 + pip, venv, dev headers" },
+    { id: "uv",             cat: "Languages", label: "uv + pipx",   desc: "fast python pkg/env tooling — uv falls back to the astral installer" },
+    { id: "node",           cat: "Languages", label: "node (fnm)",  desc: "node LTS via fnm — user-level, easy version switching" },
+    { id: "bun",            cat: "Languages", label: "bun",         desc: "bun.sh installer → ~/.bun" },
+    { id: "deno",           cat: "Languages", label: "deno",        desc: "deno.land installer → ~/.deno" },
+    { id: "rust",           cat: "Languages", label: "rust",        desc: "rustc, cargo, rustfmt, clippy (distro)" },
+    { id: "go",             cat: "Languages", label: "go",          desc: "golang toolchain (distro)" },
+    { id: "ruby",           cat: "Languages", label: "ruby",        desc: "interpreter + dev headers for native gems" },
+    { id: "java",           cat: "Languages", label: "java (jdk)",  desc: "default-jdk / latest openjdk" },
+    { id: "kotlin",         cat: "Languages", label: "kotlin",      desc: "kotlin compiler (distro)" },
+    { id: "csharp",         cat: "Languages", label: "c# (.NET)",   desc: "dotnet SDK LTS via the official installer → ~/.dotnet" },
+    { id: "php",            cat: "Languages", label: "php",         desc: "php-cli + composer" },
+    { id: "elixir",         cat: "Languages", label: "elixir",      desc: "elixir + erlang runtime" },
+    // ── cli & shell ──
+    { id: "shell",          cat: "CLI & shell", label: "shell extras", desc: "the bundle: jq, ripgrep, fd, fzf, tmux, tree, btop, bat, eza, zoxide, delta, hyperfine, ncdu, xh, direnv, zellij, lazygit, glab" },
+    { id: "tmux",           cat: "CLI & shell", label: "tmux",         desc: "terminal multiplexer (in the bundle too)" },
+    { id: "fzf",            cat: "CLI & shell", label: "fzf",          desc: "fuzzy finder (in the bundle too)" },
+    { id: "yq",             cat: "CLI & shell", label: "yq",           desc: "yaml processor — upstream binary (the distro 'yq' is a different tool)" },
+    { id: "tree",           cat: "CLI & shell", label: "tree",         desc: "dir tree listing (in the bundle too)" },
+    { id: "gh",             cat: "CLI & shell", label: "github cli",   desc: "gh via github's own apt/dnf repo" },
+    // ── editors & ides ──
+    { id: "neovim",         cat: "Editors", label: "neovim",        desc: "nvim (distro)" },
+    { id: "emacs",          cat: "Editors", label: "emacs",         desc: "gnu emacs (distro)" },
+    { id: "zed",            cat: "Editors", label: "zed",           desc: "zed.dev installer → ~/.local — wants gpu accel (venus)" },
+    { id: "vscode",         cat: "Editors", label: "vscode",        desc: "flatpak com.visualstudio.code" , flatpak: "com.visualstudio.code" },
+    { id: "vscodium",       cat: "Editors", label: "vscodium",      desc: "telemetry-free vscode build (flatpak)", flatpak: "com.vscodium.codium" },
+    { id: "cursor",         cat: "Editors", label: "cursor",        desc: "deb/rpm resolved from cursor.com's download api" },
+    { id: "devin-desktop",  cat: "Editors", label: "devin desktop", desc: "windsurf apt repo — deb-family guests only" },
+    { id: "android-studio", cat: "Editors", label: "android studio", desc: "flatpak com.google.AndroidStudio — pair with adb", flatpak: "com.google.AndroidStudio" },
+    // ── containers & vms ──
+    { id: "containers",     cat: "Containers & VMs", label: "podman",       desc: "podman, buildah, podman-compose, distrobox — distrobox shells into other distros" },
+    { id: "docker",         cat: "Containers & VMs", label: "docker",       desc: "engine + compose v2 + buildx; user joins the docker group" },
+    { id: "virtmanager",    cat: "Containers & VMs", label: "virt-manager", desc: "libvirt + qemu + virt-manager — vms in the vm (pair with nested virt)" },
+    { id: "vagrant",        cat: "Containers & VMs", label: "vagrant",      desc: "hashicorp repo build" },
+    // ── kubernetes ──
+    { id: "kubectl",        cat: "Kubernetes", label: "kubectl",   desc: "latest stable binary from dl.k8s.io" },
+    { id: "helm",           cat: "Kubernetes", label: "helm",      desc: "distro pkg, falls back to the get-helm-3 script" },
+    { id: "k9s",            cat: "Kubernetes", label: "k9s",       desc: "terminal k8s ui (upstream binary)" },
+    { id: "minikube",       cat: "Kubernetes", label: "minikube",  desc: "local cluster — needs a docker/podman/kvm2 driver" },
+    { id: "kind",           cat: "Kubernetes", label: "kind",      desc: "k8s-in-docker — needs docker or podman" },
+    { id: "k3s",            cat: "Kubernetes", label: "k3s",       desc: "lightweight cluster, installs + starts a systemd service" },
+    // ── cloud & iac ──
+    { id: "cloudcli",       cat: "Cloud & IaC", label: "cloud clis", desc: "awscli (distro) + gcloud sdk + azure cli" },
+    { id: "terraform",      cat: "Cloud & IaC", label: "terraform",  desc: "hashicorp repo build" },
+    { id: "ansible",        cat: "Cloud & IaC", label: "ansible",    desc: "ansible core (distro)" },
+    // ── databases ──
+    { id: "sqlite",         cat: "Databases", label: "sqlite",     desc: "sqlite3 + litecli" },
+    { id: "mysql",          cat: "Databases", label: "mysql",      desc: "server + client + mycli; service enabled" },
+    { id: "postgres",       cat: "Databases", label: "postgresql", desc: "server + contrib + pgcli; initdb + enabled" },
+    { id: "redis",          cat: "Databases", label: "redis",      desc: "redis server + cli; service enabled" },
+    { id: "mongodb",        cat: "Databases", label: "mongodb",    desc: "mongodb-org + mongosh via upstream repo" },
+    { id: "dbeaver",        cat: "Databases", label: "dbeaver",    desc: "universal db gui (flatpak)", flatpak: "io.dbeaver.DBeaverCommunity" },
+    // ── network & misc tools ──
+    { id: "nettools",       cat: "Network & tools", label: "net tools", desc: "nmap, iperf3, mosh, rclone, dnsutils, netcat, traceroute, tcpdump, whois, wireguard-tools" },
+    { id: "tailscale",      cat: "Network & tools", label: "tailscale", desc: "tailscale.com installer — run `tailscale up` inside the guest after" },
+    { id: "adb",            cat: "Network & tools", label: "adb",       desc: "android platform tools (adb + fastboot)" },
+    // ── ai ──
+    { id: "ollama",         cat: "AI", label: "ollama", desc: "ollama.com installer — local llm runner + systemd service" },
+];
+
+/**
+ * The "Developer" preset pre-checks this subset — sensible defaults for a
+ * dev box, keeping the heavy/optional stuff (db servers, k3s, editors,
+ * cloud sdks) opt-in.
+ */
+export const DEVTOOLS_PRESET: readonly DevTool[] = [
+    "toolchain", "linters", "debug",
+    "python", "uv", "node", "bun", "rust", "go", "java",
+    "shell", "gh",
+    "containers", "docker",
+    "nettools",
 ];
 
 type Names = string | string[] | Partial<Record<DistroFamily, string | string[] | null>>;
@@ -85,7 +167,10 @@ export const PACKAGES: PkgEntry[] = [
     { id: "growfs",        pkgs: { ...deb("cloud-guest-utils"), fedora: "cloud-utils-growpart" } },
 
     // ── tools ──
-    { id: "cli-tools",     pkgs: { ...deb(["curl", "wget", "git", "htop", "rsync"]), fedora: ["curl", "wget2", "git", "htop", "rsync"] } },
+    { id: "cli-tools",     pkgs: { ...deb(["curl", "wget", "git", "htop", "rsync", "unzip", "zip", "xz-utils",
+                                           "ca-certificates", "gnupg"]),
+                                   fedora: ["curl", "wget2", "git", "htop", "rsync", "unzip", "zip", "xz",
+                                            "ca-certificates", "gnupg2"] } },
     // rsync ^ drives copy-mode shares (filesync.ts); the guest prep script
     // keeps a lazy install as backstop for guests provisioned before this.
     { id: "bus-tools",     pkgs: ["usbutils", "pciutils"] },
@@ -190,13 +275,61 @@ export const PACKAGES: PkgEntry[] = [
     { id: "dev-python",    stages: ["setup"], when: dev("python"),
                            pkgs: { ...deb(["python3", "python3-pip", "python3-venv", "python3-dev"]),
                                    fedora: ["python3", "python3-pip", "python3-devel"] } },
-    { id: "dev-node",      stages: ["setup"], when: dev("node"), pkgs: ["nodejs", "npm"] },
+    { id: "dev-uv",        stages: ["setup"], when: dev("uv"), pkgs: ["uv", "pipx"] },
     { id: "dev-rust",      stages: ["setup"], when: dev("rust"),
                            pkgs: { ...deb(["rustc", "cargo", "rustfmt", "rust-clippy"]),
                                    fedora: ["rust", "cargo", "rustfmt", "clippy"] } },
     { id: "dev-go",        stages: ["setup"], when: dev("go"), pkgs: "golang" },
+    { id: "dev-ruby",      stages: ["setup"], when: dev("ruby"),
+                           pkgs: { ...deb(["ruby-full", "ruby-dev"]), fedora: ["ruby", "ruby-devel", "rubygems"] } },
+    { id: "dev-java",      stages: ["setup"], when: dev("java"),
+                           pkgs: { ...deb("default-jdk"), fedora: "java-latest-openjdk-devel" } },
+    { id: "dev-jvmbuild",  stages: ["setup"], when: dev("jvmbuild"), pkgs: ["maven", "gradle"] },
+    { id: "dev-kotlin",    stages: ["setup"], when: dev("kotlin"), pkgs: "kotlin" },
+    { id: "dev-php",       stages: ["setup"], when: dev("php"),
+                           pkgs: { ...deb(["php-cli", "php-xml", "php-mbstring", "php-curl", "composer"]),
+                                   fedora: ["php-cli", "php-xml", "php-mbstring", "composer"] } },
+    { id: "dev-elixir",    stages: ["setup"], when: dev("elixir"), pkgs: ["elixir", "erlang"] },
     { id: "dev-containers", stages: ["setup"], when: dev("containers"),
-                           pkgs: ["podman", "buildah", "distrobox"] },
+                           pkgs: ["podman", "buildah", "distrobox", "podman-compose"] },
+    { id: "dev-docker",    stages: ["setup"], when: dev("docker"),
+                           pkgs: { ...deb(["docker.io", "docker-compose-v2", "docker-buildx"]),
+                                   fedora: ["moby-engine", "docker-compose", "docker-buildx"] } },
+    { id: "dev-virtman",   stages: ["setup"], when: dev("virtmanager"),
+                           pkgs: { ...deb(["libvirt-daemon-system", "virt-manager", "virtinst",
+                                           "libvirt-clients", "qemu-kvm", "qemu-utils"]),
+                                   fedora: ["libvirt", "virt-manager", "virt-install", "qemu-kvm",
+                                            "qemu-img", "virt-viewer"] } },
+    { id: "dev-helm",      stages: ["setup"], when: dev("helm"), pkgs: "helm" },
+    { id: "dev-cloudcli",  stages: ["setup"], when: dev("cloudcli"), pkgs: "awscli" },
+    { id: "dev-terraform", stages: ["setup"], when: dev("terraform"), pkgs: "terraform" },   // upstream repo adds it anyway; distro name is the cheap path
+    { id: "dev-vagrant",   stages: ["setup"], when: dev("vagrant"), pkgs: "vagrant" },       // same — hashicorp repo covers releases the distro doesn't
+    { id: "dev-ansible",   stages: ["setup"], when: dev("ansible"), pkgs: "ansible" },
+    { id: "dev-sqlite",    stages: ["setup"], when: dev("sqlite"), pkgs: ["sqlite3", "litecli"] },
+    { id: "dev-mysql",     stages: ["setup"], when: dev("mysql"),
+                           pkgs: { ...deb(["mysql-server", "mysql-client", "mycli"]),
+                                   fedora: ["community-mysql-server", "community-mysql", "mycli"] } },
+    { id: "dev-postgres",  stages: ["setup"], when: dev("postgres"),
+                           pkgs: { ...deb(["postgresql", "postgresql-contrib", "pgcli"]),
+                                   fedora: ["postgresql-server", "postgresql-contrib", "pgcli"] } },
+    { id: "dev-redis",     stages: ["setup"], when: dev("redis"),
+                           pkgs: { ...deb(["redis-server", "redis-tools"]), fedora: "redis" } },
+    { id: "dev-neovim",    stages: ["setup"], when: dev("neovim"), pkgs: "neovim" },
+    { id: "dev-emacs",     stages: ["setup"], when: dev("emacs"), pkgs: "emacs" },
+    { id: "dev-adb",       stages: ["setup"], when: dev("adb"),
+                           // both naming eras — the candidate filter picks whichever ships
+                           pkgs: { ...deb(["adb", "fastboot", "android-tools-adb", "android-tools-fastboot",
+                                           "android-sdk-platform-tools-common"]),
+                                   fedora: "android-tools" } },
+    { id: "dev-nettools",  stages: ["setup"], when: dev("nettools"),
+                           pkgs: { ...deb(["nmap", "iperf3", "mosh", "rclone", "dnsutils", "netcat-openbsd",
+                                           "traceroute", "whois", "tcpdump", "wireguard-tools", "net-tools",
+                                           "iputils-ping", "iputils-arping"]),
+                                   fedora: ["nmap", "iperf3", "mosh", "rclone", "bind-utils", "nmap-ncat",
+                                            "traceroute", "whois", "tcpdump", "wireguard-tools", "net-tools"] } },
+    { id: "dev-fzf",       stages: ["setup"], when: dev("fzf"), pkgs: "fzf" },
+    { id: "dev-tmux",      stages: ["setup"], when: dev("tmux"), pkgs: "tmux" },
+    { id: "dev-tree",      stages: ["setup"], when: dev("tree"), pkgs: "tree" },
     { id: "dev-linters",   stages: ["setup"], when: dev("linters"),
                            pkgs: { ...deb(["shellcheck", "yamllint", "clang-format", "clang-tidy"]),
                                    fedora: ["ShellCheck", "yamllint", "clang-tools-extra"] } },
@@ -205,7 +338,12 @@ export const PACKAGES: PkgEntry[] = [
                                    debian: ["gdb", "strace", "ltrace", "valgrind", "linux-perf"],
                                    fedora: ["gdb", "strace", "ltrace", "valgrind", "perf"] } },
     { id: "dev-shell",     stages: ["setup"], when: dev("shell"),
-                           pkgs: ["jq", "ripgrep", "fd-find", "fzf", "tmux", "tree", "btop"] },
+                           pkgs: { ...deb(["jq", "ripgrep", "fd-find", "fzf", "tmux", "tree", "btop",
+                                           "bat", "eza", "zoxide", "git-delta", "hyperfine", "ncdu",
+                                           "direnv", "zellij", "lazygit", "glab", "xh"]),
+                                   fedora: ["jq", "ripgrep", "fd-find", "fzf", "tmux", "tree", "btop",
+                                            "bat", "eza", "zoxide", "git-delta", "hyperfine", "ncdu",
+                                            "direnv", "zellij", "lazygit", "glab", "xh"] } },
 ];
 
 /** Flathub app ids for the browser dropdown — uniform across all distros. */
@@ -237,7 +375,11 @@ export function resolvePackages(p: GuestProfile, stage: PkgStage): string[] {
     return [...new Set(out)];
 }
 
-/** Flathub app ids to install (browser dropdown). */
+/** Flathub app ids to install (browser dropdown + flatpak devtools). */
 export function resolveFlatpaks(p: GuestProfile): string[] {
-    return p.browser === "none" ? [] : [BROWSER_FLATPAK[p.browser]];
+    const out = p.browser === "none" ? [] : [BROWSER_FLATPAK[p.browser]];
+    DEVTOOLS.forEach((t) => {
+        if (t.flatpak && p.devtools.includes(t.id)) out.push(t.flatpak);
+    });
+    return [...new Set(out)];
 }

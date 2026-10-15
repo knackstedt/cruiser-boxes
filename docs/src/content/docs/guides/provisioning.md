@@ -99,21 +99,24 @@ KDE support is gated on the distro shipping `krdp` (Plasma 6's KRDP server);
 
 ## Developer tooling
 
-`os.devtools` selects package groups installed at guest-setup time (the UI's
-"Developer" preset). Because they're setup-stage only, a stale name can't
-abort cloud-init:
+`os.devtools` is a checklist of tools installed at guest-setup time (the
+UI's "Developer" preset reveals it, grouped by category). Because they're
+setup-stage only, a stale package name can't abort cloud-init — and tools
+with no distro package install via upstream installers or third-party
+repos (`provision/devtools.ts`), each block failing soft.
 
-| Group | Contents |
-|---|---|
-| `toolchain` | gcc/g++/clang, make, cmake, ninja, meson, pkg-config, ccache |
-| `python` | python3 + pip, venv, dev headers |
-| `node` | nodejs + npm (distro release; Fedora resolves via versioned provides) |
-| `rust` | rustc, cargo, rustfmt, clippy |
-| `go` | golang toolchain |
-| `containers` | podman, buildah, distrobox |
-| `linters` | shellcheck, yamllint, clang-format/tidy |
-| `debug` | gdb, strace, ltrace, valgrind, perf |
-| `shell` | jq, ripgrep, fd, fzf, tmux, tree, btop |
+| Category | Ids | Notes |
+|---|---|---|
+| Compilers & build | `toolchain` `jvmbuild` `linters` `debug` | gcc/clang/cmake/ninja/meson, maven+gradle, shellcheck/yamllint/clang-format, gdb/strace/valgrind/perf |
+| Languages | `python` `uv` `node` `bun` `deno` `rust` `go` `ruby` `java` `kotlin` `csharp` `php` `elixir` | node goes through **fnm** (user-level LTS); bun/deno/uv/dotnet via upstream installers |
+| CLI & shell | `shell` `tmux` `fzf` `yq` `tree` `gh` | `shell` is the bundle (jq, ripgrep, fd, btop, bat, eza, zoxide, delta, hyperfine, ncdu, xh, direnv, zellij, lazygit, glab); `yq` is the real mikefarah binary |
+| Editors | `neovim` `emacs` `zed` `vscode` `vscodium` `cursor` `devin-desktop` `android-studio` | vscode/vscodium/android-studio are flatpaks; cursor pulls a deb/rpm from its download api; devin-desktop is deb-family only |
+| Containers & VMs | `containers` `docker` `virtmanager` `vagrant` | containers = podman+buildah+podman-compose+distrobox; docker enables the service + docker group; virt-manager pairs with nested virt |
+| Kubernetes | `kubectl` `helm` `k9s` `minikube` `kind` `k3s` | minikube/kind need docker/podman; k3s installs and starts a systemd service |
+| Cloud & IaC | `cloudcli` `terraform` `ansible` | cloudcli = awscli + gcloud sdk + azure cli; terraform/vagrant use the hashicorp repo |
+| Databases | `sqlite` `mysql` `postgres` `redis` `mongodb` `dbeaver` | servers are enabled+started; mongodb uses the upstream repo (fuzzy codename match, latest-LTS fallback); dbeaver is a flatpak |
+| Network & tools | `nettools` `tailscale` `adb` | nmap, iperf3, mosh, rclone, dnsutils, tcpdump, wireguard-tools…; adb = android platform tools |
+| AI | `ollama` | ollama.com installer, systemd service — CPU inference without a GPU |
 
 `os.extraPackages` is the escape hatch for arbitrary distro packages
 (strict name validation — they're expanded unquoted into the package

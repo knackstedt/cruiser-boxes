@@ -11,6 +11,7 @@ import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { guestAgentContext } from "../../vm-core/src/logs";
 import { profileFromSpec, resolvePackages, resolveFlatpaks } from "./packages";
+import { guestDevtoolsScript } from "./devtools";
 import { guestSyncScript, guestSharesScript, type HostSnapshot } from "./sync";
 import { guestKwalletScript, guestGnomeKeyringScript } from "./keyrings";
 
@@ -303,6 +304,8 @@ ${walletSection}
 ${lockSection}
 
 ${appSection}
+
+${guestDevtoolsScript(p)}
 
 ${!gnome || !o.monitorsXmlB64 ? "" : `mkdir -p "$UHOME/.config" && echo '${o.monitorsXmlB64}' | base64 -d > "$UHOME/.config/monitors.xml" && chown -R "$U":"$U" "$UHOME/.config"`}
 

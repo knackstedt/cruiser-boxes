@@ -33,6 +33,9 @@ body { background:#10141a; color:#e8ecf1; font-family:'Cruiser Sans',sans-serif;
 .content { padding:20px; flex:1; overflow-y:scroll; scrollbar-color:#5d6a80 transparent; }
 .h1 { font-size:20px; font-weight:bold; margin-bottom:14px; }
 .h2 { font-size:14px; font-weight:bold; margin:18px 0 8px; color:#8a94a3; }
+/* checklist group headers — sit above an .opts block inside form rows */
+.h3 { font-size:12px; font-weight:bold; color:#5d6775; margin:12px 0 4px 140px; }
+.h3 .opt { margin-left:8px; }
 .vmlist { display:flex; flex-direction:column; gap:8px; }
 .vmlist-head { display:flex; align-items:center; justify-content:space-between;
                margin-bottom:14px; }
@@ -436,6 +439,21 @@ function create(s: CruiserState): string {
                 `<div class="opt${f.usb.includes(d.key) ? " on" : ""}${d.writable ? "" : " dim"}" data-action="usb-toggle" data-key="${esc(d.key)}">${esc(d.label)} <span class="meta">${d.vendorId}:${d.productId}${d.writable ? "" : " · no access"}</span></div>`).join("")}</div>
                <div class="hint" style="margin-left:0">selected devices are passed straight to the guest at boot — "no access" needs a udev rule or group fix</div>`
             : `<div class="meta">no USB devices found</div>`}`;
+    // grouped devtools checklist — categories render in DEVTOOLS order, each
+    // with an all/none toggle chip beside the header
+    const devtoolsSection = f.preset !== "developer" ? ""
+        : [...new Set(DEVTOOLS.map((t) => t.cat))].map((c) => {
+            const items = DEVTOOLS.filter((t) => t.cat === c);
+            const allOn = items.every((t) => f.devtools.includes(t.id));
+            return `<div class="h3">${esc(c)}
+                <span class="opt sm${allOn ? " on" : ""}" data-action="devtools-cat" data-key="${esc(c)}">${allOn ? "none" : "all"}</span></div>
+            <div class="opts wrap" style="margin-left:140px">${items.map((t) =>
+                `<div class="opt${f.devtools.includes(t.id) ? " on" : ""}" data-action="devtools-toggle" data-key="${esc(t.id)}"
+                     title="${esc(t.desc)}">${esc(t.label)} <span class="meta">${esc(t.desc)}</span></div>`).join("")}</div>`;
+        }).join("") + `<div class="hint">installs during guest setup — uncheck what you don't want.
+            distro packages where they exist; upstream installers/repos for the rest
+            (fnm, bun, hashicorp, github, microsoft, mongodb…). "Containers" includes
+            distrobox, which shells into other distros' packages.</div>`;
     const importSection = editing ? "" : `<div class="h2">Import a config</div>
         <div class="row"><div class="lbl">Gist or file</div>
             <input data-field="importRef" value="${esc(f.importRef)}" style="width:340px">
@@ -481,10 +499,7 @@ function create(s: CruiserState): string {
         ${checkRow("Extra fonts", "extraFonts", f.extraFonts, "CJK + MS core fonts on top of the base bundle")}
         ${checkRow("Autologin", "autologin", f.autologin, "boot straight into the desktop — KDE needs this for RDP (krdpserver runs in the user session)")}
         ${optRow("Preset", "preset", f.preset, [["standard", "Standard"], ["developer", "Developer"]], "set-preset")}
-        ${f.preset === "developer" ? `<div class="opts wrap" style="margin:0 0 6px 140px">${DEVTOOLS.map((t) =>
-            `<div class="opt${f.devtools.includes(t.id) ? " on" : ""}" data-action="devtools-toggle" data-key="${esc(t.id)}"
-                 title="${esc(t.desc)}">${esc(t.label)} <span class="meta">${esc(t.desc)}</span></div>`).join("")}</div>
-            <div class="hint">installs the selected tooling during guest setup — uncheck what you don't want. "Containers" includes distrobox, which shells into other distros' packages.</div>` : ""}
+        ${devtoolsSection}
         <div class="hint">The base bundle — desktop, RDP/audio/GPU stack, flatpak + software store, fonts — is always installed.</div>`}`}
         ${syncSection}
         ${usbSection}

@@ -204,9 +204,15 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 - `libraries/provision` — cloudimg+NoCloud, ISO autoinstall, guest-setup driver
   (QGA), monitors.xml generation. `packages.ts` is the single scoped package
   manifest (entries carry `stages: seed|setup`, `desktops`, `distros`, `when`).
-  `os.devtools` groups (DevTool enum, DEVTOOLS catalog) power the "Developer"
-  preset — setup-stage only so a stale name can't abort cloud-init. Fedora's
-  nodejs/npm resolve via provides (versioned nodejsXX pkgs), not `dnf list`;
+  `os.devtools` is a grouped checklist (DevTool enum ids — add-only, they're
+  persisted in vm.json) rendered under the "Developer" preset; DEVTOOLS in
+  packages.ts carries cat/label/desc/flatpak and DEVTOOLS_PRESET is the
+  pre-checked subset. Items install three ways: a `when: dev(id)` manifest
+  entry (distro pkgs), a flatpak id on the catalog entry, or a
+  `devtools.ts` `guestDevtoolsScript` block (upstream installers/repos —
+  each wrapped `( set -e; … ) || echo skipped` so a dead upstream can't
+  sink the provision). Fedora pkg names resolve via provides
+  (`--skip-unavailable`, no `dnf list`);
   `distros.ts` holds the curated release matrix + cloud-image URL resolvers
   (Debian/Fedora resolve filenames by scraping mirror indexes).
   `theme.ts` — the dark/light channel's guest script + applyColorScheme;
