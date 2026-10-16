@@ -21,8 +21,11 @@ cd cruiser-boxes
 bun install
 ```
 
-`@downdraft/*` packages resolve via `file:` to a sibling `../downdraft-engine`
-checkout — clone it next to this repo if you're building from source.
+`@downdraft/*` packages install from npm. To hack on the engine too, clone it
+next to this repo (`../downdraft-engine` or `../downdraft`) — the postinstall
+(`scripts/link-engine.mjs`, `bun run engine:link`) then symlinks the checkout
+into `node_modules` as an override. `CRUISER_ENGINE_DIR` points at a checkout
+anywhere else.
 
 ## Host packages
 

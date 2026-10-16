@@ -14,7 +14,7 @@
     "paths": {
       "xxh3-ts": [
         "./node_modules/@downdraft/engine/dist/libraries/persistence/src/xxh3-ts.d.ts",
-        "../downdraft-engine/packages/engine/libraries/persistence/src/xxh3-ts.d.ts"
+        "./node_modules/@downdraft/engine/libraries/persistence/src/xxh3-ts.d.ts"
       ]
     }
   },

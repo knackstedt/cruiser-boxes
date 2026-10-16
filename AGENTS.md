@@ -5,8 +5,13 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 
 ## Commands
 
-- `bun install` — installs deps; `@downdraft/*` resolve via `file:` to the
-  sibling `../downdraft-engine` checkout. Engine changes land there, not here.
+- `bun install` — installs deps; `@downdraft/*` resolve to the published npm
+  packages, then the postinstall (`scripts/link-engine.mjs`, also runnable as
+  `bun run engine:link`) symlinks them into a sibling engine checkout when one
+  exists: `$CRUISER_ENGINE_DIR`, `../downdraft-engine`, or `../downdraft`.
+  Missing checkout = plain npm packages; removed checkout = the preinstall
+  prunes the dead links so npm versions come back. Engine changes land in the
+  engine repo, not here.
 - `bun run cli -- <args>` — headless CLI (`src/cli.ts`). Also `bun run src/cli.ts`.
 - `bun test tests/` — unit tests. **Always scope to `tests/`** — bare
   `bun test` recurses into `src-tarballs/` (symlinked QEMU/dep sources) and
@@ -51,11 +56,12 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   area (`cruiser vm start x`, `cruiser doctor`), so OVMF_CODE/OVMF_VARS
   resolve system-first then opt's edk2 fds, and {cli} shortcuts expand to
   the appdir launcher.
-- CI does NOT use the sibling `file:` engine checkout —
-  `.github/actions/downdraft-deps` rewrites `@downdraft/*` to the published
-  npm version (`^0.3.0` by default). Engine changes must be **published to
-  npm** before cruiser CI can see them; typecheck fails on unreleased APIs
-  (e.g. `PanelSpec.smoothWheel` existed locally long before npm had it).
+- CI does NOT use the sibling engine checkout — deps are already npm specs;
+  `.github/actions/downdraft-deps` can still pin `@downdraft/*` to a chosen
+  published version (`downdraft-version` input, `^0.5.0` default). Engine
+  changes must be **published to npm** before cruiser CI can see them;
+  typecheck fails on unreleased APIs (e.g. `PanelSpec.smoothWheel` existed
+  locally long before npm had it).
 
 ## Layout
 
@@ -430,7 +436,8 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 - gdm3 ships `# AutomaticLoginEnable = true` as a comment in custom.conf —
   idempotency greps for appended config must anchor to `^Key=` or they
   match the stock comment and never write.
-- DownDraft fixes go to `../downdraft-engine` and are committed there.
+- DownDraft fixes go to the sibling engine checkout (`../downdraft-engine`/
+  `../downdraft`, linked by `scripts/link-engine.mjs`) and are committed there.
 - `downdraft.config.json` sets `"runtime": "node"` — the `draft dev` shell's
   Vite ModuleRunner is ~5× slower under Bun's node:vm (≈2.2s vs ≈11.8s to
   first frame). Game code stays runtime-agnostic; `--runtime bun` overrides.
@@ -493,7 +500,7 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   running guests.
 - Text quality: `PanelSpec.scale` = raster px per display px (supersample;
   1 = hard edges, 2 = smooth-but-soft). `PanelSpec.zoom` (added in
-  ../downdraft-engine) = display px per CSS px — the UI scale knob; pointer
+  the engine repo) = display px per CSS px — the UI scale knob; pointer
   input is converted automatically. Cruiser mounts zoom≈1.25 + scale=1
   (native-res raster, CRUISER_UI_ZOOM/CRUISER_UI_SCALE env knobs). The OSR
   cdylib embeds only DejaVu Sans; real system fonts are bound via
