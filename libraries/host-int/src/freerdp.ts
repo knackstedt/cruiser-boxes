@@ -16,53 +16,49 @@ export interface ViewerLaunch {
     argv: string[];
 }
 
-/** Wait for the guest's forwarded RDP port to answer an X.224 negotiation.
- *  A bare connect is useless here — slirp hostfwd completes the handshake
- *  host-side even when nothing is listening inside the guest, so a cold boot
- *  would launch freerdp into a dead forward. */
-export async function waitRdpPort(port: number, timeoutMs = 90_000): Promise<boolean> {
+/** What the liveness probe learned: `tlsOnly` = server insists on plain
+ *  TLS (negotiated TLS, or RDP_NEG_FAILURE SSL_REQUIRED). */
+export interface RdpProbe { tlsOnly: boolean }
+
+/** Wait for the guest's forwarded RDP port to answer an X.224 negotiation —
+ *  and learn the security layer from the same connection. A bare connect is
+ *  useless here: slirp hostfwd completes the handshake host-side even when
+ *  nothing is listening inside the guest, so a cold boot would launch
+ *  freerdp into a dead forward. Returns null on timeout.
+ *
+ *  The probe offers PROTOCOL_TLS|PROTOCOL_HYBRID so the single response also
+ *  says whether /sec:tls is needed — every connection costs krdpserver a
+ *  session setup + teardown, and that teardown can race the NEXT
+ *  connection's portal start and kill it (client sees LOGOFF_BY_USER), so a
+ *  separate TLS probe would double the churn. */
+export async function probeRdp(port: number, timeoutMs = 90_000): Promise<RdpProbe | null> {
     // TPKT + X.224 CR TPDU (dst-ref, src-ref, class 0) + RDP_NEG_REQ
-    // (type 1, len 8, no protocols) — 19 bytes.
-    const probe = Buffer.from("030000130ee000000000000100080000000000", "hex");
+    // (type 1, len 8, requestedProtocols = TLS(0x1)|HYBRID(0x2)) — 19 bytes.
+    const probe = Buffer.from("030000130ee000000000000100080003000000", "hex");
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-        const ok = await new Promise<boolean>((res) => {
+        const resp = await new Promise<Buffer | null>((res) => {
+            const chunks: Buffer[] = [];
             let settled = false;
-            const done = (v: boolean) => { if (!settled) { settled = true; s.destroy(); res(v); } };
             const s = createConnection({ host: "127.0.0.1", port });
+            const done = (v: Buffer | null) => { if (!settled) { settled = true; s.destroy(); res(v); } };
             s.once("connect", () => s.write(probe));
-            s.once("data", () => done(true));   // any TPKT response = real RDP server
-            s.once("error", () => done(false));
-            s.once("close", () => done(false)); // slirp closes when guest refuses
-            s.setTimeout(1500, () => done(false));
+            s.on("data", (d) => { chunks.push(d); if (Buffer.concat(chunks).length >= 19) done(Buffer.concat(chunks)); });
+            s.once("error", () => done(null));
+            s.once("close", () => done(chunks.length ? Buffer.concat(chunks) : null)); // slirp closes when guest refuses
+            s.setTimeout(1500, () => done(chunks.length ? Buffer.concat(chunks) : null));
         });
-        if (ok) return true;
+        if (resp) {
+            let tlsOnly = false;
+            if (resp.length >= 19) {
+                const selected = resp.readUInt32LE(15);   // NEG_RSP/NEG_FAILURE both carry it
+                tlsOnly = selected === 0x1;               // TLS selected, or SSL_REQUIRED failure
+            }
+            return { tlsOnly };
+        }
         await new Promise((r) => setTimeout(r, 1000));
     }
-    return false;
-}
-
-/** Offer TLS|HYBRID in an X.224 nego request and report whether the server
- *  insists on TLS (selected TLS, or RDP_NEG_FAILURE SSL_REQUIRED). krdp ≥6.5
- *  is TLS-only — forcing /sec:tls skips the doomed CredSSP round-trip. */
-export async function rdpTlsOnly(port: number): Promise<boolean> {
-    // requestedProtocols = PROTOCOL_TLS(0x1)|PROTOCOL_HYBRID(0x2) = 0x3
-    const probe = Buffer.from("030000130ee000000000000100080003000000", "hex");
-    const resp = await new Promise<Buffer | null>((res) => {
-        const chunks: Buffer[] = [];
-        const s = createConnection({ host: "127.0.0.1", port });
-        const done = (v: Buffer | null) => { s.destroy(); res(v); };
-        s.once("connect", () => s.write(probe));
-        s.on("data", (d) => { chunks.push(d); if (Buffer.concat(chunks).length >= 19) done(Buffer.concat(chunks)); });
-        s.once("error", () => done(null));
-        s.once("close", () => done(chunks.length ? Buffer.concat(chunks) : null));
-        s.setTimeout(3000, () => done(null));
-    });
-    if (!resp || resp.length < 19) return false;
-    const type = resp[11];                       // 0x02 NEG_RSP, 0x03 NEG_FAILURE
-    const selected = resp.readUInt32LE(15);
-    if (type === 0x03) return selected === 0x1;        // SSL_REQUIRED_BY_SERVER
-    return selected === 0x1;                     // negotiated plain TLS
+    return null;
 }
 
 /** Build the xfreerdp3 argument list for a VM spec. */

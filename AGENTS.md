@@ -505,7 +505,14 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   `Port` in krdpserverrc are dead keys; auth is `Users`+KWallet or
   `SystemUserEnabled`→PAM against the unix password. krdp still *negotiates*
   NLA with no CredSSP creds (client dies `ERRCONNECT_LOGON_FAILURE`) —
-  `rdpTlsOnly()` probes the nego response and `freerdpArgs` passes `/sec:tls`.
+  `probeRdp()` reads the nego response during the liveness wait and
+  `freerdpArgs` passes `/sec:tls`. KRDP is also fragile to connection
+  churn: a probe/failed attempt's session teardown ("Unable to check file
+  descriptor" → "Closing session") can race the NEXT connection's portal
+  start — xdg-desktop-portal-kde closes the RemoteDesktop session and the
+  client dies `ERRINFO_LOGOFF_BY_USER` (exit 12). So: ONE merged
+  liveness+TLS probe (no separate `rdpTlsOnly`), and `ViewerSession` retries
+  a pre-window exit up to 3 attempts with a 1.5s settle delay.
   KRDP also requires client-side H.264 (RDPGFX AVC420/444): distro freerdp3
   builds `WITH_GFX_H264=OFF` — use `opt/freerdp` (toolchain cmake build,
   ffmpeg backend); `freerdpSupportsH264` gates and `launchFreerdp` throws a
@@ -564,9 +571,10 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   escape-shortcut uninstallers only run in-process; exiting after `open()`
   orphans the kglobalshortcutsrc/khotkeysrc/gsettings edits.
 - QEMU slirp hostfwd completes the TCP handshake host-side even when nothing
-  is listening in the guest — `waitRdpPort` sends an X.224 negotiation probe
+  is listening in the guest — `probeRdp` sends an X.224 negotiation probe
   instead of a bare connect, or a cold boot launches freerdp into a dead
-  forward.
+  forward. The same probe offers TLS|HYBRID and parses the response, so the
+  security layer comes free on the same connection.
 - `kwriteconfig5` can't read (value arg is mandatory — it prints usage, which
   then gets captured as the "previous" value and written back). Read via
   `kreadconfig` first; `kwriteconfig6` reads fine.

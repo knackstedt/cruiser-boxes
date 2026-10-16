@@ -12,7 +12,7 @@ import { vmPaths } from "../../vm-core/src/paths";
 import type { EscapeActionSpec, WindowHandle, WindowMatcher, WmAdapter } from "./types";
 import { detectAdapter } from "./detect";
 import { KWIN_VD_UUID } from "./kde";
-import { launchFreerdp, rdpTlsOnly, waitRdpPort } from "./freerdp";
+import { launchFreerdp, probeRdp, type RdpProbe } from "./freerdp";
 import { launchDdViewer, waitMonitorSock } from "./ddviewer";
 import { run } from "../../sys/src/exec";
 
@@ -45,6 +45,7 @@ export class ViewerSession extends EventEmitter {
     async open(): Promise<void> {
         const dmabuf = this.spec.display.viewer === "dmabuf";
         const wmClass: string | undefined = dmabuf ? undefined : "xfreerdp";
+        let rdpProbe: RdpProbe | null = null;
         if (dmabuf) {
             // no guest-side daemon to wait on — QEMU's QMP socket is enough
             if (!await waitMonitorSock(this.spec))
@@ -52,7 +53,8 @@ export class ViewerSession extends EventEmitter {
         } else {
             const rdpPort = this.spec.network.rdpPort;
             if (!rdpPort) throw new Error(`vm '${this.spec.name}' has no rdpPort`);
-            if (!await waitRdpPort(rdpPort, this.opts.rdpWaitMs))
+            rdpProbe = await probeRdp(rdpPort, this.opts.rdpWaitMs);
+            if (!rdpProbe)
                 throw new Error(`no RDP listener on 127.0.0.1:${rdpPort} — is '${this.spec.name}' running and logged in?`);
         }
 
@@ -130,10 +132,12 @@ export class ViewerSession extends EventEmitter {
                 : undefined;
 
             // Newer krdp (Plasma ≥6.5) negotiates NLA but has no CredSSP
-            // credentials — the connection dies in negotiation. Probe the
-            // security layer up front (TLS-only → /sec:tls immediately), and
-            // still retry a dead attempt-0 with /sec:tls in case the probe lied.
-            const tlsOnly = !dmabuf && await rdpTlsOnly(this.spec.network.rdpPort!).catch(() => false);
+            // credentials — the connection dies in negotiation. The port
+            // probe above already learned the security layer (TLS-only →
+            // /sec:tls immediately); retries below still force /sec:tls in
+            // case the probe lied.
+            const tlsOnly = rdpProbe?.tlsOnly === true;
+            const maxAttempts = dmabuf ? 1 : 3;
             for (let attempt = 0; ; attempt++) {
                 const { child } = dmabuf
                     ? await launchDdViewer(this.spec, ddGeo, ddEscapes)
@@ -167,12 +171,18 @@ export class ViewerSession extends EventEmitter {
                 }
 
                 if (this.child) break;   // viewer alive (window may be unplaced)
-                if (dmabuf || tlsOnly || attempt > 0 || this.window) {
+                if (this.window || attempt + 1 >= maxAttempts) {
                     await this.cleanup();
                     const why = child.exitCode !== null ? `code ${child.exitCode}` : (child.signalCode ?? "signal");
                     throw new Error(`viewer for '${this.spec.name}' exited (${why})${this.window ? " after the window mapped" : " before a window appeared"} — see ${logFile}`);
                 }
-                // fall through: rdp attempt 0 died — retry with /sec:tls
+                // Died before a window appeared: retry with /sec:tls (covers
+                // the krdp CredSSP-fail case AND krdp's teardown race — a
+                // probe/failed attempt's session teardown can kill the next
+                // connection's portal session → LOGOFF_BY_USER exit 12).
+                // Let the guest's teardown settle before reconnecting.
+                this.opts.log?.(`viewer for '${this.spec.name}' exited before mapping (attempt ${attempt + 1}) — retrying`);
+                await new Promise((r) => setTimeout(r, 1500));
             }
         }
 
