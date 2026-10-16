@@ -73,6 +73,8 @@ usage: cruiser <area> <command> [args]
   vm wallpaper <name> [--source PATH|--no-source] [--position POS] [--managed|--no-managed]
                                       [--apply]         guest wallpaper + watermark (POS: top-left|top-right|
                                                         bottom-left|bottom-right|center|off)
+  vm notify <name> [on|off]           guest → host notification forwarding (runs while a
+                                      viewer session is open; CRUISER_NOTIFICATIONS=0 kills)
   vm sync <name>                      list host→guest sync channels (on/off per vm.json)
   vm sync <name> <channel> on|off     toggle a channel (--apply pushes it now if running)
                                       channels: theme accentColor contrast timezone locale
@@ -380,6 +382,21 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
                 else await ensureGuestWallpaper(h, (m) => console.log(m), { force: true });
             }
             console.log(`wallpaper: managed=${w.managed} position=${w.position} source=${w.source ?? "(generated default)"}`);
+            break;
+        }
+        case "notify": {
+            const h = await needVm(args[0]);
+            const v = args[1];
+            if (v === undefined) {
+                const { NotifyBridge } = await import("../libraries/provision/src/notify");
+                console.log(`display.notifications = ${h.spec.display.notifications ? "on" : "off"}` +
+                    `${NotifyBridge.enabled(h.spec) === h.spec.display.notifications ? "" : " (env-killed)"}`);
+                break;
+            }
+            if (v !== "on" && v !== "off") { console.error("expected: vm notify <name> on|off"); usage(); }
+            h.spec.display.notifications = v === "on";
+            await h.saveSpec();
+            console.log(`display.notifications = ${v} — applies at the next viewer session`);
             break;
         }
         case "sync": {

@@ -38,6 +38,8 @@ export interface VmSummary {
     rdpPort?: number;
     provisioned?: string;          // method or undefined
     persist: string;
+    username: string;              // spec.credentials.username
+    hasPassword: boolean;          // spec.credentials.passwordFile set
     description: string;           // spec.description
     origin?: string;               // "gist:<id>" / "file:<path>" when imported/pushed
     shares: ShareRow[];            // spec.shares
@@ -215,6 +217,8 @@ export interface CruiserState {
     shareForm: ShareForm;
     /** Parked auto-snapshot low-space decision (null = none pending). */
     autoSnapPrompt: AutoSnapPrompt | null;
+    /** Detail-screen password reveal — keyed to the VM, cleared on nav. */
+    pwReveal: { vm: string; pw: string } | null;
 }
 
 export interface ShareForm {
@@ -248,6 +252,7 @@ export interface CruiserActions {
     setTermLine(s: string): void;
     setShareForm(p: Partial<ShareForm>): void;
     setAutoSnapPrompt(p: AutoSnapPrompt | null): void;
+    setPwReveal(r: { vm: string; pw: string } | null): void;
 }
 
 export type CruiserStore = CruiserState & CruiserActions;
@@ -294,7 +299,8 @@ export function createCruiserStore() {
         termLine: "",
         shareForm: { hostPath: "", guestPath: "", mode: "mount", direction: "both", open: false },
         autoSnapPrompt: null,
-        setRoute: (route, vm = null) => set({ route, selectedVm: vm, confirm: null, editVm: null }),
+        pwReveal: null,
+        setRoute: (route, vm = null) => set({ route, selectedVm: vm, confirm: null, editVm: null, pwReveal: null }),
         setVms: (vms) => set({ vms }),
         setStatus: (status) => set({ status }),
         setBusy: (busy) => set({ busy }),
@@ -314,6 +320,7 @@ export function createCruiserStore() {
         setTermLine: (termLine) => set({ termLine }),
         setShareForm: (p) => set((s) => ({ shareForm: { ...s.shareForm, ...p } })),
         setAutoSnapPrompt: (autoSnapPrompt) => set({ autoSnapPrompt }),
+        setPwReveal: (pwReveal) => set({ pwReveal }),
         toggleUsb: (key) => set((s) => ({
             create: {
                 ...s.create,

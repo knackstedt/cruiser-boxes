@@ -543,6 +543,15 @@ function vmDetail(s: CruiserState): string {
         vm.hostDiskBytes !== undefined ? `${fmtBytes(vm.hostDiskBytes)} file` : "",
         guestDiskStr(vm) ?? "",
     ].filter(Boolean).join(" · ");
+    // login row — masked until "show" reads the 0600 secrets file into
+    // store.pwReveal; user-select:text makes the revealed text copyable
+    // (selection is globally off otherwise).
+    const pwRev = s.pwReveal?.vm === vm.name ? s.pwReveal.pw : null;
+    const login = !vm.hasPassword
+        ? `${esc(vm.username)} · <span class="meta">no password on record</span>`
+        : pwRev !== null
+            ? `${esc(vm.username)} · <b style="user-select:text">${esc(pwRev)}</b> ${btn("hide", "vm-pw", attr("vm", vm.name), "btn sm dim")}`
+            : `${esc(vm.username)} · •••••••• ${btn("show password", "vm-pw", attr("vm", vm.name), "btn sm dim")}`;
     return `<div class="crumb" data-action="nav" data-route="home">‹ VMs</div>
         <div class="h1">${esc(vm.name)} <span class="pill ${pillClass(vm.state)}">${esc(vm.state)}</span></div>
         ${vm.description ? `<div class="meta" style="margin:-8px 0 12px">${esc(vm.description)}</div>` : ""}
@@ -555,6 +564,7 @@ function vmDetail(s: CruiserState): string {
             ${diskDetail ? `<div class="k">disk usage</div><div>${esc(diskDetail)}</div>` : ""}
             <div class="k">gpu / head</div><div>${esc(vm.gpuMode)} / ${esc(vm.headMode)}</div>
             <div class="k">ports</div><div>ssh 127.0.0.1:${vm.sshPort ?? "–"} · rdp 127.0.0.1:${vm.rdpPort ?? "–"}</div>
+            <div class="k">login</div><div>${login}</div>
             <div class="k">provisioned</div><div>${esc(vm.provisioned ?? "—")}</div>
             <div class="k">persist</div><div>${esc(vm.persist)}</div>
         </div>

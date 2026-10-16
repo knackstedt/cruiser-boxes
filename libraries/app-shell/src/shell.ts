@@ -246,6 +246,7 @@ export class CruiserShell {
         this.host.onAction("vm-kill", (d) => { if (d.vm && this.armed(`vm-kill:${d.vm}`)) svc.kill(d.vm); });
         this.host.onAction("vm-rm", (d) => { if (d.vm && this.armed(`vm-rm:${d.vm}`)) svc.remove(d.vm); });
         this.host.onAction("vm-view", (d) => { if (d.vm) svc.view(d.vm); });
+        this.host.onAction("vm-pw", (d) => { if (d.vm) void svc.togglePassword(d.vm); });
         this.host.onAction("vm-term", (d) => { if (d.vm) void svc.term(d.vm); });
         this.host.onAction("vm-term-reconnect", (d) => { if (d.vm) this.termMgr.reconnect(d.vm); });
         this.host.onAction("vm-term-host", (d) => { if (d.vm) void svc.termHost(d.vm); });

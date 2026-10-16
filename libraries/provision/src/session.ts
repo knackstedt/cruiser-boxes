@@ -10,6 +10,7 @@ import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import { ViewerSession, type ViewerSessionOpts } from "../../host-int/src/session";
 import { SessionSyncs } from "./sync";
 import { FileSyncs } from "./filesync";
+import { NotifyBridge } from "./notify";
 
 export type VmSessionOpts = ViewerSessionOpts;
 
@@ -24,9 +25,10 @@ export interface VmSession {
 /**
  * Open the VM's viewer and start everything that rides the session:
  * SessionSyncs (portal/timezone live channels + hash-gated one-shots +
- * optional agent forward), FileSyncs (copy-mode shares), and the
- * managed-wallpaper pass (fire-and-forget — a dead agent or slow jimp
- * decode mustn't delay the viewer).
+ * optional agent forward), FileSyncs (copy-mode shares), the NotifyBridge
+ * (guest → host notifications), and the managed-wallpaper pass
+ * (fire-and-forget — a dead agent or slow jimp decode mustn't delay the
+ * viewer).
  */
 export async function openVmSession(h: VmHandle, opts: VmSessionOpts = {}): Promise<VmSession> {
     const viewer = new ViewerSession(h.spec, opts);
@@ -36,6 +38,8 @@ export async function openVmSession(h: VmHandle, opts: VmSessionOpts = {}): Prom
     syncs.start();
     const filesyncs = new FileSyncs(h, opts.log);
     filesyncs.start();
+    const notify = NotifyBridge.enabled(h.spec) ? new NotifyBridge(h, opts.log) : null;
+    void notify?.start().catch(() => {});
 
     let disposed = false;
     const disposeSyncs = () => {
@@ -43,6 +47,7 @@ export async function openVmSession(h: VmHandle, opts: VmSessionOpts = {}): Prom
         disposed = true;
         syncs.dispose();
         filesyncs.dispose();
+        notify?.dispose();
     };
     viewer.on("closed", disposeSyncs);
 

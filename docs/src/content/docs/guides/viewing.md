@@ -37,7 +37,8 @@ freerdp into a dead forward.
 Related spec fields: `display.monitors` (`"all"` = `/multimon`, else a list
 of monitor names for `/monitor:`), `display.sticky`,
 `display.virtualDesktop`, `display.windowSize`, `display.dynamicResolution`,
-`display.sound`, `display.microphone`, `display.clipboard`.
+`display.sound`, `display.microphone`, `display.clipboard`,
+`display.notifications`.
 
 ## Window placement (WmAdapter)
 
@@ -157,6 +158,20 @@ preference into the guest live:
 The same hint is baked during provisioning so first login is already
 themed. Host "no preference" is never pushed; `CRUISER_THEME_SYNC=0`
 disables both bake and sync.
+
+## Guest notifications → host
+
+With `display.notifications` on (the default), the session also forwards
+guest popups to the host: a held ssh runs `busctl --user monitor` inside
+the guest and snoops `org.freedesktop.Notifications` — an unprivileged
+monitor peer on the user bus, so nothing is installed in the guest and
+in-guest popups still show. Host side they arrive via `notify-send` under
+the app name `<vm> · <guest app>`; the guest daemon's id replies are
+tracked so `replaces_id` updates the same host popup and
+`NotificationClosed` dismisses it. Actions can't be forwarded — a host
+click can't reach back into the guest — so clickable popups stay
+in-guest-only. `cruiser vm notify <name> on|off` toggles it (applies at
+the next viewer session); `CRUISER_NOTIFICATIONS=0` kills it outright.
 
 ## Managed wallpaper + shortcuts cheat sheet
 

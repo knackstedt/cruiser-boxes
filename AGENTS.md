@@ -344,9 +344,24 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   tune the intervals.
   `session.ts` — `openVmSession(h, opts)`: the shared session kit both
   surfaces call (UI's ensureViewer + cli's start/view) — opens the
-  ViewerSession, starts SessionSyncs + FileSyncs bound to the "closed" hook,
-  and fires the managed-wallpaper pass. `disposeSyncs()` drops the engines
-  without closing the window.
+  ViewerSession, starts SessionSyncs + FileSyncs + NotifyBridge bound to
+  the "closed" hook, and fires the managed-wallpaper pass.
+  `disposeSyncs()` drops the engines without closing the window.
+  `notify.ts` (`NotifyBridge`, gated on `display.notifications` +
+  `CRUISER_NOTIFICATIONS`) — guest → host notifications: a held ssh runs
+  `busctl --user monitor --json=short` in the guest, snooping
+  org.freedesktop.Notifications (unprivileged monitor peer on the user bus
+  — nothing installed in the guest, in-guest popups still show). Three
+  matches: method_call (Notify), method_return from the daemon (carries
+  the assigned id — an app's replaces_id refers to it, so the call's
+  sender:cookie → reply's destination:reply_cookie correlation is what
+  maps guest ids to the host ids `notify-send -p` prints), and
+  NotificationClosed signals (→ `busctl --user call` CloseNotification on
+  the host). The remote exits 0 fast on missing busctl so it doesn't
+  respawn-loop, and waits on /run/user/$UID/bus for pre-login. Actions
+  aren't forwardable (a host click can't reach back). `vm notify <name>
+  on|off` toggles; id maps reset per respawn since the daemon's ids are
+  per-boot.
   `stage.ts` — shared QGA-writeFile/ssh-scp guest staging extracted from
   wallpaper (pushFileToGuest).
   `wallpaper.ts` — managed guest wallpaper: jimp composite (lazy `importJimp`

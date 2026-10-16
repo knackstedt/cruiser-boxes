@@ -201,6 +201,7 @@ export class CruiserService {
             diskGiB: s.disk.sizeGiB, nestedVirt: s.resources.nestedVirt,
             sshPort: s.network.sshPort, rdpPort: s.network.rdpPort,
             provisioned: s.provisioned.method, persist: s.persist,
+            username: s.credentials.username, hasPassword: !!s.credentials.passwordFile,
             description: s.description,
             origin: s.origin ? `${s.origin.kind}:${s.origin.id ?? s.origin.url ?? ""}` : undefined,
             shares: s.shares.map((sh, idx) => ({
@@ -606,6 +607,18 @@ export class CruiserService {
     /** Current spec for a registered VM (null when unknown). */
     specOf(name: string): VmSpec | null {
         return this.handles.get(name)?.spec ?? null;
+    }
+
+    /** Detail-screen "show/hide" — reads the 0600 secrets file on demand;
+     *  the plaintext never rides along in VmSummary's 3s poll. */
+    async togglePassword(name: string): Promise<void> {
+        const st = this.store.getState();
+        if (st.pwReveal?.vm === name) { st.setPwReveal(null); return; }
+        const h = this.handles.get(name); if (!h) return;
+        const { rdpPassword } = await import("../../host-int/src/freerdp");
+        const pw = await rdpPassword(h.spec);
+        if (!pw) { st.setStatus(`${name}: no password on record`); return; }
+        st.setPwReveal({ vm: name, pw });
     }
 
     /**

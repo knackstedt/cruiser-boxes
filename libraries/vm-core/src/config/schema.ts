@@ -263,6 +263,12 @@ export const VmSpec = z.object({
         /** guest clipboard sync: freerdp +clipboard on the rdp viewer,
          *  qemu-vdagent ↔ viewer-dd D-Bus bridge on the dmabuf viewer. */
         clipboard: z.boolean().default(true),
+        /** guest → host notification forwarding: a busctl --user monitor over
+         *  the ssh forward snoops org.freedesktop.Notifications (session-bus
+         *  eavesdrop needs no guest-side install); host pops them via
+         *  notify-send. Session-lifetime — runs while a viewer session is
+         *  open, like the filesync/agent bridges. */
+        notifications: z.boolean().default(true),
         /** freerdp -grab-keyboard / viewer-dd XGrabKeyboard — true gives the
          *  guest all keys (alt-tab included), false lets host shortcuts win
          *  (required for escape shortcuts). */
