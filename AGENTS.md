@@ -148,6 +148,11 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   window is minifb — the toolkit sets neither WM_CLASS nor _NET_WM_PID
   (viewer-dd sets both via FFI after create), so the session matches the
   anchored title regex `^cruiser:<vm>$`, not pid.
+  headMode/virtualDesktop are LIVE spec fields: saveVm pushes an edited
+  display slice into a running session via `applyDisplaySpec` — re-installs
+  the VD rule (the sweep drops the stale target) and re-runs placeWindow,
+  so a VD switch moves the open viewer immediately (kde-wayland can only
+  re-rule — rules bind at next map; its moveToDesktop is a stub).
   viewer-dd (dmabuf): QEMU's @dbus-display keeps effectively ONE client
   channel — the enumeration conn dies after RegisterListener and extra
   add_client channels EPIPE at the p2p handshake, so all per-console

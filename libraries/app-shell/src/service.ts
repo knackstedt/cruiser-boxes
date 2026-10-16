@@ -701,6 +701,12 @@ export class CruiserService {
             if (f.diskGiB !== h.spec.disk.sizeGiB) await h.resizeDisk(f.diskGiB);
             h.spec = spec;
             await h.saveSpec();
+            // headMode/virtualDesktop are live fields — a running viewer
+            // re-places its window + retargets the KWin map rule right now.
+            if (prev.display.headMode !== spec.display.headMode
+                || prev.display.virtualDesktop !== spec.display.virtualDesktop)
+                this.viewers.get(name)?.viewer.applyDisplaySpec(spec.display)
+                    .catch((e) => this.store.getState().setStatus(`${name} viewer placement failed: ${(e as Error).message}`));
             st.resetCreate();
             st.setRoute("vm", name);
             return h.isRunning() ? bootRelevantChanges(prev, spec) : [];

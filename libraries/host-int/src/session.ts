@@ -32,6 +32,10 @@ export class ViewerSession extends EventEmitter {
     private window: WindowHandle | null = null;
     private uninstallers: (() => Promise<void>)[] = [];
     private cleanupDone: Promise<void> = Promise.resolve();
+    /** dmabuf monitor-span geometry from open() — kept so a live re-place
+     *  (applyDisplaySpec) knows the window self-spans and skips the
+     *  moveToMonitor hint. */
+    private ddGeo: { offsets?: string; rects?: string } = {};
 
     constructor(spec: VmSpec, opts: ViewerSessionOpts = {}) {
         super();
@@ -80,6 +84,7 @@ export class ViewerSession extends EventEmitter {
             if (picked.length && d.headMode !== "windowed")
                 ddGeo.rects = picked.map((m) => `${m.x},${m.y},${m.w},${m.h}`).join(" ");
         }
+        this.ddGeo = ddGeo;
 
         // Adopt a live viewer for this VM when its window exists — killing a
         // healthy console because a different session owns it reads as a
@@ -100,24 +105,7 @@ export class ViewerSession extends EventEmitter {
             // window flashes on the current desktop before the post-map
             // moveToDesktop drags it over (still kept below as the fallback
             // for adapters without a rules api — and for adopted windows).
-            if (this.adapter.installWindowRule && d.headMode === "virtual-desktop") {
-                const vd = (await this.adapter.desktops().catch(() => [])).find((x) => x.index === d.virtualDesktop);
-                // kwinrulesrc's `desktops` only accepts a VD UUID — the x11
-                // desktops() fallback reports a bare EWMH index as id, which
-                // would write a rule KWin can never satisfy.
-                if (vd?.id && KWIN_VD_UUID.test(vd.id)) {
-                    const un = await this.adapter.installWindowRule({
-                        titleRegex: `^cruiser:${escapeRegex(this.spec.name)}$`,
-                        wmClass: dmabuf ? undefined : "xfreerdp",
-                        desktopId: vd.id,
-                        description: `cruiser: ${this.spec.name} → desktop ${vd.index}${vd.name ? ` (${vd.name})` : ""}`,
-                    }).catch(() => null);
-                    if (un) this.uninstallers.push(un);
-                    else this.opts.log?.(`window rule for '${this.spec.name}' failed to install — window will be moved post-map`);
-                } else {
-                    this.opts.log?.(`no VD uuid for desktop ${d.virtualDesktop} — post-map placement only`);
-                }
-            }
+            await this.installVdRule();
 
             // viewer-dd gets the escape list ({vm}/{cli} expanded) PLUS the
             // host's own VD-switch bindings mirrored in — while its keyboard
@@ -188,27 +176,7 @@ export class ViewerSession extends EventEmitter {
 
         // Both viewers are single-window now — freerdp spans monitors via
         // /multimon, viewer-dd via --rects + _NET_WM_FULLSCREEN_MONITORS.
-        if (this.window && this.adapter.caps.placeWindows) {
-            if (d.headMode === "windowed") {
-                // A detached freerdp lands on whatever desktop the WM assigns —
-                // pull it onto the user's current desktop and raise it so it
-                // is actually visible.
-                const cur = (await this.adapter.desktops().catch(() => [])).find((x) => x.current)?.index;
-                if (cur !== undefined) await this.adapter.moveToDesktop(this.window, cur).catch(() => {});
-                await this.adapter.focus(this.window).catch(() => {});
-            } else {
-                if (d.headMode === "virtual-desktop")
-                    await this.adapter.moveToDesktop(this.window, d.virtualDesktop).catch(() => {});
-                if (d.headMode === "fullscreen-monitor" && d.sticky)
-                    await this.adapter.moveToDesktop(this.window, "all").catch(() => {});
-                // dmabuf + --rects self-places over the monitor union — the
-                // moveToMonitor hint only remains for freerdp and for a
-                // dmabuf session that lacked monitor info to span with.
-                if (d.headMode === "fullscreen-monitor" && d.monitors !== "all" && d.monitors[0] && !(dmabuf && ddGeo.rects))
-                    await this.adapter.moveToMonitor(this.window, d.monitors[0]).catch(() => {});
-                await this.adapter.setFullscreen(this.window, true).catch(() => {});
-            }
-        }
+        await this.placeWindow();
 
         // Escape shortcuts via the WM's binding API. Freerdp installs the
         // whole list (its +grab-keyboard only shadows the bindings while it
@@ -230,6 +198,71 @@ export class ViewerSession extends EventEmitter {
                 if (un) this.uninstallers.push(un);
             }
         }
+    }
+
+    /** KWin map-time rule for virtual-desktop mode — lands the viewer on
+     *  its target desktop before it is ever shown (post-map moveToDesktop
+     *  drags a visible window over; kde-wayland has no post-map path at
+     *  all). The installer sweeps same-window cruiser-* groups, so a
+     *  re-install after a VD edit replaces the stale target. */
+    private async installVdRule(): Promise<void> {
+        const d = this.spec.display;
+        if (!this.adapter.installWindowRule || d.headMode !== "virtual-desktop") return;
+        const vd = (await this.adapter.desktops().catch(() => [])).find((x) => x.index === d.virtualDesktop);
+        // kwinrulesrc's `desktops` only accepts a VD UUID — the x11
+        // desktops() fallback reports a bare EWMH index as id, which
+        // would write a rule KWin can never satisfy.
+        if (vd?.id && KWIN_VD_UUID.test(vd.id)) {
+            const un = await this.adapter.installWindowRule({
+                titleRegex: `^cruiser:${escapeRegex(this.spec.name)}$`,
+                wmClass: d.viewer === "dmabuf" ? undefined : "xfreerdp",
+                desktopId: vd.id,
+                description: `cruiser: ${this.spec.name} → desktop ${vd.index}${vd.name ? ` (${vd.name})` : ""}`,
+            }).catch(() => null);
+            if (un) this.uninstallers.push(un);
+            else this.opts.log?.(`window rule for '${this.spec.name}' failed to install — window will be moved post-map`);
+        } else {
+            this.opts.log?.(`no VD uuid for desktop ${d.virtualDesktop} — post-map placement only`);
+        }
+    }
+
+    /** Post-map placement per headMode. Runs once at open() and again from
+     *  applyDisplaySpec when an edit-form save changes the live display
+     *  fields under a running viewer. */
+    private async placeWindow(): Promise<void> {
+        const d = this.spec.display;
+        const dmabuf = d.viewer === "dmabuf";
+        if (!this.window || !this.adapter.caps.placeWindows) return;
+        if (d.headMode === "windowed") {
+            // A detached freerdp lands on whatever desktop the WM assigns —
+            // pull it onto the user's current desktop and raise it so it
+            // is actually visible. Drop fullscreen first — a live session
+            // re-placed from a fullscreen mode keeps the state otherwise.
+            await this.adapter.setFullscreen(this.window, false).catch(() => {});
+            const cur = (await this.adapter.desktops().catch(() => [])).find((x) => x.current)?.index;
+            if (cur !== undefined) await this.adapter.moveToDesktop(this.window, cur).catch(() => {});
+            await this.adapter.focus(this.window).catch(() => {});
+            return;
+        }
+        if (d.headMode === "virtual-desktop")
+            await this.adapter.moveToDesktop(this.window, d.virtualDesktop).catch(() => {});
+        if (d.headMode === "fullscreen-monitor" && d.sticky)
+            await this.adapter.moveToDesktop(this.window, "all").catch(() => {});
+        // dmabuf + --rects self-places over the monitor union — the
+        // moveToMonitor hint only remains for freerdp and for a
+        // dmabuf session that lacked monitor info to span with.
+        if (d.headMode === "fullscreen-monitor" && d.monitors !== "all" && d.monitors[0] && !(dmabuf && this.ddGeo.rects))
+            await this.adapter.moveToMonitor(this.window, d.monitors[0]).catch(() => {});
+        await this.adapter.setFullscreen(this.window, true).catch(() => {});
+    }
+
+    /** Apply an edited display spec live — headMode/virtualDesktop are
+     *  live fields, so a save while this viewer is up re-targets the KWin
+     *  map rule and re-places the window instead of waiting for relaunch. */
+    async applyDisplaySpec(d: VmSpec["display"]): Promise<void> {
+        this.spec.display = { ...d };
+        await this.installVdRule();
+        await this.placeWindow();
     }
 
     /** Merge spec escapeShortcuts with the host's own VD-switch bindings
