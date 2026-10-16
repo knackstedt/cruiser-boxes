@@ -94,7 +94,11 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   virtiofsd (vm.ts): shares get one `--socket-path` daemon each, spawned
   DETACHED like QEMU's -daemonize — a non-detached daemon dies with the
   launcher's process group and leaves every guest mount I/O-hung in
-  D-state. virtiofsd writes `<sock>.pid` itself; `killVfsd` reaps both
+  D-state. virtiofsd writes `<sock>.pid` itself — MULTI-LINE (supervisor
+  pid on line 1, sandbox internals after): `Number(wholeFile)` is NaN and
+  once made vfsdAlive/killVfsd read every live daemon as dead → an
+  endless 20s respawn loop of children that die on the pidfile flock
+  (EAGAIN). Always read line 1 via vfsdPid(). `killVfsd` reaps both
   children and pidfile-discovered strays (also on start(), before
   spawning — a crashed launcher leaves orphans, and QEMU's vhost-user
   device does its one handshake at machine init so a stale listener

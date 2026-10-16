@@ -299,6 +299,16 @@ export class VmHandle {
         if (this.vfsdTimer) { clearInterval(this.vfsdTimer); this.vfsdTimer = null; }
     }
 
+    /** virtiofsd's <socket>.pid is MULTI-LINE (supervisor pid, then sandbox
+     *  internals) — parse the first line only; Number() on the whole file
+     *  is NaN and reads as "dead forever". */
+    private vfsdPid(socket: string): number | null {
+        try {
+            const pid = Number(readFileSync(`${socket}.pid`, "utf-8").split("\n", 1)[0]!.trim());
+            return pid || null;
+        } catch { return null; }
+    }
+
     /** Kill every virtiofsd for this VM — both children this handle spawned
      *  and daemons only reachable via their pidfiles (orphans of a dead
      *  launcher, strays of a failed start). Without QEMU they're orphans
@@ -307,11 +317,12 @@ export class VmHandle {
         this.vfsChildren.forEach((c) => c.kill());
         this.vfsChildren = [];
         this.vfsdTargets().forEach((v) => {
+            const pid = this.vfsdPid(v.socket);
+            if (!pid) return;
             try {
-                const pid = Number(readFileSync(`${v.socket}.pid`, "utf-8").trim());
-                if (pid && readFileSync(`/proc/${pid}/comm`, "utf-8").trim() === "virtiofsd")
+                if (readFileSync(`/proc/${pid}/comm`, "utf-8").trim() === "virtiofsd")
                     try { process.kill(pid, "SIGTERM"); } catch { /* gone */ }
-            } catch { /* no pidfile */ }
+            } catch { /* gone */ }
         });
     }
 
@@ -344,10 +355,10 @@ export class VmHandle {
     /** virtiofsd writes <socket>.pid itself — live pid + comm match means
      *  the backend is up (pid reuse can't fake the comm). */
     private vfsdAlive(socket: string): boolean {
-        try {
-            const pid = Number(readFileSync(`${socket}.pid`, "utf-8").trim());
-            return !!pid && readFileSync(`/proc/${pid}/comm`, "utf-8").trim() === "virtiofsd";
-        } catch { return false; }
+        const pid = this.vfsdPid(socket);
+        if (!pid) return false;
+        try { return readFileSync(`/proc/${pid}/comm`, "utf-8").trim() === "virtiofsd"; }
+        catch { return false; }
     }
 
     /** Respawn dead virtiofsd while this QEMU lives. QEMU can't re-pair a
