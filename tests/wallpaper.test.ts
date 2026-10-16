@@ -27,6 +27,8 @@ describe("watermark text", () => {
         expect(escapeActionLabel("host-desktop:2")).toBe("jump to host desktop 2");
         expect(escapeActionLabel("desktop-cycle-left")).toBe("cycle host desktops left");
         expect(escapeActionLabel("ungrab")).toBe("release viewer grab");
+        expect(escapeActionLabel("abort")).toBe("release grabs + minimize viewer");
+        expect(escapeActionLabel("kwin:Switch to Desktop 2")).toBe("host: Switch to Desktop 2");
         expect(escapeActionLabel("command:{cli} vm kill {vm}", "testvm")).toBe("run: cruiser vm kill testvm");
         expect(escapeActionLabel("weird")).toBe("weird");
     });

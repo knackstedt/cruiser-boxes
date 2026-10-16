@@ -100,6 +100,8 @@ export const EscapeAction = z.enum([
     "desktop-cycle-left",
     "desktop-cycle-right",
     "ungrab",              // release viewer grab (freerdp ctrl+alt style)
+    "abort",               // release grab + minimize all viewer heads
+    "kwin",                // kwin:<action name> — invoke a named KWin global shortcut
     "none",
 ]);
 export type EscapeAction = z.infer<typeof EscapeAction>;
@@ -234,6 +236,13 @@ export const VmSpec = z.object({
             { keys: "ctrl+super+f2", action: "host-desktop:2" },
             { keys: "ctrl+super+f3", action: "host-desktop:3" },
             { keys: "ctrl+super+f4", action: "host-desktop:4" },
+            { keys: "ctrl+super+f5", action: "command:{cli} vm reboot {vm}" },
+            { keys: "ctrl+super+f6", action: "command:{cli} vm suspend {vm}" },
+            { keys: "ctrl+super+f7", action: "command:{cli} vm resume {vm}" },
+            { keys: "ctrl+super+f8", action: "command:{cli} vm stop {vm}" },
+            // the panic combo: release every grab and minimize the viewer —
+            // works even while the keyboard is grabbed (viewer-side dispatch)
+            { keys: "ctrl+super+escape", action: "abort" },
             { keys: "ctrl+super+end", action: "command:{cli} vm kill {vm}" },
         ]),
         dynamicResolution: z.boolean().default(true),

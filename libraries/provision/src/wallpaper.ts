@@ -55,6 +55,8 @@ export function escapeActionLabel(action: string, vmName = "{vm}"): string {
         case "desktop-cycle-left": return "cycle host desktops left";
         case "desktop-cycle-right": return "cycle host desktops right";
         case "ungrab": return "release viewer grab";
+        case "abort": return "release grabs + minimize viewer";
+        case "kwin": return `host: ${arg ?? ""}`;
         case "none": return "no action";
         case "command": return `run: ${(arg ?? "").replaceAll("{vm}", vmName).replaceAll("{cli}", "cruiser")}`;
         default: return action;

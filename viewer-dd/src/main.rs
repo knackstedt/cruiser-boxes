@@ -282,37 +282,26 @@ fn clipboard_worker(iconn: std::sync::Arc<zbus::blocking::Connection>,
     }
 }
 
-// ── input forwarding: minifb events -> D-Bus Display1.Keyboard/Mouse ──
+// ── input forwarding: raw X11 keycodes -> D-Bus Display1.Keyboard/Mouse ──
 // QEMU key numbers are XT scancodes (qnum table); mouse btns: 0=L,1=M,2=R.
 enum In { Move(u32, u32), Btn(u8, bool), Key(u32, bool) }
 
-fn qnum_for(k: minifb::Key) -> Option<u32> {
-    use minifb::Key::*;
-    Some(match k {
-        A => 0x1e, B => 0x30, C => 0x2e, D => 0x20, E => 0x12, F => 0x21,
-        G => 0x22, H => 0x23, I => 0x17, J => 0x24, K => 0x25, L => 0x26,
-        M => 0x32, N => 0x31, O => 0x18, P => 0x19, Q => 0x10, R => 0x13,
-        S => 0x1f, T => 0x14, U => 0x16, V => 0x2f, W => 0x11, X => 0x2d,
-        Y => 0x15, Z => 0x2c,
-        Key0 => 0x0b, Key1 => 0x02, Key2 => 0x03, Key3 => 0x04, Key4 => 0x05,
-        Key5 => 0x06, Key6 => 0x07, Key7 => 0x08, Key8 => 0x09, Key9 => 0x0a,
-        Minus => 0x0c, Equal => 0x0d, Backspace => 0x0e, Tab => 0x0f,
-        LeftBracket => 0x1a, RightBracket => 0x1b, Enter => 0x1c, LeftCtrl => 0x1d,
-        Semicolon => 0x27, Apostrophe => 0x28, LeftShift => 0x2a, Backslash => 0x2b,
-        Comma => 0x33, Period => 0x34, Slash => 0x35, RightShift => 0x36,
-        LeftAlt => 0x38, Space => 0x39, CapsLock => 0x3a,
-        F1 => 0x3b, F2 => 0x3c, F3 => 0x3d, F4 => 0x3e, F5 => 0x3f, F6 => 0x40,
-        F7 => 0x41, F8 => 0x42, F9 => 0x43, F10 => 0x44, F11 => 0x57, F12 => 0x58,
-        Escape => 0x01,
-        RightCtrl => 0x9d, RightAlt => 0xb8, Home => 0xc7, Up => 0xc8, PageUp => 0xc9,
-        Left => 0xcb, Right => 0xcd, End => 0xcf, Down => 0xd0, PageDown => 0xd1,
-        Insert => 0xd2, Delete => 0xd3, LeftSuper => 0xdb, RightSuper => 0xdc,
-        NumLock => 0x45, ScrollLock => 0x46,
-        NumPad7 => 0x47, NumPad8 => 0x48, NumPad9 => 0x49, NumPadMinus => 0x4a,
-        NumPad4 => 0x4b, NumPad5 => 0x4c, NumPad6 => 0x4d, NumPadPlus => 0x4e,
-        NumPad1 => 0x4f, NumPad2 => 0x50, NumPad3 => 0x51, NumPad0 => 0x52,
-        NumPadDot => 0x53, NumPadAsterisk => 0x37, NumPadEnter => 0x9c,
-        NumPadSlash => 0xb5,
+/// X keycode → QEMU qnum. X keycodes are evdev codes +8, and evdev codes
+/// ARE the XT set-1 scancode for the base block — so `~/`-tilde and every
+/// other key maps positionally with no keysym table in the way. Extended
+/// keys (evdev ≥ 96) map back through the e0 qnum encodings — the inverse
+/// of xkey_for. Layout-independent by construction: QEMU wants physical
+/// positions, which is exactly what keycodes describe.
+fn qnum_for_keycode(xkey: u32) -> Option<u32> {
+    let ev = xkey.checked_sub(8)?;
+    Some(match ev {
+        96 => 0x9c, 97 => 0x9d, 98 => 0xb5, 99 => 0xb7, 100 => 0xb8,
+        102 => 0xc7, 103 => 0xc8, 104 => 0xc9, 105 => 0xcb, 106 => 0xcd,
+        107 => 0xcf, 108 => 0xd0, 109 => 0xd1, 110 => 0xd2, 111 => 0xd3,
+        113 => 0xa0, 114 => 0xae, 115 => 0xb0, 119 => 0xc5,
+        125 => 0xdb, 126 => 0xdc, 127 => 0xdd,
+        163 => 0x99, 164 => 0xa2, 165 => 0x90, 166 => 0xa4,
+        _ if ev > 0 && ev < 0x80 => ev,
         _ => return None,
     })
 }
@@ -338,13 +327,11 @@ static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 fn ts() -> u64 { T0.get_or_init(std::time::Instant::now).elapsed().as_secs() }
 
 #[derive(Clone)]
-enum EscAct { Desktop(u32), Cycle(i8), Ungrab, Noop, Cmd(String) }
+enum EscAct { Desktop(u32), Cycle(i8), Kwin(String), Ungrab, Abort, Noop, Cmd(String) }
 
 #[derive(Clone)]
 struct EscCombo {
-    mods: u8,   /* 1=ctrl 2=alt 4=shift 8=meta */
-    trig: u32,  /* qnum for the KbCb match path */
-    xkey: u32,  /* X keycode for the root passive-grab match path */
+    xkey: u32,  /* X keycode — the combo's trigger (grab + intercept match) */
     xmods: u32, /* X modifier mask (Shift|Control|Mod1|Mod4) */
     act: EscAct,
 }
@@ -354,10 +341,13 @@ struct EscCombo {
 /// same table qnum_for uses.
 fn xkey_for(qnum: u32) -> Option<u32> {
     let ev = if qnum < 0x80 { qnum } else { match qnum {
-        0x9c => 96, 0x9d => 97, 0xb5 => 98, 0xb8 => 100, 0xc7 => 102,
-        0xc8 => 103, 0xc9 => 104, 0xcb => 105, 0xcd => 106, 0xcf => 107,
-        0xd0 => 108, 0xd1 => 109, 0xd2 => 110, 0xd3 => 111, 0xdb => 125,
-        0xdc => 126, _ => return None,
+        0x9c => 96, 0x9d => 97, 0xb5 => 98, 0xb7 => 99, 0xb8 => 100,
+        0xc7 => 102, 0xc8 => 103, 0xc9 => 104, 0xcb => 105, 0xcd => 106,
+        0xcf => 107, 0xd0 => 108, 0xd1 => 109, 0xd2 => 110, 0xd3 => 111,
+        0xa0 => 113, 0xae => 114, 0xb0 => 115, 0xc5 => 119,
+        0xdb => 125, 0xdc => 126, 0xdd => 127,
+        0x99 => 163, 0xa2 => 164, 0x90 => 165, 0xa4 => 166,
+        _ => return None,
     }};
     Some(ev + 8)
 }
@@ -376,9 +366,20 @@ fn xmods_of(m: u8) -> u32 {
 struct EscState {
     enabled: bool,
     combos: Vec<EscCombo>,
-    grab_active: std::sync::atomic::AtomicBool,
-    ungrab_req: std::sync::atomic::AtomicBool,
+    /// Generation counters (fetch_add to request). Each head tracks the
+    /// last generation it has seen — a plain swap()-cleared flag would be
+    /// eaten by the first head to poll it, stranding the rest.
+    ungrab_gen: std::sync::atomic::AtomicU64,
+    /// abort: release grabs + minimize EVERY head.
+    abort_gen: std::sync::atomic::AtomicU64,
 }
+
+/// SIGUSR1 → abort. Signal handlers can only touch a static; the first
+/// window loop to notice bumps abort_gen, which propagates to every head.
+/// Needs no keyboard input — survives a wedged grab (`pkill -USR1 -x
+/// viewer-dd`), as does a VT switch (Ctrl+Alt+F3 runs below the grab).
+static SIG_ABORT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+extern "C" fn sig_abort(_: i32) { SIG_ABORT.store(true, Ordering::Relaxed); }
 
 /// Named key → QEMU XT scancode, for the escape-combo grammar (same
 /// vocabulary kdeKeys maps for kglobalshortcutsrc).
@@ -429,12 +430,14 @@ fn parse_escape(spec: &str) -> Option<EscCombo> {
         "host-desktop" => EscAct::Desktop(arg?.parse().ok()?),
         "desktop-cycle-left" => EscAct::Cycle(-1),
         "desktop-cycle-right" => EscAct::Cycle(1),
+        "kwin" => EscAct::Kwin(arg?.to_string()),
         "ungrab" => EscAct::Ungrab,
+        "abort" => EscAct::Abort,
         "none" => EscAct::Noop,
         "command" => EscAct::Cmd(arg?.to_string()),
         _ => return None,
     };
-    Some(EscCombo { mods, trig, xkey: xkey_for(trig)?, xmods: xmods_of(mods), act })
+    Some(EscCombo { xkey: xkey_for(trig)?, xmods: xmods_of(mods), act })
 }
 
 fn run_quiet(bin: &str, args: &[String]) -> bool {
@@ -464,10 +467,32 @@ fn ewmh_switch(action: &EscAct) -> bool {
     run_quiet("xdotool", &["set_desktop".to_string(), target.to_string()])
 }
 
+/// Invoke a named kglobalaccel action on the kwin component — the same
+/// entry point the user's own binding calls, so behavior (incl. Plasma 6
+/// internal names) is identical to pressing the host's real shortcut.
+fn kwin_invoke(name: &str) -> bool {
+    for bin in ["qdbus6", "qdbus"] {
+        if run_quiet(bin, &[
+            "org.kde.kglobalaccel".to_string(),
+            "/component/kwin".to_string(),
+            "org.kde.kglobalaccel.Component.invokeShortcut".to_string(),
+            name.to_string()]) {
+            return true;
+        }
+    }
+    run_quiet("gdbus", &[
+        "call".to_string(), "--session".to_string(),
+        "--dest".to_string(), "org.kde.kglobalaccel".to_string(),
+        "--object-path".to_string(), "/component/kwin".to_string(),
+        "--method".to_string(), "org.kde.kglobalaccel.Component.invokeShortcut".to_string(),
+        name.to_string()])
+}
+
 impl EscState {
     fn fire(&self, combo: &EscCombo, title: &str) {
         match &combo.act {
-            EscAct::Ungrab => { self.ungrab_req.store(true, Ordering::Relaxed); }
+            EscAct::Ungrab => { self.ungrab_gen.fetch_add(1, Ordering::Relaxed); }
+            EscAct::Abort => { self.abort_gen.fetch_add(1, Ordering::Relaxed); }
             EscAct::Noop => { eprintln!("[+{}s][esc] combo → none ({title})", ts()); }
             EscAct::Cmd(c) => {
                 let c = c.clone();
@@ -475,6 +500,14 @@ impl EscState {
                 std::thread::spawn(move || {
                     eprintln!("[+{}s][esc] combo → sh -c `{c}` ({t})", ts());
                     let _ = std::process::Command::new("sh").args(["-c", &c]).spawn();
+                });
+            }
+            EscAct::Kwin(name) => {
+                let name = name.clone();
+                let t = title.to_string();
+                std::thread::spawn(move || {
+                    let ok = kwin_invoke(&name);
+                    eprintln!("[+{}s][esc] kwin '{name}' → {} ({t})", ts(), if ok { "ok" } else { "FAILED" });
                 });
             }
             a @ (EscAct::Desktop(_) | EscAct::Cycle(_)) => {
@@ -491,24 +524,7 @@ impl EscState {
                 };
                 let a = a.clone();
                 std::thread::spawn(move || {
-                    let mut ok = false;
-                    for bin in ["qdbus6", "qdbus"] {
-                        ok = run_quiet(bin, &[
-                            "org.kde.kglobalaccel".to_string(),
-                            "/component/kwin".to_string(),
-                            "org.kde.kglobalaccel.Component.invokeShortcut".to_string(),
-                            name.clone()]);
-                        if ok { break; }
-                    }
-                    if !ok {
-                        ok = run_quiet("gdbus", &[
-                            "call".to_string(), "--session".to_string(),
-                            "--dest".to_string(), "org.kde.kglobalaccel".to_string(),
-                            "--object-path".to_string(), "/component/kwin".to_string(),
-                            "--method".to_string(), "org.kde.kglobalaccel.Component.invokeShortcut".to_string(),
-                            name.clone()]);
-                    }
-                    if !ok { ok = ewmh_switch(&a); }
+                    let ok = kwin_invoke(&name) || ewmh_switch(&a);
                     eprintln!("[+{}s][esc] desktop nav '{name}' → {}", ts(), if ok { "ok" } else { "FAILED" });
                 });
             }
@@ -516,6 +532,7 @@ impl EscState {
     }
 }
 
+#[link(name = "Xtst")]
 #[link(name = "X11")]
 extern "C" {
     fn XOpenDisplay(name: *const u8) -> *mut std::ffi::c_void;
@@ -529,17 +546,43 @@ extern "C" {
     fn XGrabKeyboard(d: *mut std::ffi::c_void, grab_window: u64, owner_events: i32,
                      pointer_mode: i32, keyboard_mode: i32, time: u64) -> i32;
     fn XUngrabKeyboard(d: *mut std::ffi::c_void, time: u64) -> i32;
+    fn XGrabPointer(d: *mut std::ffi::c_void, grab_window: u64, owner_events: i32,
+                    event_mask: u32, pointer_mode: i32, keyboard_mode: i32,
+                    confine_to: u64, cursor: u64, time: u64) -> i32;
+    fn XUngrabPointer(d: *mut std::ffi::c_void, time: u64) -> i32;
+    fn XIconifyWindow(d: *mut std::ffi::c_void, w: u64, screen: i32) -> i32;
     fn XSelectInput(d: *mut std::ffi::c_void, w: u64, mask: i64);
     fn XPending(d: *mut std::ffi::c_void) -> i32;
     fn XNextEvent(d: *mut std::ffi::c_void, ev: *mut XEvBuf) -> i32;
     fn XPeekEvent(d: *mut std::ffi::c_void, ev: *mut XEvBuf) -> i32;
     fn XGetInputFocus(d: *mut std::ffi::c_void, w: *mut u64, revert: *mut i32) -> i32;
+    fn XQueryPointer(d: *mut std::ffi::c_void, w: u64, root: *mut u64, child: *mut u64,
+                     root_x: *mut i32, root_y: *mut i32, win_x: *mut i32, win_y: *mut i32,
+                     mask: *mut u32) -> i32;
     fn XSendEvent(d: *mut std::ffi::c_void, w: u64, propagate: i32,
                   mask: i64, ev: *mut XEvBuf) -> i32;
     fn XGrabKey(d: *mut std::ffi::c_void, keycode: i32, modifiers: u32,
                 grab_window: u64, owner_events: i32, pointer_mode: i32,
                 keyboard_mode: i32);
     fn XRootWindow(d: *mut std::ffi::c_void, screen: i32) -> u64;
+    fn XTestFakeButtonEvent(d: *mut std::ffi::c_void, button: u32,
+                            is_press: i32, delay: u64) -> i32;
+    fn XSetErrorHandler(h: Option<extern "C" fn(*mut std::ffi::c_void, *mut XErrEv) -> i32>)
+        -> Option<extern "C" fn(*mut std::ffi::c_void, *mut XErrEv) -> i32>;
+}
+
+/// XErrorEvent — async request errors (e.g. XGrabKey BadAccess when
+/// kglobalacceld already owns a mirrored VD combo). Logged, never fatal:
+/// the default handler is fine, but a quiet tagged line beats a mystery.
+#[repr(C)]
+struct XErrEv {
+    _t: i32, _p0: i32, _dpy: u64, _resid: u64, _serial: u64,
+    error_code: u8, request_code: u8, _minor: u8, _p1: u8,
+}
+extern "C" fn xerror_handler(_d: *mut std::ffi::c_void, e: *mut XErrEv) -> i32 {
+    let (code, req) = unsafe { ((*e).error_code, (*e).request_code) };
+    eprintln!("[x11] request error code={code} req={req} (ignored — likely a combo grab race)");
+    0
 }
 
 /// 192-byte XEvent union — only the leading type/serial/send_event fields
@@ -672,6 +715,21 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                         XInternAtom(d, c"WM_CLASS".as_ptr().cast(), 0), XA_STRING,
                         8, PROP_MODE_REPLACE, CLS.as_ptr(), CLS.len() as i32);
                     num_atom = XInternAtom(d, c"Num Lock".as_ptr().cast(), 0);
+                    // THE input path: raw keycodes selected on our own
+                    // window. Focused-ungrabbed → delivered via this
+                    // selection; grabbed → delivered to us as the grabbing
+                    // client; unfocused → nothing (escape combos arrive via
+                    // the root passive grabs below). minifb's callback path
+                    // is unused — keysym translation is lossy (Backquote
+                    // was missing entirely); keycodes are physical
+                    // positions, exactly what QEMU's qnum expects. KEYS
+                    // ONLY: ButtonPressMask is exclusive per window and
+                    // minifb's conn already owns it — adding it here fails
+                    // the whole select with BadAccess and blinds the grab
+                    // path too (grab delivery still consults the mask).
+                    // Buttons ride the pointer grab while grabbed, minifb
+                    // polling while ungrabbed.
+                    XSelectInput(d, xid, 0x3); // KeyPress|KeyRelease
                     XFlush(d);
                     xdpy = d;
                 }
@@ -740,9 +798,16 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     std::thread::spawn(move || input_worker(ic2, cp, irx));
 
     let mut mouse = (-1.0f32, -1.0f32);
-    let mut btns = [false; 3];
     let mut last_pos_send = std::time::Instant::now() - std::time::Duration::from_secs(1);
     let mut pending_abs: Option<(f32, f32)> = None;
+    // guest-button ids currently held — released on focus loss, same as
+    // `pressed` for keys (a release the guest never sees = phantom drag)
+    let mut btns_down = std::collections::HashSet::<u8>::new();
+    // minifb's own reported button state — the ungrabbed poll diffs against
+    // this (NOT btns_down): a grab-path release leaves minifb's state stale
+    // until its conn sees a real event, and diffing that against guest
+    // state would phantom-repress on ungrab.
+    let mut mbtns = [false; 3];
     let mut scroll_acc = 0.0f32;
 
     // window px → guest scanout px through the same letterbox viewport the
@@ -779,75 +844,16 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     // qnums the guest currently believes are held — drained into key-up
     // events on focus loss so the release half of a combo the WM consumed
     // (alt-tab et al.) can't leave a modifier stuck down in the guest.
-    let pressed = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::<u32>::new()));
-    // Shared with KbCb: triggers whose press fired an escape get swallowed —
-    // cleared on focus loss too, else a release that lands outside the
-    // window (VD switch steals focus mid-combo) leaves the trigger dead
-    // forever ("escape worked once, then nothing").
-    let swallowed = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::<u32>::new()));
-    let itx2 = itx.clone();
-    let esc2 = esc.clone();
-    let title2 = title.to_string();
-    let swallowed2 = swallowed.clone();
-    struct KbCb {
-        tx: std::sync::mpsc::Sender<In>,
-        pressed: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u32>>>,
-        /// triggers whose press fired an escape action — their release (and
-        /// autorepeat re-presses) are swallowed instead of forwarded.
-        swallowed: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u32>>>,
-        esc: std::sync::Arc<EscState>,
-        title: String,
-    }
-    impl minifb::InputCallback for KbCb {
-        fn add_char(&mut self, _c: u32) {}
-        fn set_key_state(&mut self, key: minifb::Key, state: bool) {
-            let Some(q) = qnum_for(key) else { return };
-            // swallowed trigger: drop the release/repeat without forwarding
-            {
-                let mut sw = self.swallowed.lock().unwrap();
-                if sw.contains(&q) {
-                    if !state { sw.remove(&q); }
-                    return;
-                }
-            }
-            // Intercept whenever the viewer runs under --grab: the grab
-            // can drop transiently (focus races, server grabs) and a combo
-            // that slips through falls to the host's own bindings — worse
-            // than dispatching ourselves. Under --grab the kglobalaccel
-            // copies are never installed, so there's no double-fire.
-            if state && self.esc.enabled {
-                let combo = self.esc.combos.iter().find(|c| c.trig == q).and_then(|c| {
-                    // held-modifier bitmask must equal the combo's exactly
-                    let p = self.pressed.lock().unwrap();
-                    let held = [M_CTRL, M_ALT, M_SHIFT, M_META].iter().enumerate()
-                        .fold(0u8, |b, (i, g)| b | ((g.iter().any(|k| p.contains(k))) as u8) << i);
-                    (held == c.mods).then(|| c.clone())
-                });
-                if let Some(c) = combo {
-                    self.swallowed.lock().unwrap().insert(q);
-                    // lift the combo's forwarded halves so the guest isn't
-                    // left with phantom held modifiers while we run the
-                    // host action
-                    let mut p = self.pressed.lock().unwrap();
-                    for g in [M_CTRL, M_ALT, M_SHIFT, M_META] {
-                        for k in g { if p.remove(&k) { let _ = self.tx.send(In::Key(k, false)); } }
-                    }
-                    drop(p);
-                    self.esc.fire(&c, &self.title);
-                    return;
-                }
-            }
-            {
-                let mut p = self.pressed.lock().unwrap();
-                if state { p.insert(q); } else { p.remove(&q); }
-            }
-            let _ = self.tx.send(In::Key(q, state));
-        }
-    }
-    win.set_input_callback(Box::new(KbCb {
-        tx: itx2, pressed: pressed.clone(), swallowed: swallowed2,
-        esc: esc2, title: title2,
-    }));
+    // Fed by the raw keycode path in the event drain below.
+    let mut pressed = std::collections::HashSet::<u32>::new();
+    // Escape-trigger keycodes whose press fired a combo — their release (and
+    // autorepeat re-presses) are swallowed instead of forwarded. Cleared on
+    // focus loss, else a release landing outside the window (VD switch
+    // steals focus mid-combo) leaves the trigger dead forever.
+    let mut swallowed = std::collections::HashSet::<u32>::new();
+    // Buttons consumed inside the window while pointer-grabbed — their
+    // releases belong to the guest even if the pointer left the window.
+    let mut captured_btns = std::collections::HashSet::<u32>::new();
 
     // numlock reconcile — guest lock state is exposed as the Keyboard
     // "Modifiers" property (Scroll|Num|Caps = bits 0|1|2). NumLock presses
@@ -877,7 +883,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
             XSelectInput(xdpy, root, 0x3);
             for c in &esc.combos {
                 for lock in [0u32, 2, 16, 18] {
-                    XGrabKey(xdpy, c.xkey as i32, c.xmods | lock, root, 0, 1, 1);
+                    XGrabKey(xdpy, c.xkey as i32, c.xmods | lock, root, 0, 0, 0);
                 }
             }
             XFlush(xdpy);
@@ -892,77 +898,176 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     // release branch peeks for the pair so `held` survives fake releases.
     let mut passive_held = std::collections::HashSet::<u32>::new();
 
-    // Keyboard grab (--grab = spec.display.grabKeyboard on the dmabuf
-    // viewer): minifb has no grab, so while a head is focused we hold an
-    // X11 keyboard grab — host-global combos (alt-tab, super, …) reach the
-    // guest instead of the WM, matching freerdp +grab-keyboard semantics.
-    // Focus loss ungrabs (grab dies with the conn on exit anyway); the
-    // `ungrab` escape action holds the grab off until the focus cycles.
+    // Keyboard + pointer grabs (--grab = spec.display.grabKeyboard):
+    // while a head is focused we hold an X11 keyboard grab — host-global
+    // combos (alt-tab, super, …) reach the guest instead of the WM,
+    // matching freerdp +grab-keyboard semantics. ALL device modes are
+    // GrabModeAsync — an ACTIVE Sync grab freezes the device on the first
+    // event and queues it undelivered (the deliver-frozen-then-decide
+    // contract only applies to PASSIVE grab activation), so a Sync
+    // XGrabKeyboard = dead keyboard and a Sync XGrabPointer = dead mouse.
+    // The keyboard grab ALONE can't stop KWin's passive BUTTON grabs
+    // (super+drag move fires on Mod4 in the core modifier state, whatever
+    // owns the keys), so an Async pointer grab rides alongside — an
+    // active grab still shadows every passive grab on the device.
+    // In-window clicks are forwarded to the guest; a click outside drops
+    // the pointer grab and re-injects the press via XTEST, so it reaches
+    // its host target (focus move, WM passive grabs) as if we never held
+    // it. Focus loss ungrabs both; `ungrab`/`abort` escapes hold the
+    // grabs off until the focus cycles (abort also iconifies this head).
     let mut was_active = false;
     let mut grabbed = false;
+    let mut pgrabbed = false;
     let mut grab_hold_off = false;
+    let mut grab_held_since: Option<std::time::Instant> = None;
+    let mut seen_ungrab = 0u64;
+    let mut seen_abort = 0u64;
     let mut last_grab_try = std::time::Instant::now() - std::time::Duration::from_secs(1);
+
+    // numlock reconcile guard: a NumLock press forwarded to the guest
+    // flips host state instantly but the guest's LED report lags — a poll
+    // inside that window would pulse a spurious second toggle and leave
+    // host/guest permanently opposed. Suppress briefly after a forwarded
+    // press, and require the mismatch to persist across two polls.
+    let mut num_suppress_until = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    let mut num_mismatch = 0u32;
+    let mut num_diag = 0u32;
 
     while win.is_open() {
         win.update(); // events only — EGL renders into this window directly
         let active = win.is_active();
         if !active { grab_hold_off = false; }
-        if esc.enabled && !xdpy.is_null() {
-            if esc.ungrab_req.swap(false, Ordering::Relaxed) {
+        if !xdpy.is_null() {
+            if SIG_ABORT.swap(false, Ordering::Relaxed) {
+                // panic path — needs no keyboard; bumps the shared
+                // generation so every head aborts on its next tick
+                esc.abort_gen.fetch_add(1, Ordering::Relaxed);
+                eprintln!("[+{}s][grab] SIGUSR1 → abort ({title})", ts());
+            }
+            let ungrab_g = esc.ungrab_gen.load(Ordering::Relaxed);
+            let abort_g = esc.abort_gen.load(Ordering::Relaxed);
+            let abort = abort_g != seen_abort;
+            if ungrab_g != seen_ungrab || abort {
+                seen_ungrab = ungrab_g;
+                seen_abort = abort_g;
                 grab_hold_off = true;
+                grab_held_since = None;
+                if pgrabbed {
+                    unsafe { XUngrabPointer(xdpy, 0); }
+                    pgrabbed = false;
+                    captured_btns.clear();
+                }
                 if grabbed {
-                    unsafe {
-                        XUngrabKeyboard(xdpy, 0);
-                        XSelectInput(xdpy, xwin_id, 0);
-                        XFlush(xdpy);
-                    }
+                    unsafe { XUngrabKeyboard(xdpy, 0); XFlush(xdpy); }
                     grabbed = false;
-                    esc.grab_active.store(false, Ordering::Relaxed);
                 }
                 eprintln!("[+{}s][grab] ungrabbed via escape ({title}) — re-grabs on refocus", ts());
+            }
+            if abort {
+                unsafe { XIconifyWindow(xdpy, xwin_id, 0); XFlush(xdpy); }
+                eprintln!("[+{}s][grab] abort — iconified ({title})", ts());
+            }
+        }
+        if esc.enabled && !xdpy.is_null() {
+            if grabbed && grab_held_since.map_or(false, |t| t.elapsed().as_secs() > 60) {
+                // HARD CAP: bound how long a wedged grab can steal the host
+                // keyboard — release, then the normal path re-grabs on the
+                // next tick if the head is still focused. A healthy grab
+                // sees a sub-second heartbeat gap once a minute; a dead
+                // one can never strand host input longer than 60s.
+                if pgrabbed { unsafe { XUngrabPointer(xdpy, 0); } pgrabbed = false; captured_btns.clear(); }
+                unsafe { XUngrabKeyboard(xdpy, 0); XFlush(xdpy); }
+                grabbed = false;
+                grab_held_since = None;
+                eprintln!("[+{}s][grab] 60s hold cap — released, re-grabbing if focused ({title})", ts());
             }
             if active && !grabbed && !grab_hold_off && last_grab_try.elapsed().as_millis() > 500 {
                 // retry while focused — a grab attempt loses to any
                 // transient server grab (e.g. KWin's own alt-tab tabbox)
                 last_grab_try = std::time::Instant::now();
-                grabbed = unsafe { XGrabKeyboard(xdpy, xwin_id, 1, 1, 1, 0) } == 0;
+                // pointer_mode + keyboard_mode BOTH Async — a Sync mode
+                // queues all that device's events without delivering until
+                // an XAllowEvents nobody sends → dead input under grab.
+                grabbed = unsafe { XGrabKeyboard(xdpy, xwin_id, 0, 1, 1, 0) } == 0;
                 if grabbed {
-                    // Grabbed keys are delivered ONLY to the grabbing client
-                    // — xdpy owns no windows, so without this select+reinject
-                    // every key vanishes into the grab. Forward each real
-                    // event back to the window as a synthetic copy: send_event
-                    // delivery ignores grabs, and minifb's conn processes it
-                    // through KbCb like any normal key.
-                    unsafe { XSelectInput(xdpy, xwin_id, 0x3); XFlush(xdpy); }
-                    eprintln!("[+{}s][grab] keyboard grabbed ({title})", ts());
+                    // Pointer grab, Async/Async: Sync pointer_mode would
+                    // freeze the device on the first event and queue it
+                    // WITHOUT delivering (inspect-then-replay only works on
+                    // PASSIVE grab activation) — we learned that as a dead
+                    // mouse. Async delivers every button event; an active
+                    // grab still shadows the WM's passive Mod4+Button grabs
+                    // (super+drag). Outside clicks are re-injected via XTEST
+                    // (a real device event — KWin sees it normally) after
+                    // dropping the grab, instead of ReplayPointer.
+                    pgrabbed = unsafe { XGrabPointer(xdpy, xwin_id, 0, 0xC, 1, 1, 0, 0, 0) } == 0;
+                    grab_held_since = Some(std::time::Instant::now());
+                    eprintln!("[+{}s][grab] keyboard grabbed ({title}) pointer={pgrabbed}", ts());
                 }
-                esc.grab_active.store(grabbed, Ordering::Relaxed);
-            } else if !active && grabbed {
-                unsafe {
-                    XUngrabKeyboard(xdpy, 0);
-                    XSelectInput(xdpy, xwin_id, 0);
-                    XFlush(xdpy);
-                }
-                grabbed = false;
-                esc.grab_active.store(false, Ordering::Relaxed);
-                eprintln!("[+{}s][grab] keyboard ungrabbed ({title})", ts());
+            } else if active && grabbed && !pgrabbed && last_grab_try.elapsed().as_millis() > 500 {
+                // keyboard held but pointer grab lost (e.g. raced a popup)
+                // — keep retrying on the same cadence
+                last_grab_try = std::time::Instant::now();
+                pgrabbed = unsafe { XGrabPointer(xdpy, xwin_id, 0, 0xC, 1, 1, 0, 0, 0) } == 0;
+                if pgrabbed { eprintln!("[+{}s][grab] pointer grabbed ({title})", ts()); }
+            } else if !active && (grabbed || pgrabbed) {
+                if pgrabbed { unsafe { XUngrabPointer(xdpy, 0); } pgrabbed = false; captured_btns.clear(); }
+                if grabbed { unsafe { XUngrabKeyboard(xdpy, 0); } grabbed = false; }
+                grab_held_since = None;
+                unsafe { XFlush(xdpy); }
+                eprintln!("[+{}s][grab] ungrabbed ({title})", ts());
             }
         }
-        // Drain xdpy whenever combos exist — not only under --grab: the
-        // root passive grabs need servicing even when no head is grabbed.
-        // While grabbed, real events are reinjected as synthetic copies;
-        // ungrabbed, a real KeyPress here is a passive-grab fire → dispatch
-        // the escape action. Our own send_event copies are filtered.
-        if !xdpy.is_null() && !esc.combos.is_empty() {
+        // Drain xdpy — THE input path. Key events with window==xwin are
+        // real input (selected delivery while focused-ungrabbed, grab
+        // delivery while grabbed) → forwarded to the guest unless an
+        // escape combo swallows them. window==root while ungrabbed = a
+        // passive-grab combo firing. Button events arrive via the same
+        // selection while ungrabbed, via the pointer grab while grabbed.
+        // send_event = our own reinjections, filtered.
+        if !xdpy.is_null() {
             while unsafe { XPending(xdpy) } > 0 {
                 let mut ev: XEvBuf = unsafe { std::mem::zeroed() };
                 unsafe { XNextEvent(xdpy, &mut ev); }
                 let a = unsafe { ev.any };
                 if a.send_event != 0 { continue; }
-                if grabbed && (a.t == 2 || a.t == 3) {
-                    let m = if a.t == 2 { 1 } else { 2 }; // KeyPressMask|KeyReleaseMask
-                    unsafe { XSendEvent(xdpy, xwin_id, 0, m, &mut ev); }
-                } else if !grabbed {
+                if (a.t == 2 || a.t == 3) && unsafe { ev.key }._win == xwin_id {
+                    let k = unsafe { ev.key };
+                    let down = a.t == 2;
+                    let Some(q) = qnum_for_keycode(k.keycode) else { continue };
+                    if swallowed.contains(&k.keycode) {
+                        if !down { swallowed.remove(&k.keycode); }
+                        continue;
+                    }
+                    if down && !esc.combos.is_empty() {
+                        // held mods come straight from the event's state
+                        // mask — cleaner than tracking key-up/down ourselves.
+                        // Also runs ungrabbed: a combo event reaching xwin
+                        // means no passive grab claimed it (BadAccess race),
+                        // and dispatching beats leaking the trigger to the
+                        // guest.
+                        let held = k.state & 0x4d; // Shift|Control|Mod1|Mod4
+                        if let Some(c) = esc.combos.iter()
+                            .find(|c| c.xkey == k.keycode && c.xmods == held).cloned() {
+                            swallowed.insert(k.keycode);
+                            // lift the combo's forwarded halves so the guest
+                            // isn't left with phantom held modifiers while
+                            // we run the host action
+                            for g in [M_CTRL, M_ALT, M_SHIFT, M_META] {
+                                for kk in g { if pressed.remove(&kk) { let _ = itx.send(In::Key(kk, false)); } }
+                            }
+                            esc.fire(&c, title);
+                            continue;
+                        }
+                    }
+                    if down { pressed.insert(q); } else { pressed.remove(&q); }
+                    if down && q == 0x45 {
+                        // NumLock just forwarded — the reconcile poll can't
+                        // trust guest LED state for a beat
+                        num_suppress_until = std::time::Instant::now() + std::time::Duration::from_millis(900);
+                    }
+                    let _ = itx.send(In::Key(q, down));
+                } else if a.t == 2 || a.t == 3 {
+                    if grabbed { continue; }
                     let k = unsafe { ev.key };
                     let trig = esc.combos.iter().any(|c| c.xkey == k.keycode);
                     let mut consumed = false;
@@ -976,7 +1081,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                                 passive_last.insert(i, std::time::Instant::now());
                                 passive_held.insert(k.keycode);
                                 eprintln!("[+{}s][esc] combo via host grab ({title})", ts());
-                                esc.fire(&esc.combos[i].clone(), &title);
+                                esc.fire(&esc.combos[i].clone(), title);
                             }
                             consumed = true;
                         }
@@ -1004,25 +1109,108 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                         // it belongs to whoever holds focus, not us
                         let (mut focus, mut revert) = (0u64, 0i32);
                         unsafe { XGetInputFocus(xdpy, &mut focus, &mut revert); }
-                        if focus > 1 { // not None(0)/PointerRoot(1)
+                        if focus > 1 && focus != xwin_id { // not None(0)/PointerRoot(1)/ours
                             let m = if a.t == 2 { 1 } else { 2 };
-                            unsafe { XSendEvent(xdpy, focus, 0, m, &mut ev); }
+                            unsafe { ev.key._win = focus; XSendEvent(xdpy, focus, 0, m, &mut ev); }
                         }
+                    }
+                } else if a.t == 4 || a.t == 5 {
+                    // ButtonPress/Release — reachable ONLY while pgrabbed:
+                    // the button-mask selection on xwin belongs to minifb
+                    // (ButtonPressMask is exclusive — see the XSelectInput
+                    // note above), so ungrabbed button events go there and
+                    // are polled below. The Async pointer grab delivers all
+                    // button events to us: in-window clicks are consumed +
+                    // forwarded to the guest; a click outside drops the grab
+                    // and re-injects the press via XTEST — a real device
+                    // event, so KWin's passive grabs and click-to-focus see
+                    // it exactly as if we'd never grabbed.
+                    if !pgrabbed { continue; }
+                    let k = unsafe { ev.key };
+                    let btn = k.keycode;
+                    let down = a.t == 4;
+                    // Panic chord: ctrl+alt+shift+right-click aborts every
+                    // head. Works even if the keyboard path is dead —
+                    // button events still reach us through the pointer grab,
+                    // and the modifier state rides in the event itself.
+                    if down && k.state & 0x4d == 0x0d && btn == 3 {
+                        esc.abort_gen.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    let (ww, wh) = win.get_size();
+                    let inside = k._x >= 0 && k._y >= 0
+                        && (k._x as usize) < ww && (k._y as usize) < wh;
+                    if down && !inside && !captured_btns.contains(&btn) {
+                        // Outside press: release the grab and re-inject so
+                        // the host sees a normal click (focus moves, passive
+                        // grabs fire). Re-inject press; the physical release
+                        // then delivers to the target on its own — except
+                        // wheel "buttons" (4-7) which are transient pulses:
+                        // pair them or the target could see a stuck press.
+                        unsafe {
+                            XUngrabPointer(xdpy, 0);
+                            XTestFakeButtonEvent(xdpy, btn, 1, 0);
+                            if btn >= 4 { XTestFakeButtonEvent(xdpy, btn, 0, 0); }
+                            XFlush(xdpy);
+                        }
+                        pgrabbed = false;
+                        captured_btns.clear();
+                        for b in btns_down.drain() { let _ = itx.send(In::Btn(b, false)); }
+                        eprintln!("[+{}s][grab] outside click — reinjected to host ({title})", ts());
+                        continue; // press belongs to the host, not the guest
+                    }
+                    if down { captured_btns.insert(btn); } else { captured_btns.remove(&btn); }
+                    // X button → guest button: 1,2,3 = L,M,R → 0,1,2;
+                    // 8,9 = back,forward → 5,6. Wheel arrives as transient
+                    // Button4/5 press+release — pulse on the press only.
+                    let guest_btn = match btn {
+                        1..=3 => Some(btn as u8 - 1),
+                        8 => Some(5),
+                        9 => Some(6),
+                        _ => None,
+                    };
+                    if let Some((ax, ay)) = pending_abs.take() {
+                        let (gx, gy) = to_guest(&win, ax, ay);
+                        let _ = itx.send(In::Move(gx, gy));
+                        last_pos_send = std::time::Instant::now();
+                    }
+                    if let Some(b) = guest_btn {
+                        if down { btns_down.insert(b); } else { btns_down.remove(&b); }
+                        let _ = itx.send(In::Btn(b, down));
+                    } else if down && (btn == 4 || btn == 5) {
+                        let b = if btn == 4 { 3u8 } else { 4u8 }; // wheel up/down
+                        let _ = itx.send(In::Btn(b, true));
+                        let _ = itx.send(In::Btn(b, false));
                     }
                 }
             }
             unsafe { XFlush(xdpy); }
         }
         if was_active && !active {
-            swallowed.lock().unwrap().clear();
-            let ups: Vec<u32> = pressed.lock().unwrap().drain().collect();
+            swallowed.clear();
+            let ups: Vec<u32> = pressed.drain().collect();
             for q in ups { let _ = itx.send(In::Key(q, false)); }
-            for (i, d) in btns.iter_mut().enumerate() {
-                if *d { *d = false; let _ = itx.send(In::Btn(i as u8, false)); }
-            }
+            for b in btns_down.drain() { let _ = itx.send(In::Btn(b, false)); }
         }
         was_active = active;
-        if let Some((mx, my)) = win.get_mouse_pos(minifb::MouseMode::Pass) {
+        // Pointer position via XQueryPointer — a REQUEST, immune to grabs.
+        // minifb's get_mouse_pos reads event-fed state, and motion isn't in
+        // our pointer grab's mask, so it would freeze stale while grabbed.
+        if !xdpy.is_null() {
+            let (mut rw, mut cw) = (0u64, 0u64);
+            let (mut rx, mut ry, mut wx, mut wy) = (0i32, 0i32, 0i32, 0i32);
+            let mut m = 0u32;
+            if unsafe { XQueryPointer(xdpy, xwin_id, &mut rw, &mut cw,
+                &mut rx, &mut ry, &mut wx, &mut wy, &mut m) } != 0 {
+                let (mx, my) = (wx as f32, wy as f32);
+                let (ww, wh) = win.get_size();
+                if mx >= 0.0 && my >= 0.0 && mx < ww as f32 && my < wh as f32
+                    && (mx, my) != mouse {
+                    mouse = (mx, my);
+                    pending_abs = Some((mx, my));
+                }
+            }
+        } else if let Some((mx, my)) = win.get_mouse_pos(minifb::MouseMode::Pass) {
             let (ww, wh) = win.get_size();
             let inb = mx >= 0.0 && my >= 0.0 && mx < ww as f32 && my < wh as f32;
             if inb && (mx, my) != mouse {
@@ -1030,27 +1218,32 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                 pending_abs = Some((mx, my));
             }
         }
-        for (i, b) in [minifb::MouseButton::Left, minifb::MouseButton::Middle,
-                       minifb::MouseButton::Right].into_iter().enumerate() {
-            let d = win.get_mouse_down(b);
-            if d != btns[i] {
-                btns[i] = d;
-                if let Some((ax, ay)) = pending_abs.take() {
-                    let (gx, gy) = to_guest(&win, ax, ay);
-                    let _ = itx.send(In::Move(gx, gy));
-                    last_pos_send = std::time::Instant::now();
+        // Buttons + wheel while UNGRABBED: those events deliver to minifb's
+        // conn (ButtonPressMask selection is exclusively theirs), so its
+        // event-fed state is live. While pgrabbed the raw drain owns
+        // buttons and minifb is blind — skip the poll entirely.
+        if !pgrabbed {
+            for (i, b) in [minifb::MouseButton::Left, minifb::MouseButton::Middle,
+                           minifb::MouseButton::Right].into_iter().enumerate() {
+                let d = win.get_mouse_down(b);
+                if d != mbtns[i] {
+                    mbtns[i] = d;
+                    if d { btns_down.insert(i as u8); } else { btns_down.remove(&(i as u8)); }
+                    if let Some((ax, ay)) = pending_abs.take() {
+                        let (gx, gy) = to_guest(&win, ax, ay);
+                        let _ = itx.send(In::Move(gx, gy));
+                        last_pos_send = std::time::Instant::now();
+                    }
+                    let _ = itx.send(In::Btn(i as u8, d));
                 }
-                let _ = itx.send(In::Btn(i as u8, d));
             }
-        }
-        // wheel scroll — QEMU models scroll as wheel-button pulses (up=3,
-        // down=4; see ui/dbus-display1.xml). The virtio tablet only maps
-        // vertical (REL_WHEEL is its sole rel axis — REL_HWHEEL would log
-        // "unmapped button"), so horizontal deltas are dropped. minifb
-        // gives ±1.0 per notch on X11; accumulate so any sub-notch delta
-        // still converges on a full pulse.
-        if let Some((_sx, sy)) = win.get_scroll_wheel() {
-            scroll_acc += sy;
+            // wheel — QEMU models scroll as wheel-button pulses (up=3,
+            // down=4; the virtio tablet only maps REL_WHEEL so horizontal
+            // deltas drop). minifb gives ±1.0 per notch; accumulate so a
+            // sub-notch delta still converges on a pulse.
+            if let Some((_sx, sy)) = win.get_scroll_wheel() {
+                scroll_acc += sy;
+            }
         }
         while scroll_acc.abs() >= 1.0 {
             // land the pending position first — the wheel acts wherever
@@ -1066,15 +1259,40 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
             scroll_acc -= scroll_acc.signum();
         }
         if let Some(kbd) = &kbd_iface {
-            if last_num_sync.elapsed().as_millis() >= 500 {
+            if last_num_sync.elapsed().as_millis() >= 500
+                && num_suppress_until <= std::time::Instant::now() {
                 last_num_sync = std::time::Instant::now();
+                let host = host_numlock(xdpy, num_atom);
                 let mods = kbd.get_property::<u32>("Modifiers").ok();
-                if let (Some(host), Some(m)) = (host_numlock(xdpy, num_atom), mods) {
-                    if host != (m & 0x2 != 0) {
-                        let _ = itx.send(In::Key(0x45, true));  // Q_KEY_CODE num_lock
-                        let _ = itx.send(In::Key(0x45, false));
-                        eprintln!("[input] numlock sync: host={host} guest={} — toggled",
+                // first reads are diagnostic — a failed host indicator or
+                // Modifiers property otherwise fails silently forever
+                if num_diag < 30 {
+                    num_diag += 1;
+                    if let (Some(h), Some(m)) = (host, mods) {
+                        eprintln!("[input] numlock probe: host={h} guest-num={} (modifiers=0x{m:x})",
                             m & 0x2 != 0);
+                        num_diag = 30;
+                    } else if num_diag == 29 {
+                        eprintln!("[input] numlock probe failing: host={host:?} guest={mods:?}");
+                    }
+                }
+                if let (Some(host), Some(m)) = (host, mods) {
+                    let guest = m & 0x2 != 0;
+                    if host != guest {
+                        num_mismatch += 1;
+                        // debounce: two consecutive mismatches (~1s) before
+                        // pulsing — a transient mismatch is a forwarded
+                        // NumLock still in flight, not real divergence
+                        if num_mismatch >= 2 {
+                            num_mismatch = 0;
+                            num_suppress_until = std::time::Instant::now()
+                                + std::time::Duration::from_millis(900);
+                            let _ = itx.send(In::Key(0x45, true));  // Q_KEY_CODE num_lock
+                            let _ = itx.send(In::Key(0x45, false));
+                            eprintln!("[input] numlock sync: host={host} guest={guest} — toggled");
+                        }
+                    } else {
+                        num_mismatch = 0;
                     }
                 }
             }
@@ -1281,18 +1499,32 @@ async fn main() -> Result<()> {
     if grab && !escapes.is_empty() {
         eprintln!("[*] {} escape combo(s) grabbed host-wide", escapes.len());
     }
+    // ONE shared escape state for all heads — an abort/ungrab fired on any
+    // console releases grabs and iconifies every window. Async X errors
+    // (BadAccess when kglobalacceld already owns a mirrored VD combo, etc.)
+    // get a quiet tagged line instead of a mystery exit.
+    unsafe { XSetErrorHandler(Some(xerror_handler)); }
+    let esc = std::sync::Arc::new(EscState {
+        enabled: grab,
+        combos: escapes.clone(),
+        ungrab_gen: std::sync::atomic::AtomicU64::new(0),
+        abort_gen: std::sync::atomic::AtomicU64::new(0),
+    });
+    // Panic exits — none of these need working keyboard delivery:
+    //   · move focus elsewhere (grabs release on FocusOut)
+    //   · SIGUSR1 → abort all heads (`pkill -USR1 -x viewer-dd`)
+    //   · ctrl+alt+shift+right-click → abort (travels on the pointer grab)
+    //   · Ctrl+Alt+F3 VT switch runs below any X grab
+    //   · a continuously held grab self-releases after 60s
+    unsafe { libc::signal(libc::SIGUSR1, sig_abort as *const () as libc::sighandler_t); }
+    eprintln!("[*] input safety: click away to ungrab · `pkill -USR1 -x viewer-dd` or ctrl+alt+shift+right-click aborts · 60s grab cap · Ctrl+Alt+F3 always works");
     let mut joins = Vec::new();
     for (i, p) in pending.into_iter().enumerate() {
         let ci = p.cpath.rsplit('_').next().unwrap_or("0").to_string();
         let t = if multi { format!("{title}:{ci}") } else { title.clone() };
         let ic = iconn.clone();
         let hd = heads.clone();
-        let esc = std::sync::Arc::new(EscState {
-            enabled: grab,
-            combos: escapes.clone(),
-            grab_active: std::sync::atomic::AtomicBool::new(false),
-            ungrab_req: std::sync::atomic::AtomicBool::new(false),
-        });
+        let esc = esc.clone();
         joins.push(std::thread::spawn(move || {
             let r = present_window(ic, &p.cpath, i, &t, w, h, p.jrx, p.dims, hd, esc);
             eprintln!("[*] window closed ({t}) — {r:?}");

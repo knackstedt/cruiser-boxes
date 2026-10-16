@@ -150,6 +150,55 @@ export function kdeKeys(keys: string): string {
         map[k] ?? (/^f\d{1,2}$/.test(k) ? k.toUpperCase() : k.length === 1 ? k.toUpperCase() : k)).join("+");
 }
 
+/** KDE notation → our lowercase grammar ("Meta+Ctrl+Left" →
+ *  "super+ctrl+left"). Inverse of kdeKeys. */
+export function kdeUnkeys(kd: string): string {
+    const map: Record<string, string> = {
+        ctrl: "ctrl", alt: "alt", shift: "shift", meta: "super",
+        del: "delete", backspace: "backspace", return: "enter", enter: "enter",
+        esc: "escape", space: "space", tab: "tab", ins: "insert",
+        pgup: "pageup", pgdn: "pagedown",
+    };
+    return kd.split("+").map((t) => map[t.trim().toLowerCase()] ?? t.trim().toLowerCase())
+        .filter(Boolean).join("+");
+}
+
+/** kglobalshortcutsrc [kwin] action names that switch virtual desktops. */
+const KWIN_VD_ACTION = /^Switch to Desktop \d+$|^Switch One Desktop (?:to the )?(?:Left|Right|Up|Down)$|^Switch to (?:Next|Previous) Desktop$/;
+
+/**
+ * The user's own KWin virtual-desktop bindings, mirrored for viewer-dd's
+ * in-grab dispatch. Action is "kwin:<name>" — the exact kglobalaccel
+ * action, so the viewer invokes the same entry point the binding would.
+ * Sources the CURRENT binding (field 0); multi-binding slots are joined by
+ * an escaped \t. "none"/empty entries are skipped.
+ */
+export function kwinDesktopBindings(src: string): { keys: string; action: string }[] {
+    const out: { keys: string; action: string }[] = [];
+    let inKwin = false;
+    for (const raw of src.split("\n")) {
+        const line = raw.trimEnd();
+        const g = /^\[(.+)\]$/.exec(line);
+        if (g) { inKwin = g[1] === "kwin"; continue; }
+        if (!inKwin) continue;
+        const eq = line.indexOf("=");
+        if (eq <= 0) continue;
+        const name = line.slice(0, eq);
+        if (!KWIN_VD_ACTION.test(name)) continue;
+        const cur = line.slice(eq + 1).split(",", 1)[0] ?? "";
+        for (const b of cur.split(/\\t|\t/)) {
+            const keys = kdeUnkeys(b.trim());
+            if (keys && keys !== "none") out.push({ keys, action: `kwin:${name}` });
+        }
+    }
+    return out;
+}
+
+/** The host's VD-switch bindings — read the live kglobalshortcutsrc. */
+export async function kdeDesktopSwitchBindings(): Promise<{ keys: string; action: string }[]> {
+    return kwinDesktopBindings(await readFile(KGLOBAL_RC(), "utf8").catch(() => ""));
+}
+
 /** Map an escape action to a KWin shortcut name (component "kwin"). */
 function kwinShortcutFor(action: EscapeActionSpec): string | null {
     if (action.kind === "host-desktop") return `Switch to Desktop ${action.index}`;

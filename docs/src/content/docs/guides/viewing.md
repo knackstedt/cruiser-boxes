@@ -64,24 +64,83 @@ a redundant `add,fullscreen` triggers the same collapse.
 
 ## Escape shortcuts
 
-`display.escapeShortcuts` installs *host* keybindings that fire while the
-viewer is focused — e.g. the default `ctrl+super+f1 → host-desktop:1`
-jumps you back to host desktop 1 instead of sending the combo to the guest.
+`display.escapeShortcuts` defines combos that fire while the viewer runs —
+e.g. the default `ctrl+super+f1 → host-desktop:1` jumps you back to host
+desktop 1 instead of sending the combo to the guest.
 
 Actions: `host-desktop:<n>`, `desktop-cycle-left`, `desktop-cycle-right`,
-`ungrab`, `none`, `command:<cmdline>` — arbitrary host command via `sh -c`
-(`{vm}`/`{cli}` placeholders expand at install). The default
-`ctrl+super+end → command:{cli} vm kill {vm}` is the escape hatch for a
-hung guest.
+`ungrab` (release the input grab until refocus), `abort` (release grabs +
+minimize every viewer head — the panic combo), `kwin:<action name>`
+(invoke a named kglobalaccel action on the kwin component — the same entry
+point the host's own binding calls), `none` (swallow), and
+`command:<cmdline>` — arbitrary host command via `sh -c` (`{vm}`/`{cli}`
+placeholders expand at install).
 
-The bindings fire anywhere on the host while the viewer runs — in the VM
-or in any other app. On the dmabuf viewer, `viewer-dd` itself grabs each
-combo globally (X11 passive grabs) and dispatches the action host-side,
-so they work regardless of focus or `grabKeyboard`. On freerdp they're
-installed as host-WM global shortcuts; under `+grab-keyboard` they're
-swallowed while the window is focused but work from anywhere else. Pick
-combos the host doesn't bind: if a combo ever leaks through, it hits the
-host's own shortcuts.
+The defaults keep every combo host-inert (`ctrl+super+FN` is unbound in
+KDE — a leaked combo is a no-op, unlike `ctrl+alt+delete` which hits
+ksmserver's logout):
+
+| keys | action |
+| --- | --- |
+| `ctrl+super+f1…f4` | `host-desktop:1…4` |
+| `ctrl+super+f5` | `command:{cli} vm reboot {vm}` |
+| `ctrl+super+f6` | `command:{cli} vm suspend {vm}` |
+| `ctrl+super+f7` | `command:{cli} vm resume {vm}` |
+| `ctrl+super+f8` | `command:{cli} vm stop {vm}` |
+| `ctrl+super+escape` | `abort` |
+| `ctrl+super+end` | `command:{cli} vm kill {vm}` — escape hatch for a hung guest |
+
+How they fire depends on the viewer:
+
+- **dmabuf (`viewer-dd`)** — the viewer X11-passive-grabs each combo on the
+  root window itself (with lock-state variants) and dispatches the action
+  in-process, so they work while unfocused, focused-but-ungrabbed, *and*
+  under `--grab`. `command:` actions are *additionally* installed into the
+  host's real shortcut daemon (kglobalaccel `[services]`/khotkeys on KDE,
+  gsettings media-keys on GNOME) so they appear in the host's shortcut UI.
+  Only `command:` goes daemon-side for dmabuf — VD nav mirrors your own
+  bindings (below) and `ungrab`/`abort`/`kwin:` are viewer-internal
+  dispatches.
+- **freerdp** — the whole list installs as host-WM global shortcuts
+  (kglobalshortcutsrc / gsettings); under `+grab-keyboard` they're
+  swallowed while the window is focused but work from anywhere else.
+
+**Your real VD-switch keys keep working.** Before launching a dmabuf
+session Cruiser reads the host's *existing* desktop-switch bindings —
+`[kwin]` rows out of `kglobalshortcutsrc` on KDE, `org.gnome.desktop
+.wm.keybindings` `switch-to-workspace-*` on GNOME — and hands them to
+viewer-dd as `kwin:<action name>` escapes. While the viewer's grab blinds
+kglobalaccel, the viewer invokes the same `invokeShortcut` entry point the
+dead binding would have hit. Spec entries win on a key conflict; the
+mirror never rewrites your bindings (kglobalacceld flushes in-memory state
+over file edits anyway).
+
+**Input grabs are focus-scoped.** viewer-dd only holds the keyboard
+(XGrabKeyboard) and pointer (XGrabPointer) while a head is focused —
+unfocus and both release, so the VM never eats host input. The pointer
+grab is what defeats KWin's Super+drag window-move: that's a passive
+*button* grab, which a keyboard grab alone can't shadow — an *active*
+pointer grab beats every passive grab on the device. Both grabs run
+Async device modes: an active Sync grab freezes the device on the first
+event and queues it undelivered (the frozen-delivery contract exists
+only for passive grab activation). An in-window click is forwarded to
+the guest; a click outside drops the pointer grab and re-injects the
+press through XTEST, so the host sees a normal click — focus moves and
+WM passive grabs fire as usual.
+
+**Panic exits** — if input ever wedges, in order of escalation: click
+another window (grabs release on FocusOut); the `abort` escape
+(`ctrl+super+escape` by default); `ctrl+alt+shift+right-click` anywhere
+(button events still arrive under the pointer grab even if keys are dead);
+`pkill -USR1 -x viewer-dd` from any shell (needs no keys at all); and as
+the last resort a VT switch — `Ctrl+Alt+F3` runs below any X grab.
+Independently of all that, a continuously held grab self-releases after
+60 seconds, so a wedged grab can't strand the host keyboard.
+
+**NumLock** is reconciled between host XKB state and the guest's reported
+LED (`Keyboard.Modifiers`) — toggles made while unfocused are caught up by
+a poll that debounces around forwarded presses so a host↔guest state lag
+can't double-toggle.
 
 ## Theme sync
 

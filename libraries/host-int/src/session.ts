@@ -115,14 +115,16 @@ export class ViewerSession extends EventEmitter {
                 }
             }
 
-            // viewer-dd gets the escape list verbatim ({vm}/{cli} expanded):
-            // it XGrabKeys each combo on root (fires while unfocused too)
-            // and dispatches the matching action itself. Windowed sessions
+            // viewer-dd gets the escape list ({vm}/{cli} expanded) PLUS the
+            // host's own VD-switch bindings mirrored in — while its keyboard
+            // grab is held the WM's global shortcuts are blind, so the
+            // viewer dispatches the user's real keybinds itself
+            // (kwin:<action> → kglobalaccel invokeShortcut). Spec entries
+            // override mirrored ones on a key conflict. Windowed sessions
             // get none — same "don't steal global combos" rule as the WM
             // install path below.
             const ddEscapes = dmabuf && d.headMode !== "windowed"
-                ? d.escapeShortcuts.map((s) =>
-                    `${s.keys}=${s.action.replaceAll("{vm}", this.spec.name).replaceAll("{cli}", cruiserCliPrefix())}`)
+                ? await this.ddEscapeList()
                 : undefined;
 
             // Newer krdp (Plasma ≥6.5) negotiates NLA but has no CredSSP
@@ -220,26 +222,39 @@ export class ViewerSession extends EventEmitter {
             }
         }
 
-        // Escape shortcuts via the WM's binding API — freerdp only. dmabuf
-        // skips this path entirely: viewer-dd owns escapes end-to-end with
-        // XGrabKey passive grabs on root (same coverage, no first-grab-wins
-        // races with kglobalaccel, and immune to the daemon flushing its
-        // in-memory state over kglobalshortcutsrc edits). Freerdp's own
-        // +grab-keyboard still gets these — the bindings are only shadowed
-        // while its window actually holds the grab. Windowed sessions get
-        // none — stealing keys from a normal app window is worse than
+        // Escape shortcuts via the WM's binding API. Freerdp installs the
+        // whole list (its +grab-keyboard only shadows the bindings while it
+        // actually holds the grab). dmabuf installs only `command:` actions
+        // — the daemon's [services]/gsettings entries make them fire while
+        // unfocused AND puts them in the host's shortcut UI; VD nav is the
+        // user's own WM bindings (mirrored into viewer-dd, never rewritten
+        // — installing kwin-group rows would clobber them) and ungrab/
+        // abort/kwin: are viewer-internal dispatches. Windowed sessions
+        // get none — stealing keys from a normal app window is worse than
         // losing the escape hatch.
-        if (!dmabuf && d.headMode !== "windowed" && this.adapter.caps.shortcuts) {
+        if (d.headMode !== "windowed" && this.adapter.caps.shortcuts) {
             for (let i = 0; i < d.escapeShortcuts.length; i++) {
                 const s = d.escapeShortcuts[i]!;
                 const action = parseEscapeAction(
                     s.action.replaceAll("{vm}", this.spec.name).replaceAll("{cli}", cruiserCliPrefix()));
-                if (action) {
-                    const un = await this.adapter.installEscapeShortcut(s.keys, action).catch(() => null);
-                    if (un) this.uninstallers.push(un);
-                }
+                if (!action || (dmabuf && action.kind !== "command")) continue;
+                const un = await this.adapter.installEscapeShortcut(s.keys, action).catch(() => null);
+                if (un) this.uninstallers.push(un);
             }
         }
+    }
+
+    /** Merge spec escapeShortcuts with the host's own VD-switch bindings
+     *  (mirrored so they keep working under the viewer's grab). Spec wins
+     *  on a key conflict; keys are normalized for dedupe. */
+    private async ddEscapeList(): Promise<string[]> {
+        const merged = new Map<string, string>();
+        const mirrored = await this.adapter.desktopSwitchBindings?.().catch(() => []) ?? [];
+        mirrored.forEach((m) => merged.set(normKeys(m.keys), m.action));
+        this.spec.display.escapeShortcuts.forEach((s) =>
+            merged.set(normKeys(s.keys),
+                s.action.replaceAll("{vm}", this.spec.name).replaceAll("{cli}", cruiserCliPrefix())));
+        return [...merged].map(([k, a]) => `${k}=${a}`);
     }
 
     /** Bring the existing viewer window forward (no-op if it couldn't be
@@ -299,8 +314,8 @@ function escapeRegex(s: string): string {
 }
 
 /** "host-desktop:1" | "desktop-cycle-left" | "desktop-cycle-right" |
- *  "ungrab" | "command:<cmdline>" (run via sh -c; {vm}/{cli} placeholders
- *  are already substituted by the caller). */
+ *  "ungrab" | "abort" | "kwin:<action>" | "command:<cmdline>" (run via
+ *  sh -c; {vm}/{cli} placeholders are already substituted by the caller). */
 export function parseEscapeAction(s: string): EscapeActionSpec | null {
     // arg is everything after the first colon — command cmdlines may
     // themselves contain colons, so split(":",2) is out.
@@ -312,9 +327,16 @@ export function parseEscapeAction(s: string): EscapeActionSpec | null {
         case "desktop-cycle-left": return { kind: "desktop-cycle", dir: -1 };
         case "desktop-cycle-right": return { kind: "desktop-cycle", dir: 1 };
         case "ungrab": return { kind: "ungrab" };
+        case "abort": return { kind: "abort" };
+        case "kwin": return arg ? { kind: "kwin", name: arg } : null;
         case "command": return arg ? { kind: "command", argv: ["sh", "-c", arg] } : null;
         default: return null;
     }
+}
+
+/** " Ctrl+Super + Left " → "ctrl+super+left" — dedupe key for escape merge. */
+function normKeys(keys: string): string {
+    return keys.toLowerCase().split("+").map((k) => k.trim()).filter(Boolean).join("+");
 }
 
 /** What `{cli}` expands to in escape-shortcut commands — dev trees resolve

@@ -61,6 +61,7 @@ usage: cruiser <area> <command> [args]
   vm filesync <name> [--watch]     run copy-mode shares now (--watch keeps syncing live)
   vm start <name> [--mode <headmode>] [--no-view]         (auto-opens the viewer like the UI)
   vm stop <name>                        vm kill <name>
+  vm reboot <name>                      vm suspend|resume <name>   (QGA reboot / QMP pause+cont)
   vm status <name>                      vm args <name>   (print QEMU argv)
   vm snapshots <name>                   vm snapshot <name> <snapname>
   vm restore <name> <snapname>          vm snapshot-rm <name> <snapname>
@@ -301,6 +302,9 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             break;
         }
         case "kill": { const h = await needVm(args[0]); await h.kill(); console.log("killed"); break; }
+        case "reboot": { const h = await needVm(args[0]); await h.reboot(); console.log("reboot requested"); break; }
+        case "suspend": { const h = await needVm(args[0]); await h.suspend(); console.log("suspended (vcpus paused)"); break; }
+        case "resume": { const h = await needVm(args[0]); await h.resume(); console.log("resumed"); break; }
         case "status": { const h = await needVm(args[0]); console.log(await h.probe()); break; }
         case "args": {
             const h = await needVm(args[0]);

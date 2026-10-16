@@ -54,6 +54,8 @@ export type EscapeActionSpec =
     | { kind: "host-desktop"; index: number }
     | { kind: "desktop-cycle"; dir: 1 | -1 }
     | { kind: "ungrab" }
+    | { kind: "abort" }                     // ungrab + minimize (viewer-side)
+    | { kind: "kwin"; name: string }        // invoke a named kglobalaccel kwin action
     | { kind: "command"; argv: string[] };
 
 export interface AdapterCaps {
@@ -93,4 +95,14 @@ export interface WmAdapter {
      * uninstaller.
      */
     installWindowRule?(rule: WindowRuleSpec): Promise<() => Promise<void>>;
+    /**
+     * The user's own desktop-switch bindings as configured in the WM —
+     * `{keys}` in the lowercase "ctrl+super+left" grammar, `action` an
+     * escape action string ("kwin:<action name>" on KDE, where the exact
+     * global-accel action is dispatched; "desktop-cycle-*"/"host-desktop:*"
+     * elsewhere). viewer-dd mirrors these into its in-grab intercept table
+     * so the user's real VD keys keep working while the guest holds the
+     * keyboard grab. Optional; absent → no mirroring.
+     */
+    desktopSwitchBindings?(): Promise<{ keys: string; action: string }[]>;
 }

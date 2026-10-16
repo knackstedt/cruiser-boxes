@@ -200,34 +200,68 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   `wl-paste --watch`→`xclip` mirror for compositors that expose
   data-control (wlroots) — on KWin it exits instantly since data-control
   is trusted-client-only.
-  Keyboard (dmabuf): minifb has no grab — `--grab` (spec.display.grabKeyboard)
-  holds an XGrabKeyboard on the focused head (retries 500ms — loses to
-  transient server grabs like KWin's tabbox), ungrabs on FocusOut. Focus
-  loss also replays key-ups for every qnum the guest still sees held
-  (tracked in KbCb) — the release half of a WM-consumed combo otherwise
-  leaves modifiers stuck down guest-side. kglobalaccel escape bindings go
-  blind under the grab, so `--escape "<mods+key>=<action>"` (session.ts
-  passes spec.display.escapeShortcuts with {vm}/{cli} expanded) makes the
-  viewer dispatch them itself: host-desktop/desktop-cycle via kglobalaccel
-  `invokeShortcut` (qdbus6→qdbus→gdbus, then xdotool EWMH fallback),
-  `command:` via sh -c, `ungrab` holds the grab off until refocus, `none`
-  swallows. dmabuf escapes are owned end-to-end by viewer-dd — the
-  kglobalshortcutsrc/khotkeys install path is skipped for dmabuf because
-  kglobalacceld rewrites the file from in-memory state (Plasma 6),
-  silently eating file-written bindings. Instead the viewer XGrabKeys
-  each combo's trigger+mods on the ROOT window (console 0's conn, 4
-  lock-state variants) — the same passive-grab mechanism global hotkeys
-  use: fires while the VM is unfocused OR focused-but-ungrabbed (the
-  passive grab consumes the combo before the window sees it), and is
-  fully shadowed by the active grab — no double-fire by construction.
-  While grabbed, device events go ONLY to the grabbing client — the grab
-  conn selects KeyPress|KeyRelease on the grab window and XSendEvents a
-  synthetic copy back to minifb's window (send_event bypasses grabs; the
-  send_event flag filters our own reinjections). 300ms per-combo debounce
-  eats X autorepeat re-fires. Keep default escape combos host-inert
-  (ctrl+super+fN): a combo that slips through anywhere hits the host's
-  own bindings (ctrl+alt+delete did exactly that → ksmserver logout →
-  dead session). `[grab]`/`[esc]` lines carry a `+Ns` elapsed prefix.
+  Input (dmabuf): the viewer bypasses minifb's input path entirely — a
+  second X11 conn (xdpy) selects KeyPress|KeyRelease|ButtonPress|
+  ButtonRelease on the minifb window and converts RAW KEYCODES to QEMU
+  qnums positionally (X keycode = evdev+8 = XT scancode for the base
+  block; the e0 block maps through a fixed table). Never map through
+  keysyms — minifb's Key enum had no Backquote entry, silently dropping
+  `/~ forever. Pointer position comes from XQueryPointer (a request —
+  minifb's event-fed mouse state stalls under a pointer grab since
+  motion isn't in the grab mask); buttons/wheel come from the raw
+  events (X btn 4/5 = wheel pulses → guest btns 3/4; 8/9 → side/extra).
+  `--grab` (spec.display.grabKeyboard) holds XGrabKeyboard +
+  XGrabPointer on the focused head (retries 500ms — loses to transient
+  server grabs like KWin's tabbox), ungrabs on FocusOut. Grab modes are
+  load-bearing and easy to get backwards: XGrabKeyboard must be
+  Async/Async — an ACTIVE Sync-mode grab queues every event without
+  delivering until an XAllowEvents nobody sends → keyboard dead while
+  focused, pointer still flowing (this bug once ate all host input).
+  Same for XGrabPointer — Async pointer mode (a Sync one froze the
+  whole mouse, clicks and cursor both dead). An active grab still
+  shadows KWin's passive Mod4+Button window-move (super+drag);
+  in-window clicks are forwarded to the guest, and an outside click
+  drops the grab + re-injects the press via XTestFakeButtonEvent —
+  a real device event, so focus moves and WM passive grabs fire as
+  if we'd never grabbed (wheel buttons 4-7 get a press+release pair
+  since they're transient pulses). Safety net:
+  abort-gen/ungrab-gen are AtomicU64 generation counters (a swap() flag
+  gets eaten by the first head to poll it), SIGUSR1 bumps abort_gen
+  (pkill -USR1 -x viewer-dd — no keyboard needed), ctrl+alt+shift+
+  right-click aborts via the pointer-grab path, and any grab held
+  >60s force-releases as a heartbeat so a wedged grab can't strand
+  the host. Focus loss
+  replays key-ups for every qnum the guest still sees held plus button
+  releases — the release half of a WM-consumed combo otherwise leaves
+  modifiers stuck down guest-side. Escape combos fire three ways:
+  daemon-installed `command:` actions (kglobalaccel/gsettings — the
+  only kind installed host-side for dmabuf; the others are viewer
+  dispatches), root-window XGrabKey passive grabs (Async modes, 4
+  lock-state variants, console-0's conn — BadAccess to a WM-owned
+  combo is eaten by a custom XSetErrorHandler), and in-grab dispatch
+  on the xwin key stream. `--escape "<mods+key>=<action>"` actions:
+  host-desktop/desktop-cycle via kglobalaccel `invokeShortcut`
+  (qdbus6→qdbus→gdbus, then xdotool EWMH fallback), `kwin:<name>` =
+  same invokeShortcut on a named action (session.ts mirrors the host's
+  OWN VD-switch bindings — kde [kwin] kglobalshortcutsrc rows via
+  kwinDesktopBindings, GNOME switch-to-workspace-* via gsettings — so
+  the user's real VD keys keep working under the grab; the mirror
+  never rewrites the host's config), `command:` via sh -c, `ungrab`
+  holds the grab off until refocus, `abort` releases grabs +
+  XIconifyWindow on EVERY head (one shared EscState; each window loop
+  watches abort_gen), `none` swallows. A combo already passively
+  grabbed by the WM loses our XGrabKey (BadAccess, logged) — but its
+  events then go to the WM's grab, never to us, so no double-fire.
+  300ms per-combo debounce + same-timestamp release/press peek eats X
+  autorepeat. NumLock: host XKB "Num Lock" indicator vs QEMU Keyboard
+  .Modifiers bit 1, polled 500ms on console 0 only; a forwarded
+  NumLock press suppresses the poll for 900ms and a mismatch must
+  persist 2 polls before we pulse — the guest LED lags the host XKB
+  flip and a poll in that window injected a permanent anti-phase
+  toggle. Keep default escape combos host-inert (ctrl+super+fN):
+  a combo that slips through anywhere hits the host's own bindings
+  (ctrl+alt+delete did exactly that → ksmserver logout → dead
+  session). `[grab]`/`[esc]` lines carry a `+Ns` elapsed prefix.
   `[fps]` lines log
   `/proc/self/fd` count + system `file-nr`: dma-buf/sync_file objects
   pinned in-kernel (nvidia EGL/venus fences) never appear in a process's
@@ -350,6 +384,10 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   CruiserService.run() locks per-VM (`busyVms`) when opts.vm is set — ops on
   different VMs overlap; the global `busy` flag only covers VM-agnostic
   actions (create/import/doctor).
+  The detail screen's `login` row shows the password masked until "show"
+  (`vm-pw` action → `svc.togglePassword` → `rdpPassword()`) — the plaintext
+  sits in `store.pwReveal` (VM-keyed, cleared on setRoute), never in
+  VmSummary where it'd be re-read every 3s poll.
   `term/` — the embedded guest terminal (Term button / `vm-term` action,
   route "term"). Chain: `term-dd` (Rust PTY proxy, `ssh -tt` over the
   hostfwd + cruiser key) ↔ length-prefixed stdio frames

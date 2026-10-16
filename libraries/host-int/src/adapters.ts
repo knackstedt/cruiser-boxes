@@ -21,7 +21,7 @@ import {
     x11CurrentDesktop, x11Desktops, x11FindWindow, x11FindWindows, x11Focus, x11Monitors,
     x11MoveToDesktop, x11MoveToMonitor, x11SetFullscreen, x11SwitchDesktop,
 } from "./x11";
-import { kdeDesktops, kdeInstallEscapeShortcut, kdeInstallWindowRule, kdeMonitors, kdeSwitchDesktop, kwinScript } from "./kde";
+import { kdeDesktops, kdeDesktopSwitchBindings, kdeInstallEscapeShortcut, kdeInstallWindowRule, kdeMonitors, kdeSwitchDesktop, kwinScript } from "./kde";
 
 // ── shared X11 machinery ──
 
@@ -58,7 +58,17 @@ export async function runEscape(action: EscapeActionSpec, kde: boolean): Promise
         const next = ((cur - 1 + action.dir + ds.length) % ds.length) + 1;
         return x11SwitchDesktop(next);
     }
-    if (action.kind === "ungrab") return;   // freerdp handles its own grab release combo
+    if (action.kind === "ungrab" || action.kind === "abort") return;   // viewer-side dispatches
+    if (action.kind === "kwin") {
+        // named kglobalaccel action — the same entry point the binding calls
+        for (const bin of ["qdbus6", "qdbus"].values())
+            if ((await run(bin, ["org.kde.kglobalaccel", "/component/kwin",
+                "org.kde.kglobalaccel.Component.invokeShortcut", action.name], { noThrow: true })).code === 0) return;
+        await run("gdbus", ["call", "--session", "--dest", "org.kde.kglobalaccel",
+            "--object-path", "/component/kwin", "--method",
+            "org.kde.kglobalaccel.Component.invokeShortcut", action.name], { noThrow: true });
+        return;
+    }
     if (action.kind === "command") { await run(action.argv[0]!, action.argv.slice(1), { noThrow: true }); return; }
 }
 
@@ -74,6 +84,7 @@ export function kdeX11(): WmAdapter {
         },
         installEscapeShortcut: (keys, action) => kdeInstallEscapeShortcut(keys, action),
         installWindowRule: kdeInstallWindowRule,
+        desktopSwitchBindings: kdeDesktopSwitchBindings,
         // keep runEscape usable for runtime (non-installed) escapes
     };
 }
@@ -124,6 +135,7 @@ export function kdeWayland(): WmAdapter {
         // KWin rules reach Wayland clients too — the only placement path
         // this adapter has until the KWin-script window ops land.
         installWindowRule: kdeInstallWindowRule,
+        desktopSwitchBindings: kdeDesktopSwitchBindings,
     };
 }
 
@@ -132,7 +144,7 @@ export function kdeWayland(): WmAdapter {
 
 export function gnomeX11(): WmAdapter {
     const base = x11Base("gnome-x11", { monitors: true, desktops: true, placeWindows: true, shortcuts: true });
-    return { ...base, installEscapeShortcut: gnomeInstallEscapeShortcut };
+    return { ...base, installEscapeShortcut: gnomeInstallEscapeShortcut, desktopSwitchBindings: gnomeDesktopSwitchBindings };
 }
 
 /**
@@ -170,6 +182,50 @@ function gnomeKeybindFor(action: EscapeActionSpec): [string, string] | null {
     if (action.kind === "desktop-cycle")
         return ["org.gnome.desktop.wm.keybindings", action.dir === 1 ? "switch-to-workspace-right" : "switch-to-workspace-left"];
     return null;
+}
+
+/** "<Super><Primary>Page_Up" → "super+ctrl+pageup" — the GNOME wm
+ *  keybindings notation → our lowercase grammar. Exported for tests. */
+export function gnomeUnkeys(b: string): string | null {
+    const mods: Record<string, string> = {
+        super: "super", primary: "ctrl", control: "ctrl", ctrl: "ctrl",
+        alt: "alt", shift: "shift", meta: "super", mod1: "alt", mod4: "super",
+    };
+    const keys: Record<string, string> = {
+        page_up: "pageup", page_down: "pagedown", return_: "enter", return: "enter",
+        escape: "escape", delete: "delete", backspace: "backspace", space: "space",
+        tab: "tab", home: "home", end: "end", insert: "insert",
+    };
+    const m = /^((?:<\w+>)*)(.*)$/.exec(b.trim());
+    if (!m || (!m[1] && !m[2])) return null;
+    const parts = [...m[1]!.matchAll(/<(\w+)>/g)]
+        .map((x) => mods[x[1]!.toLowerCase()]).filter((x): x is string => !!x);
+    const k = keys[m[2]!.toLowerCase()] ?? m[2]!.toLowerCase();
+    if (!k) return null;
+    return [...parts, k].join("+");
+}
+
+/** The user's own GNOME workspace-switch bindings (wm.keybindings), mirrored
+ *  so the viewer can dispatch the same switch while its grab is held —
+ *  desktop-cycle/host-desktop actions take the EWMH fallback at dispatch. */
+async function gnomeDesktopSwitchBindings(): Promise<{ keys: string; action: string }[]> {
+    const SCHEMA = "org.gnome.desktop.wm.keybindings";
+    const out: { keys: string; action: string }[] = [];
+    const get = async (key: string) =>
+        (await run("gsettings", ["get", SCHEMA, key], { noThrow: true })).stdout.trim();
+    const list = (s: string) => [...s.matchAll(/'([^']*)'/g)].map((m) => m[1]!);
+    for (const [key, action] of [["switch-to-workspace-left", "desktop-cycle-left"],
+        ["switch-to-workspace-right", "desktop-cycle-right"]].values())
+        for (const b of list(await get(key))) {
+            const keys = gnomeUnkeys(b);
+            if (keys) out.push({ keys, action });
+        }
+    for (let i = 1; i <= 9; i++)
+        for (const b of list(await get(`switch-to-workspace-${i}`))) {
+            const keys = gnomeUnkeys(b);
+            if (keys) out.push({ keys, action: `host-desktop:${i}` });
+        }
+    return out;
 }
 
 /** GVariant string literal — single-quoted, backslash escapes. */
@@ -222,6 +278,7 @@ export function gnomeWayland(): WmAdapter {
         moveToMonitor: async () => {},
         focus: async () => {},
         installEscapeShortcut: gnomeInstallEscapeShortcut,
+        desktopSwitchBindings: gnomeDesktopSwitchBindings,
     };
 }
 

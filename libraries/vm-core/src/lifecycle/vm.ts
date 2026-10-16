@@ -399,6 +399,16 @@ export class VmHandle {
     async suspend(): Promise<void> { await this.withQmp((q) => q.stop()); }
     async resume(): Promise<void> { await this.withQmp((q) => q.cont()); }
 
+    /** Reboot: graceful guest-initiated restart via QGA guest-shutdown
+     *  (mode=reboot), falling back to a hard QMP system_reset when the
+     *  agent is absent — same escalation shape as stop(). */
+    async reboot(): Promise<void> {
+        let agent = false;
+        try { await this.withQga((g) => g.shutdown("reboot"), 5_000); agent = true; } catch { /* no agent */ }
+        if (!agent) await this.withQmp((q) => q.execute("system_reset"));
+        void appendVmLog(this.paths, `reboot: requested (agent=${agent})`);
+    }
+
     // ── disk ops ──
 
     diskPath(): string {

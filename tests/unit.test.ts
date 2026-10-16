@@ -15,7 +15,8 @@ import { pickImageFromIndex, supportsKrdp, defaultRelease } from "../libraries/p
 import { freerdpArgs } from "../libraries/host-int/src/freerdp";
 import { ddViewerArgs } from "../libraries/host-int/src/ddviewer";
 import { parseEscapeAction } from "../libraries/host-int/src/session";
-import { kdeDesktopsRc, kdeKeys, kglobalConflicts, khotkeysDataGroups, khotkeysDropGroups, khotkeysUuid, KWIN_VD_UUID, unwrapShC } from "../libraries/host-int/src/kde";
+import { kdeDesktopsRc, kdeKeys, kdeUnkeys, kglobalConflicts, khotkeysDataGroups, khotkeysDropGroups, khotkeysUuid, KWIN_VD_UUID, kwinDesktopBindings, unwrapShC } from "../libraries/host-int/src/kde";
+import { gnomeUnkeys } from "../libraries/host-int/src/adapters";
 import { autoSnaps, autoSnapshotDue, autoPruneList } from "../libraries/vm-core/src/lifecycle/autosnap";
 import type { SnapshotInfo } from "../libraries/vm-core/src/disk/ops";
 
@@ -485,6 +486,9 @@ describe("escape shortcuts", () => {
         expect(parseEscapeAction("host-desktop:1")).toEqual({ kind: "host-desktop", index: 1 });
         expect(parseEscapeAction("desktop-cycle-left")).toEqual({ kind: "desktop-cycle", dir: -1 });
         expect(parseEscapeAction("ungrab")).toEqual({ kind: "ungrab" });
+        expect(parseEscapeAction("abort")).toEqual({ kind: "abort" });
+        expect(parseEscapeAction("kwin:Switch to Desktop 2")).toEqual({ kind: "kwin", name: "Switch to Desktop 2" });
+        expect(parseEscapeAction("kwin:")).toBeNull();
         expect(parseEscapeAction("bogus")).toBeNull();
     });
     test("parseEscapeAction command — sh -c wrapper, keeps colons", () => {
@@ -521,6 +525,41 @@ describe("escape shortcuts", () => {
     test("default spec carries the kill escape hatch", () => {
         const esc = defaultSpec("abc").display.escapeShortcuts;
         expect(esc).toContainEqual({ keys: "ctrl+super+end", action: "command:{cli} vm kill {vm}" });
+        // the abort combo (ungrab + minimize) and guest power actions —
+        // reboot/suspend/resume/stop ride command: through the cli
+        expect(esc).toContainEqual({ keys: "ctrl+super+escape", action: "abort" });
+        expect(esc).toContainEqual({ keys: "ctrl+super+f5", action: "command:{cli} vm reboot {vm}" });
+        expect(esc).toContainEqual({ keys: "ctrl+super+f6", action: "command:{cli} vm suspend {vm}" });
+        expect(esc).toContainEqual({ keys: "ctrl+super+f7", action: "command:{cli} vm resume {vm}" });
+        expect(esc).toContainEqual({ keys: "ctrl+super+f8", action: "command:{cli} vm stop {vm}" });
+    });
+    test("kwinDesktopBindings mirrors the host's own VD-switch keys", () => {
+        const src = [
+            "[kwin]",
+            "Switch to Desktop 1=Ctrl+F1,Ctrl+F1,Switch to Desktop 1",
+            "Switch to Desktop 2=Ctrl+F2\\tMeta+Alt+2,Ctrl+F2,Switch to Desktop 2",
+            "Switch One Desktop to the Right=Meta+Ctrl+Right,none,Switch One Desktop to the Right",
+            "Show Desktop Grid=Meta+F8,Meta+F8,Show Desktop Grid", // not a VD switch
+            "Walk Through Desktops=none,,Walk Through Desktops",
+            "[plasmashell]",
+            "activate task manager entry 1=Meta+1,Meta+1,activate task manager entry 1",
+        ].join("\n");
+        expect(kwinDesktopBindings(src)).toEqual([
+            { keys: "ctrl+f1", action: "kwin:Switch to Desktop 1" },
+            { keys: "ctrl+f2", action: "kwin:Switch to Desktop 2" },
+            { keys: "super+alt+2", action: "kwin:Switch to Desktop 2" },
+            { keys: "super+ctrl+right", action: "kwin:Switch One Desktop to the Right" },
+        ]);
+    });
+    test("kdeUnkeys normalizes KDE notation into our grammar", () => {
+        expect(kdeUnkeys("Meta+Ctrl+Left")).toBe("super+ctrl+left");
+        expect(kdeUnkeys("Ctrl+Alt+Del")).toBe("ctrl+alt+delete");
+        expect(kdeUnkeys("Esc")).toBe("escape");
+    });
+    test("gnomeUnkeys normalizes gsettings notation into our grammar", () => {
+        expect(gnomeUnkeys("<Super><Primary>Page_Up")).toBe("super+ctrl+pageup");
+        expect(gnomeUnkeys("<Control><Alt>Left")).toBe("ctrl+alt+left");
+        expect(gnomeUnkeys("<Shift>F6")).toBe("shift+f6");
     });
     test("khotkeysDataGroups maps top-level Data_N markers", () => {
         const src = [
