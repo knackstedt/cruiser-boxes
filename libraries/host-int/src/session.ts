@@ -30,8 +30,6 @@ export class ViewerSession extends EventEmitter {
     private opts: ViewerSessionOpts;
     private child: ChildProcess | null = null;
     private window: WindowHandle | null = null;
-    /** All head windows (multi-head dmabuf: one per guest console). */
-    private windows: WindowHandle[] = [];
     private uninstallers: (() => Promise<void>)[] = [];
     private cleanupDone: Promise<void> = Promise.resolve();
 
@@ -65,16 +63,20 @@ export class ViewerSession extends EventEmitter {
         // single absolute pointer over the whole composite and QEMU scales
         // per-console, so the viewer needs each console's composite offset
         // (host-mirror positions, normalized — same shape guestKdeMonitorsScript
-        // pushes). Console order = picked monitor order = virtio outputs[].
-        let ddOffsets: string | undefined;
+        // pushes). `rects` are the picked monitors in absolute px — viewer-dd
+        // spans ONE window over their union (freerdp /multimon semantics).
+        // Console order = picked monitor order = virtio outputs[].
+        const ddGeo: { offsets?: string; rects?: string } = {};
         if (dmabuf && this.adapter.caps.monitors) {
             const host = await this.adapter.monitors().catch(() => []);
             const picked = d.monitors === "all" ? host : host.filter((m) => d.monitors.includes(m.name));
             if (picked.length > 1) {
                 const ox = Math.min(...picked.map((m) => m.x));
                 const oy = Math.min(...picked.map((m) => m.y));
-                ddOffsets = picked.map((m) => `${m.x - ox},${m.y - oy}`).join(" ");
+                ddGeo.offsets = picked.map((m) => `${m.x - ox},${m.y - oy}`).join(" ");
             }
+            if (picked.length && d.headMode !== "windowed")
+                ddGeo.rects = picked.map((m) => `${m.x},${m.y},${m.w},${m.h}`).join(" ");
         }
 
         // Adopt a live viewer for this VM when its window exists — killing a
@@ -91,9 +93,9 @@ export class ViewerSession extends EventEmitter {
             for (const p of stale.stdout.trim().split("\n").filter(Boolean))
                 try { process.kill(Number(p), "SIGTERM"); } catch { /* already gone */ }
 
-            // Pre-map VD placement: a KWin window rule lands every viewer
-            // head on its target desktop at map time. Without it each window
-            // flashes on the current desktop before the post-map
+            // Pre-map VD placement: a KWin window rule lands the viewer
+            // window on its target desktop at map time. Without it the
+            // window flashes on the current desktop before the post-map
             // moveToDesktop drags it over (still kept below as the fallback
             // for adapters without a rules api — and for adopted windows).
             if (this.adapter.installWindowRule && d.headMode === "virtual-desktop") {
@@ -103,13 +105,13 @@ export class ViewerSession extends EventEmitter {
                 // would write a rule KWin can never satisfy.
                 if (vd?.id && KWIN_VD_UUID.test(vd.id)) {
                     const un = await this.adapter.installWindowRule({
-                        titleRegex: `^cruiser:${escapeRegex(this.spec.name)}(:[0-9]+)?$`,
+                        titleRegex: `^cruiser:${escapeRegex(this.spec.name)}$`,
                         wmClass: dmabuf ? undefined : "xfreerdp",
                         desktopId: vd.id,
                         description: `cruiser: ${this.spec.name} → desktop ${vd.index}${vd.name ? ` (${vd.name})` : ""}`,
                     }).catch(() => null);
                     if (un) this.uninstallers.push(un);
-                    else this.opts.log?.(`window rule for '${this.spec.name}' failed to install — heads will be moved post-map`);
+                    else this.opts.log?.(`window rule for '${this.spec.name}' failed to install — window will be moved post-map`);
                 } else {
                     this.opts.log?.(`no VD uuid for desktop ${d.virtualDesktop} — post-map placement only`);
                 }
@@ -134,7 +136,7 @@ export class ViewerSession extends EventEmitter {
             const tlsOnly = !dmabuf && await rdpTlsOnly(this.spec.network.rdpPort!).catch(() => false);
             for (let attempt = 0; ; attempt++) {
                 const { child } = dmabuf
-                    ? await launchDdViewer(this.spec, ddOffsets, ddEscapes)
+                    ? await launchDdViewer(this.spec, ddGeo, ddEscapes)
                     : await launchFreerdp(this.spec, { rdpPort: this.spec.network.rdpPort!, logFile, tlsOnly: tlsOnly || attempt > 0 });
                 this.child = child;
                 child.on("exit", (c) => { this.child = null; this.emit("closed", c); this.cleanupDone = this.cleanup(); });
@@ -142,8 +144,9 @@ export class ViewerSession extends EventEmitter {
 
                 // Find OUR window. freerdp: by pid — title matching races
                 // with other viewers. viewer-dd: minifb sets no _NET_WM_PID
-                // and all heads share one pid anyway, so match the per-VM
-                // title — the stale-viewer reaper above guarantees it's ours.
+                // at map time (the binary sets it itself post-create), so
+                // match the per-VM title — the stale-viewer reaper above
+                // guarantees it's ours.
                 // Racing against child exit keeps a dead viewer from burning
                 // the whole window-wait timeout.
                 const matcher: WindowMatcher = dmabuf
@@ -173,50 +176,25 @@ export class ViewerSession extends EventEmitter {
             }
         }
 
-        // Multi-head dmabuf: viewer-dd opens one window per guest console,
-        // titled "cruiser:<vm>:<i>" — collect every head for placement.
-        // Title matching works for both owned (all heads share the child pid
-        // anyway) and adopted windows.
-        if (dmabuf && this.window && this.adapter.findWindows) {
-            const hostMons0 = await this.adapter.monitors().catch(() => []);
-            const want = d.monitors === "all" ? hostMons0.length : Math.max(1, d.monitors.length);
-            const all = await this.adapter.findWindows({ title: this.titleRe() }, 6_000, Math.max(1, want)).catch(() => []);
-            if (all.length) this.windows = all;
-        }
-        if (!this.windows.length && this.window) this.windows = [this.window];
-
+        // Both viewers are single-window now — freerdp spans monitors via
+        // /multimon, viewer-dd via --rects + _NET_WM_FULLSCREEN_MONITORS.
         if (this.window && this.adapter.caps.placeWindows) {
             if (d.headMode === "windowed") {
                 // A detached freerdp lands on whatever desktop the WM assigns —
                 // pull it onto the user's current desktop and raise it so it
                 // is actually visible.
                 const cur = (await this.adapter.desktops().catch(() => [])).find((x) => x.current)?.index;
-                for (let i = 0; i < this.windows.length; i++)
-                    if (cur !== undefined) await this.adapter.moveToDesktop(this.windows[i]!, cur).catch(() => {});
+                if (cur !== undefined) await this.adapter.moveToDesktop(this.window, cur).catch(() => {});
                 await this.adapter.focus(this.window).catch(() => {});
-            } else if (dmabuf) {
-                // Per-head placement: window ":i" ↔ guest output i ↔ host
-                // monitor i (the outputs[] mirror order built into QEMU).
-                const hostMons = await this.adapter.monitors().catch(() => []);
-                const sel = d.monitors === "all" ? hostMons : hostMons.filter((m) => (d.monitors as string[]).includes(m.name));
-                // per-head ops are independent — run them together or heads
-                // place visibly one-by-one
-                await Promise.all(this.windows.map(async (w) => {
-                    const idx = Number(w.title.match(/:(\d+)$/)?.[1] ?? 0);
-                    const mon = sel[idx] ?? sel[0];
-                    if (mon) await this.adapter.moveToMonitor(w, mon.name).catch(() => {});
-                    if (d.headMode === "virtual-desktop")
-                        await this.adapter.moveToDesktop(w, d.virtualDesktop).catch(() => {});
-                    if (d.headMode === "fullscreen-monitor" && d.sticky)
-                        await this.adapter.moveToDesktop(w, "all").catch(() => {});
-                    await this.adapter.setFullscreen(w, true).catch(() => {});
-                }));
             } else {
                 if (d.headMode === "virtual-desktop")
                     await this.adapter.moveToDesktop(this.window, d.virtualDesktop).catch(() => {});
                 if (d.headMode === "fullscreen-monitor" && d.sticky)
                     await this.adapter.moveToDesktop(this.window, "all").catch(() => {});
-                if (d.headMode === "fullscreen-monitor" && d.monitors !== "all" && d.monitors[0])
+                // dmabuf + --rects self-places over the monitor union — the
+                // moveToMonitor hint only remains for freerdp and for a
+                // dmabuf session that lacked monitor info to span with.
+                if (d.headMode === "fullscreen-monitor" && d.monitors !== "all" && d.monitors[0] && !(dmabuf && ddGeo.rects))
                     await this.adapter.moveToMonitor(this.window, d.monitors[0]).catch(() => {});
                 await this.adapter.setFullscreen(this.window, true).catch(() => {});
             }
@@ -283,7 +261,6 @@ export class ViewerSession extends EventEmitter {
     async detach(): Promise<void> {
         this.child = null;
         this.window = null;
-        this.windows = [];
         await (this.cleanupDone = this.cleanup());
     }
 
@@ -296,11 +273,14 @@ export class ViewerSession extends EventEmitter {
         await this.cleanupDone;
     }
 
-    /** Anchored viewer-title matcher — "cruiser:<vm>" or "cruiser:<vm>:<i>".
-     *  A bare substring would also catch a different VM whose NAME has this
-     *  one as a prefix ("devinbox" matching "cruiser:devinbox2:0"). */
+    /** Anchored viewer-title matcher — "cruiser:<vm>" exactly. A bare
+     *  substring would also catch a different VM whose NAME has this one
+     *  as a prefix ("devinbox" matching "cruiser:devinbox2"), and matching
+     *  a per-head "cruiser:<vm>:<i>" left over from a pre-single-window
+     *  viewer-dd would adopt a stale window — those are reaped by cmdline
+     *  instead. */
     private titleRe(): RegExp {
-        return new RegExp(`^cruiser:${escapeRegex(this.spec.name)}(:\\d+)?$`);
+        return new RegExp(`^cruiser:${escapeRegex(this.spec.name)}$`);
     }
 
     private async cleanup(): Promise<void> {

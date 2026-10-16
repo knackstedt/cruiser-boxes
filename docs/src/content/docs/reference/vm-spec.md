@@ -53,11 +53,11 @@ Edit while the VM is stopped; the next `vm start` picks changes up.
 | `wallpaper` | `{managed:true, position:"bottom-right"}` | cruiser-managed guest wallpaper — watermarked with the VM name + escape hints; `position`: corner/`center`/`off` (no watermark); `managed:false` leaves the guest alone; `source` = host image path (default: generated gradient) |
 | `sound` / `microphone` | `true` | RDP redirection toggles |
 | `clipboard` | `true` | guest clipboard sync — freerdp `+clipboard` on the rdp viewer; on dmabuf, a `qemu-vdagent` chardev ↔ `viewer-dd` D-Bus bridge (text only). dmabuf needs a VM restart to add/remove the port. Wayland guests: spice-vdagent is X11-only — host→guest reaches native Wayland apps via KWin's bridge, but guest→host only sees X11/XWayland copies |
-| `grabKeyboard` | `false` | `false` → freerdp `-grab-keyboard` (host keeps global shortcuts); `true` → guest gets all keys — freerdp `+grab-keyboard`, dmabuf → viewer-dd holds X11 keyboard+pointer grabs while a head is focused (released on focus loss). Escape shortcuts install either way: under grab they're shadowed only while the viewer holds it — dmabuf self-dispatches there, freerdp swallows them |
+| `grabKeyboard` | `false` | `false` → freerdp `-grab-keyboard` (host keeps global shortcuts); `true` → guest gets all keys — freerdp `+grab-keyboard`, dmabuf → viewer-dd holds X11 keyboard+pointer grabs while the window is focused (released on focus loss). Escape shortcuts install either way: under grab they're shadowed only while the viewer holds it — dmabuf self-dispatches there, freerdp swallows them |
 
 Escape actions: `host-desktop:<n>` · `desktop-cycle-left` ·
 `desktop-cycle-right` · `ungrab` (hold the grab off until refocus) ·
-`abort` (release grabs + minimize all viewer heads — viewer-side) ·
+`abort` (release grabs + minimize the viewer window — viewer-side) ·
 `kwin:<action name>` (invoke a named kglobalaccel kwin action — how
 mirrored host VD bindings dispatch) · `none` · `command:<cmdline>` (run
 via `sh -c`; `{vm}` expands to the VM name, `{cli}` to the cruiser CLI —

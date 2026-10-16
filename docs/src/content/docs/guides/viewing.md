@@ -34,6 +34,14 @@ freerdp into a dead forward.
 | `windowed` | `/size:WxH` from `display.windowSize` | none — normal window |
 | `app` | — | no viewer; see [app mode](/guides/app-mode/) |
 
+The dmabuf viewer (`display.viewer: "dmabuf"`) follows the same shape:
+**one** window spanning the picked monitors — viewer-dd positions itself
+over their union and sets the `_NET_WM_FULLSCREEN_MONITORS` hint; the
+session's fullscreen toggle then spans it across outputs (same as
+freerdp), drawing each guest console into its monitor's rect. In
+`windowed` mode it letterboxes the whole guest composite into one
+resizable window.
+
 Related spec fields: `display.monitors` (`"all"` = `/multimon`, else a list
 of monitor names for `/monitor:`), `display.sticky`,
 `display.virtualDesktop`, `display.windowSize`, `display.dynamicResolution`,
@@ -71,7 +79,7 @@ desktop 1 instead of sending the combo to the guest.
 
 Actions: `host-desktop:<n>`, `desktop-cycle-left`, `desktop-cycle-right`,
 `ungrab` (release the input grab until refocus), `abort` (release grabs +
-minimize every viewer head — the panic combo), `kwin:<action name>`
+minimize the viewer window — the panic combo), `kwin:<action name>`
 (invoke a named kglobalaccel action on the kwin component — the same entry
 point the host's own binding calls), `none` (swallow), and
 `command:<cmdline>` — arbitrary host command via `sh -c` (`{vm}`/`{cli}`
@@ -117,7 +125,7 @@ mirror never rewrites your bindings (kglobalacceld flushes in-memory state
 over file edits anyway).
 
 **Input grabs are focus-scoped.** viewer-dd only holds the keyboard
-(XGrabKeyboard) and pointer (XGrabPointer) while a head is focused —
+(XGrabKeyboard) and pointer (XGrabPointer) while the window is focused —
 unfocus and both release, so the VM never eats host input. The pointer
 grab is what defeats KWin's Super+drag window-move: that's a passive
 *button* grab, which a keyboard grab alone can't shadow — an *active*

@@ -387,9 +387,11 @@ describe("ddViewerArgs", () => {
         expect(a).toContain("--size");
         expect(a).not.toContain("--no-clipboard");
         expect(a).not.toContain("--grab");
-        const b = ddViewerArgs(s, "/run/mon.sock", "0,0 1920,0");
+        const b = ddViewerArgs(s, "/run/mon.sock", { offsets: "0,0 1920,0", rects: "0,0,1920,1080 1920,0,1920,1080" });
         expect(b).toContain("--offsets");
         expect(b).toContain("0,0 1920,0");
+        expect(b).toContain("--rects");
+        expect(b).toContain("0,0,1920,1080 1920,0,1920,1080");
     });
     test("clipboard off → --no-clipboard; grabKeyboard → --grab", () => {
         const s = defaultSpec("t1");

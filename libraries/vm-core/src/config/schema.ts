@@ -100,7 +100,7 @@ export const EscapeAction = z.enum([
     "desktop-cycle-left",
     "desktop-cycle-right",
     "ungrab",              // release viewer grab (freerdp ctrl+alt style)
-    "abort",               // release grab + minimize all viewer heads
+    "abort",               // release grab + minimize the viewer window
     "kwin",                // kwin:<action name> — invoke a named KWin global shortcut
     "none",
 ]);

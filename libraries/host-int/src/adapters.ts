@@ -18,7 +18,7 @@ import type {
     WindowHandle, WindowMatcher, WmAdapter,
 } from "./types";
 import {
-    x11CurrentDesktop, x11Desktops, x11FindWindow, x11FindWindows, x11Focus, x11Monitors,
+    x11CurrentDesktop, x11Desktops, x11FindWindow, x11Focus, x11Monitors,
     x11MoveToDesktop, x11MoveToMonitor, x11SetFullscreen, x11SwitchDesktop,
 } from "./x11";
 import { kdeDesktops, kdeDesktopSwitchBindings, kdeInstallEscapeShortcut, kdeInstallWindowRule, kdeMonitors, kdeSwitchDesktop, kwinScript } from "./kde";
@@ -31,7 +31,6 @@ function x11Base(id: string, caps: AdapterCaps) {
         monitors: x11Monitors,
         desktops: x11Desktops,
         findWindow: (m: WindowMatcher, t?: number) => x11FindWindow(m, t),
-        findWindows: (m: WindowMatcher, t?: number, want?: number) => x11FindWindows(m, t, want),
         moveToDesktop: (w: WindowHandle, d: number | "all") => x11MoveToDesktop(w, d),
         setFullscreen: (w: WindowHandle, on: boolean) => x11SetFullscreen(w, on),
         async moveToMonitor(w: WindowHandle, monitor: string) {

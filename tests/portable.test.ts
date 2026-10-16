@@ -184,6 +184,16 @@ describe("bootRelevantChanges", () => {
         d.shares[0]!.enabled = false;    // leaves the launch argv
         expect(bootRelevantChanges(a, d)).toEqual(["shares"]);
     });
+    test("post-parse key order doesn't flag (launch snapshot vs live spec)", () => {
+        // pendingRestart()'s baseline re-parses launch-spec.json → zod-
+        // canonical key order; the live spec keeps runtime-append order
+        // (registry's sshPort/rdpPort, buildArgv's renderNode). Same values.
+        const a = parseVmSpec(JSON.parse(JSON.stringify(spec())));
+        a.gpu = { mode: a.gpu.mode, renderNode: "/dev/dri/renderD129", hostmemMiB: a.gpu.hostmemMiB };
+        const b = spec();
+        b.gpu.renderNode = "/dev/dri/renderD129";
+        expect(bootRelevantChanges(a, b)).toEqual([]);
+    });
     test("usb serial isn't in argv — vendor/product changes flag", () => {
         const a = spec();
         const b = spec();

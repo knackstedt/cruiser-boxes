@@ -133,22 +133,21 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   kwinrulesrc group (title regex + wmclass match, `desktops=<vd-uuid>`,
   desktopsrule=3 "apply at initial mapping" — KWin enums: match 1=exact
   2=substr 3=regex; policy 2=force 3=apply 4=remember) before the viewer
-  spawns, so heads map straight onto the target VD with no flash — and it
-  works on Wayland clients too. Rules register in `[General] rules=`/`count`
-  + `qdbus org.kde.KWin /KWin reconfigure`; kwriteconfig5 has no
-  --delete-group so uninstall drops the ini section by rewrite.
+  spawns, so the window maps straight onto the target VD with no flash —
+  and it works on Wayland clients too. Rules register in `[General]
+  rules=`/`count` + `qdbus org.kde.KWin /KWin reconfigure`; kwriteconfig5
+  has no --delete-group so uninstall drops the ini section by rewrite.
   `desktops=` accepts ONLY a VD UUID — never a numeric index: the kde-x11
   `desktops()` x11 fallback reports `id=String(idx)` which once wrote a dead
-  `desktops=1` rule (heads mapped on the current VD anyway). Guards:
+  `desktops=1` rule (the window mapped on the current VD anyway). Guards:
   `kdeDesktops` falls back to kwinrc `[Desktops] Id_N=` when the dbus probe
   flakes, session.ts requires `KWIN_VD_UUID` before passing `desktopId`, and
   the installer throws on non-UUID ids. The group hash keys on
   (title,class,desktop) so a changed VD target would orphan a stale rule —
-  install sweeps same-window `cruiser-*` groups. Window finding: dmabuf
-  heads are minifb windows — the toolkit sets neither WM_CLASS nor
-  _NET_WM_PID (viewer-dd sets both via FFI after create) and all heads share
-  one pid, so the session matches the anchored title regex
-  `^cruiser:<vm>(:\d+)?$`, not pid.
+  install sweeps same-window `cruiser-*` groups. Window finding: the dmabuf
+  window is minifb — the toolkit sets neither WM_CLASS nor _NET_WM_PID
+  (viewer-dd sets both via FFI after create), so the session matches the
+  anchored title regex `^cruiser:<vm>$`, not pid.
   viewer-dd (dmabuf): QEMU's @dbus-display keeps effectively ONE client
   channel — the enumeration conn dies after RegisterListener and extra
   add_client channels EPIPE at the p2p handshake, so all per-console
@@ -156,11 +155,29 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   registration. QMP `getfd` fdnames are global-namespace — unique per
   channel or concurrent opens collide onto a stale fd. Dead-QEMU watchdog =
   qemu.pid pid + /proc starttime beside monitor.sock (detects restart too);
-  don't ping the control conn, QEMU closes it by design. Multi-head:
-  virtio `outputs[]` mirrors adapter.monitors() order (window title
-  `cruiser:<vm>:<i>` ↔ guest output i ↔ host monitor i); guest scanouts are
-  per-console dims — letterbox fit_viewport math is shared by render AND
-  input (SetAbsPosition wants scanout px).
+  don't ping the control conn, QEMU closes it by design. Multi-head is
+  ONE window now (freerdp /multimon semantics): every console's Listener
+  feeds a single GL worker that draws each console's texture into its
+  monitor rect. `--rects "x,y,w,h …"` (absolute host px, console order =
+  virtio outputs[] order = adapter.monitors() pick order) makes the
+  viewer self-position the window over the union via XMoveResizeWindow
+  and carry `_NET_WM_FULLSCREEN_MONITORS` (EWMH monitor indices are
+  Xinerama order — viewer-dd dlopens libXinerama and matches rects to
+  screens by geometry). CRITICAL: the hint is written only AFTER WM_STATE
+  exists and the viewer NEVER requests _NET_WM_STATE_FULLSCREEN itself —
+  a window born/adopted with hint+fullscreen state crashes KWin 5.27 in
+  Workspace::xineramaIndexToOutput during manage() (4x SIGSEGV restart
+  loop observed, kwin recovered only after the window died). The
+  session's setFullscreen (wmctrl path) evaluates the dormant hint —
+  same timing as freerdp /multimon.
+  head_rects() only uses the span layout while the drawable is union-sized
+  (±2px) — a WM that collapsed the span gets the composite-letterbox
+  fallback instead of a crop; windowed mode letterboxes the whole
+  composite and single-head tracks guest res via XResizeWindow. Input hits
+  the same map: window px → nearest head rect → console-local px →
+  composite fraction × console dims (the virtio tablet's range covers the
+  whole composite; --offsets carries the normalized composite layout).
+  Consoles with no scanout yet draw black (HeadSlot.img None is skipped).
   Clipboard (dmabuf): `-chardev qemu-vdagent,clipboard=on,mouse=off` +
   virtserialport `com.redhat.spice.0` (args.ts, gated on display.clipboard +
   a `-chardev help` probe — backend needs CONFIG_SPICE_PROTOCOL). Guest side
@@ -211,7 +228,7 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   motion isn't in the grab mask); buttons/wheel come from the raw
   events (X btn 4/5 = wheel pulses → guest btns 3/4; 8/9 → side/extra).
   `--grab` (spec.display.grabKeyboard) holds XGrabKeyboard +
-  XGrabPointer on the focused head (retries 500ms — loses to transient
+  XGrabPointer on the focused window (retries 500ms — loses to transient
   server grabs like KWin's tabbox), ungrabs on FocusOut. Grab modes are
   load-bearing and easy to get backwards: XGrabKeyboard must be
   Async/Async — an ACTIVE Sync-mode grab queues every event without
@@ -226,7 +243,7 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   if we'd never grabbed (wheel buttons 4-7 get a press+release pair
   since they're transient pulses). Safety net:
   abort-gen/ungrab-gen are AtomicU64 generation counters (a swap() flag
-  gets eaten by the first head to poll it), SIGUSR1 bumps abort_gen
+  races the multiple producers), SIGUSR1 bumps abort_gen
   (pkill -USR1 -x viewer-dd — no keyboard needed), ctrl+alt+shift+
   right-click aborts via the pointer-grab path, and any grab held
   >60s force-releases as a heartbeat so a wedged grab can't strand
@@ -248,7 +265,7 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   the user's real VD keys keep working under the grab; the mirror
   never rewrites the host's config), `command:` via sh -c, `ungrab`
   holds the grab off until refocus, `abort` releases grabs +
-  XIconifyWindow on EVERY head (one shared EscState; each window loop
+  XIconifyWindow on the viewer window (one shared EscState; the loop
   watches abort_gen), `none` swallows. A combo already passively
   grabbed by the WM loses our XGrabKey (BadAccess, logged) — but its
   events then go to the WM's grab, never to us, so no double-fire.

@@ -98,7 +98,7 @@ export function shortcutsDoc(spec: VmSpec, bindable?: boolean): string {
           "(none configured in `display.escapeShortcuts`)";
     const [viewerDesc, viewerKeys] = dmabuf
         ? [
-            `This desktop is rendered by cruiser's dmabuf viewer (\`cruiser:${n}\` — one viewer-dd window per guest display).`,
+            `This desktop is rendered by cruiser's dmabuf viewer (\`cruiser:${n}\` — one viewer-dd window spanning the guest displays).`,
             `- viewer windows are ordinary host windows — your WM's own keys apply (fullscreen toggle, desktop moves)\n- closing the viewer window ends the session (the VM keeps running)`,
           ]
         : [

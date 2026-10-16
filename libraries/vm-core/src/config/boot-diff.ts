@@ -43,11 +43,28 @@ function bootSlice(s: VmSpec) {
     };
 }
 
+/** Key-order-insensitive JSON.stringify. Runtime code appends spec fields
+ *  after zod parse (registry's sshPort/rdpPort, buildArgv's renderNode), so
+ *  a re-parsed launch snapshot carries canonical schema order while the
+ *  same-process spec holds append order — identical values, different
+ *  JSON.stringify output, phantom "restart pending". Object keys sort;
+ *  array order stays significant (shares index ↔ virtiofsd socket). */
+function stable(v: unknown): string {
+    if (Array.isArray(v)) return `[${v.map(stable).join(",")}]`;
+    if (v && typeof v === "object")
+        return `{${Object.entries(v as Record<string, unknown>)
+            .filter(([, x]) => x !== undefined)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([k, x]) => `${JSON.stringify(k)}:${stable(x)}`)
+            .join(",")}}`;
+    return JSON.stringify(v);
+}
+
 /** Section names that differ between two specs and need a VM restart to
  *  take effect. Empty = every difference applies live. */
 export function bootRelevantChanges(a: VmSpec, b: VmSpec): string[] {
     const sa = bootSlice(a);
     const sb = bootSlice(b);
     return (Object.keys(sa) as (keyof typeof sa)[])
-        .filter((k) => JSON.stringify(sa[k]) !== JSON.stringify(sb[k]));
+        .filter((k) => stable(sa[k]) !== stable(sb[k]));
 }

@@ -76,22 +76,6 @@ export async function x11FindWindow(m: WindowMatcher, timeoutMs = 15_000): Promi
     }
 }
 
-/** All matching windows — resolves early at `want`, or when the count
- *  plateaus (~500ms; a single-head VM shouldn't burn the whole timeout). */
-export async function x11FindWindows(m: WindowMatcher, timeoutMs = 15_000, want = 1): Promise<WindowHandle[]> {
-    const deadline = Date.now() + timeoutMs;
-    let prev = 0, stable = 0;
-    for (;;) {
-        const wins = (await x11Windows()).filter((x) => x11Match(m, x));
-        if (wins.length >= want) return wins;
-        if (wins.length && wins.length === prev) { if (++stable >= 2) return wins; }
-        else stable = 0;
-        prev = wins.length;
-        if (Date.now() > deadline) return wins;
-        await new Promise((r) => setTimeout(r, 250));
-    }
-}
-
 export async function x11MoveToDesktop(w: WindowHandle, desktop: number | "all"): Promise<void> {
     const target = desktop === "all" ? "-1" : String(desktop - 1);
     // KWin applies initial placement AFTER the window maps — a -t sent in that

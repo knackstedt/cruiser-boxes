@@ -73,9 +73,6 @@ export interface WmAdapter {
     desktops(): Promise<DesktopInfo[]>;
     /** Poll for a matching window; null on timeout. */
     findWindow(m: WindowMatcher, timeoutMs?: number): Promise<WindowHandle | null>;
-    /** Poll for ALL matching windows (multi-head viewers); resolves early at
-     *  `want` or on a count plateau. Absent on adapters without listing. */
-    findWindows?(m: WindowMatcher, timeoutMs?: number, want?: number): Promise<WindowHandle[]>;
     /** desktop: 1-based index, or "all" for sticky. */
     moveToDesktop(w: WindowHandle, desktop: number | "all"): Promise<void>;
     setFullscreen(w: WindowHandle, on: boolean): Promise<void>;
