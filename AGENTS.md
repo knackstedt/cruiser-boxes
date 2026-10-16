@@ -196,6 +196,41 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   `wl-paste --watch`→`xclip` mirror for compositors that expose
   data-control (wlroots) — on KWin it exits instantly since data-control
   is trusted-client-only.
+  Keyboard (dmabuf): minifb has no grab — `--grab` (spec.display.grabKeyboard)
+  holds an XGrabKeyboard on the focused head (retries 500ms — loses to
+  transient server grabs like KWin's tabbox), ungrabs on FocusOut. Focus
+  loss also replays key-ups for every qnum the guest still sees held
+  (tracked in KbCb) — the release half of a WM-consumed combo otherwise
+  leaves modifiers stuck down guest-side. kglobalaccel escape bindings go
+  blind under the grab, so `--escape "<mods+key>=<action>"` (session.ts
+  passes spec.display.escapeShortcuts with {vm}/{cli} expanded) makes the
+  viewer dispatch them itself: host-desktop/desktop-cycle via kglobalaccel
+  `invokeShortcut` (qdbus6→qdbus→gdbus, then xdotool EWMH fallback),
+  `command:` via sh -c, `ungrab` holds the grab off until refocus, `none`
+  swallows. dmabuf escapes are owned end-to-end by viewer-dd — the
+  kglobalshortcutsrc/khotkeys install path is skipped for dmabuf because
+  kglobalacceld rewrites the file from in-memory state (Plasma 6),
+  silently eating file-written bindings. Instead the viewer XGrabKeys
+  each combo's trigger+mods on the ROOT window (console 0's conn, 4
+  lock-state variants) — the same passive-grab mechanism global hotkeys
+  use: fires while the VM is unfocused OR focused-but-ungrabbed (the
+  passive grab consumes the combo before the window sees it), and is
+  fully shadowed by the active grab — no double-fire by construction.
+  While grabbed, device events go ONLY to the grabbing client — the grab
+  conn selects KeyPress|KeyRelease on the grab window and XSendEvents a
+  synthetic copy back to minifb's window (send_event bypasses grabs; the
+  send_event flag filters our own reinjections). 300ms per-combo debounce
+  eats X autorepeat re-fires. Keep default escape combos host-inert
+  (ctrl+super+fN): a combo that slips through anywhere hits the host's
+  own bindings (ctrl+alt+delete did exactly that → ksmserver logout →
+  dead session). `[grab]`/`[esc]` lines carry a `+Ns` elapsed prefix.
+  `[fps]` lines log
+  `/proc/self/fd` count + system `file-nr`: dma-buf/sync_file objects
+  pinned in-kernel (nvidia EGL/venus fences) never appear in a process's
+  fd table, so file-nr is the only signal when the global file table
+  fills (fs.file-max sysctl — was 100000 here, ENOFILE → nvidia_drm
+  nv_drm_create_sync_file NULL-deref killed qemu + plasmashell's
+  QSGRenderThread, 2026-10-13/15).
   `appearance.ts` — xdg-desktop-portal settings: `color-scheme`/`accent-color`/
   `contrast` reads (busctl, gdbus fallback) + one dbus-monitor SettingChanged
   watcher shared by all portal channels. `hoststate.ts` — the non-portal
@@ -511,7 +546,7 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   unwrapped first or the outer shell eats only the first word. `{vm}`/`{cli}`
   placeholders expand in ViewerSession.open (`{cli}` → `bun run src/cli.ts`
   in dev, `cruiser` packaged). Default:
-  `ctrl+alt+end → command:{cli} vm kill {vm}`.
+  `ctrl+super+end → command:{cli} vm kill {vm}`.
 - HMR (`draft dev`): `native-entry.ts` is a "blocking entry" — its
   close-wait must release via `__ddSession.onDispose(() => resolve())` and
   skip `host.destroy()` on session end (the host is persistent-layer; the

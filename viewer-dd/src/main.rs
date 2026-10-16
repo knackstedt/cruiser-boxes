@@ -317,6 +317,205 @@ fn qnum_for(k: minifb::Key) -> Option<u32> {
     })
 }
 
+// ── escape shortcuts under grab ──
+// spec.display.escapeShortcuts are installed as host-global bindings
+// (kglobalaccel/khotkeys) — all dead while we hold the keyboard grab, since
+// the WM never sees the keys. So under --grab the viewer recognizes the
+// combos in its own key stream and runs the action itself: kwin desktop
+// nav via kglobalaccel's invokeShortcut (the same entry point the dead
+// binding called), command: via sh -c, ungrab releases the grab until the
+// next focus cycle. Combo spec = "<mods+key>=<action>" pairs, action the
+// same grammar as the spec (host-desktop:N, desktop-cycle-left|right,
+// ungrab, none, command:<cmdline> — {vm}/{cli} expanded by the caller).
+const M_CTRL: [u32; 2] = [0x1d, 0x9d];   // LeftCtrl / RightCtrl
+const M_ALT: [u32; 2] = [0x38, 0xb8];    // LeftAlt / RightAlt
+const M_SHIFT: [u32; 2] = [0x2a, 0x36];  // LeftShift / RightShift
+const M_META: [u32; 2] = [0xdb, 0xdc];   // LeftSuper / RightSuper
+
+// elapsed-since-start prefix for grab/esc log lines — grab/ungrab flapping
+// is only diagnosable with timing.
+static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+fn ts() -> u64 { T0.get_or_init(std::time::Instant::now).elapsed().as_secs() }
+
+#[derive(Clone)]
+enum EscAct { Desktop(u32), Cycle(i8), Ungrab, Noop, Cmd(String) }
+
+#[derive(Clone)]
+struct EscCombo {
+    mods: u8,   /* 1=ctrl 2=alt 4=shift 8=meta */
+    trig: u32,  /* qnum for the KbCb match path */
+    xkey: u32,  /* X keycode for the root passive-grab match path */
+    xmods: u32, /* X modifier mask (Shift|Control|Mod1|Mod4) */
+    act: EscAct,
+}
+
+/// QEMU qnum → X keycode. XT scancodes are evdev-1 for the base block
+/// (X keycode = evdev + 8); the e0-extended block maps back through the
+/// same table qnum_for uses.
+fn xkey_for(qnum: u32) -> Option<u32> {
+    let ev = if qnum < 0x80 { qnum } else { match qnum {
+        0x9c => 96, 0x9d => 97, 0xb5 => 98, 0xb8 => 100, 0xc7 => 102,
+        0xc8 => 103, 0xc9 => 104, 0xcb => 105, 0xcd => 106, 0xcf => 107,
+        0xd0 => 108, 0xd1 => 109, 0xd2 => 110, 0xd3 => 111, 0xdb => 125,
+        0xdc => 126, _ => return None,
+    }};
+    Some(ev + 8)
+}
+
+/// our mod byte (1=ctrl 2=alt 4=shift 8=meta) → X modifier mask
+/// (ShiftMask|ControlMask|Mod1Mask|Mod4Mask).
+fn xmods_of(m: u8) -> u32 {
+    (m as u32 & 1) << 2 | (m as u32 & 2) << 2 | (m as u32 & 4) >> 2 | (m as u32 & 8) << 3
+}
+
+/// Shared per-head escape state: the combo table is static, enabled
+/// mirrors --grab (escape interception runs for every focused head so a
+/// combo can't fall to the host during a grab gap — the kglobalaccel
+/// copies are uninstalled under --grab, so nothing double-fires), and
+/// ungrab_req carries the "ungrab" action from the input callback.
+struct EscState {
+    enabled: bool,
+    combos: Vec<EscCombo>,
+    grab_active: std::sync::atomic::AtomicBool,
+    ungrab_req: std::sync::atomic::AtomicBool,
+}
+
+/// Named key → QEMU XT scancode, for the escape-combo grammar (same
+/// vocabulary kdeKeys maps for kglobalshortcutsrc).
+fn qnum_named(k: &str) -> Option<u32> {
+    Some(match k {
+        "a" => 0x1e, "b" => 0x30, "c" => 0x2e, "d" => 0x20, "e" => 0x12,
+        "f" => 0x21, "g" => 0x22, "h" => 0x23, "i" => 0x17, "j" => 0x24,
+        "k" => 0x25, "l" => 0x26, "m" => 0x32, "n" => 0x31, "o" => 0x18,
+        "p" => 0x19, "q" => 0x10, "r" => 0x13, "s" => 0x1f, "t" => 0x14,
+        "u" => 0x16, "v" => 0x2f, "w" => 0x11, "x" => 0x2d, "y" => 0x15,
+        "z" => 0x2c,
+        "0" => 0x0b, "1" => 0x02, "2" => 0x03, "3" => 0x04, "4" => 0x05,
+        "5" => 0x06, "6" => 0x07, "7" => 0x08, "8" => 0x09, "9" => 0x0a,
+        "minus" | "-" => 0x0c, "equal" | "equals" | "=" => 0x0d,
+        "backspace" => 0x0e, "tab" => 0x0f,
+        "leftbracket" | "lbracket" | "[" => 0x1a, "rightbracket" | "rbracket" | "]" => 0x1b,
+        "enter" | "return" => 0x1c, "semicolon" | ";" => 0x27,
+        "apostrophe" | "quote" | "'" => 0x28, "backslash" | "\\" => 0x2b,
+        "comma" | "," => 0x33, "period" | "." => 0x34, "slash" | "/" => 0x35,
+        "space" => 0x39, "capslock" => 0x3a, "escape" | "esc" => 0x01,
+        "home" => 0xc7, "up" => 0xc8, "pageup" | "pgup" => 0xc9,
+        "left" => 0xcb, "right" => 0xcd, "end" => 0xcf, "down" => 0xd0,
+        "pagedown" | "pgdn" => 0xd1, "insert" | "ins" => 0xd2,
+        "delete" | "del" => 0xd3,
+        "f1" => 0x3b, "f2" => 0x3c, "f3" => 0x3d, "f4" => 0x3e, "f5" => 0x3f,
+        "f6" => 0x40, "f7" => 0x41, "f8" => 0x42, "f9" => 0x43, "f10" => 0x44,
+        "f11" => 0x57, "f12" => 0x58,
+        _ => return None,
+    })
+}
+
+fn parse_escape(spec: &str) -> Option<EscCombo> {
+    let (combo, act) = spec.split_once('=')?;
+    let parts: Vec<String> = combo.split('+').map(|p| p.trim().to_lowercase()).collect();
+    let trig = qnum_named(parts.last()?)?;
+    let mut mods = 0u8;
+    for m in &parts[..parts.len() - 1] {
+        mods |= match m.as_str() {
+            "ctrl" | "control" => 1, "alt" => 2,
+            "shift" => 4, "meta" | "super" | "mod4" => 8,
+            _ => return None,
+        };
+    }
+    let i = act.find(':');
+    let kind = i.map(|i| &act[..i]).unwrap_or(act);
+    let arg = i.map(|i| &act[i + 1..]);
+    let act = match kind {
+        "host-desktop" => EscAct::Desktop(arg?.parse().ok()?),
+        "desktop-cycle-left" => EscAct::Cycle(-1),
+        "desktop-cycle-right" => EscAct::Cycle(1),
+        "ungrab" => EscAct::Ungrab,
+        "none" => EscAct::Noop,
+        "command" => EscAct::Cmd(arg?.to_string()),
+        _ => return None,
+    };
+    Some(EscCombo { mods, trig, xkey: xkey_for(trig)?, xmods: xmods_of(mods), act })
+}
+
+fn run_quiet(bin: &str, args: &[String]) -> bool {
+    std::process::Command::new(bin).args(args).status()
+        .map(|s| s.success()).unwrap_or(false)
+}
+
+/// EWMH desktop switch via xdotool — the non-KDE fallback (mirrors
+/// host-int runEscape's x11 path: 0-based _NET_CURRENT_DESKTOP).
+fn ewmh_switch(action: &EscAct) -> bool {
+    let target = match action {
+        EscAct::Desktop(n) => n.saturating_sub(1) as i64,
+        EscAct::Cycle(d) => {
+            let out = std::process::Command::new("xdotool")
+                .args(["get_desktop"]).output().ok()
+                .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i64>().ok());
+            let num = std::process::Command::new("xdotool")
+                .args(["get_num_desktops"]).output().ok()
+                .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i64>().ok());
+            match (out, num) {
+                (Some(cur), Some(n)) if n > 0 => (cur + *d as i64).rem_euclid(n),
+                _ => return false,
+            }
+        }
+        _ => return false,
+    };
+    run_quiet("xdotool", &["set_desktop".to_string(), target.to_string()])
+}
+
+impl EscState {
+    fn fire(&self, combo: &EscCombo, title: &str) {
+        match &combo.act {
+            EscAct::Ungrab => { self.ungrab_req.store(true, Ordering::Relaxed); }
+            EscAct::Noop => { eprintln!("[+{}s][esc] combo → none ({title})", ts()); }
+            EscAct::Cmd(c) => {
+                let c = c.clone();
+                let t = title.to_string();
+                std::thread::spawn(move || {
+                    eprintln!("[+{}s][esc] combo → sh -c `{c}` ({t})", ts());
+                    let _ = std::process::Command::new("sh").args(["-c", &c]).spawn();
+                });
+            }
+            a @ (EscAct::Desktop(_) | EscAct::Cycle(_)) => {
+                // KWin first (invokeShortcut — the dead binding's own entry
+                // point), then EWMH set_desktop for other WMs.
+                let name = match a {
+                    EscAct::Desktop(n) => format!("Switch to Desktop {n}"),
+                    EscAct::Cycle(d) => if *d > 0 {
+                        "Switch One Desktop to the Right".to_string()
+                    } else {
+                        "Switch One Desktop to the Left".to_string()
+                    },
+                    _ => unreachable!(),
+                };
+                let a = a.clone();
+                std::thread::spawn(move || {
+                    let mut ok = false;
+                    for bin in ["qdbus6", "qdbus"] {
+                        ok = run_quiet(bin, &[
+                            "org.kde.kglobalaccel".to_string(),
+                            "/component/kwin".to_string(),
+                            "org.kde.kglobalaccel.Component.invokeShortcut".to_string(),
+                            name.clone()]);
+                        if ok { break; }
+                    }
+                    if !ok {
+                        ok = run_quiet("gdbus", &[
+                            "call".to_string(), "--session".to_string(),
+                            "--dest".to_string(), "org.kde.kglobalaccel".to_string(),
+                            "--object-path".to_string(), "/component/kwin".to_string(),
+                            "--method".to_string(), "org.kde.kglobalaccel.Component.invokeShortcut".to_string(),
+                            name.clone()]);
+                    }
+                    if !ok { ok = ewmh_switch(&a); }
+                    eprintln!("[+{}s][esc] desktop nav '{name}' → {}", ts(), if ok { "ok" } else { "FAILED" });
+                });
+            }
+        }
+    }
+}
+
 #[link(name = "X11")]
 extern "C" {
     fn XOpenDisplay(name: *const u8) -> *mut std::ffi::c_void;
@@ -327,6 +526,43 @@ extern "C" {
     fn XFlush(d: *mut std::ffi::c_void);
     fn XkbGetNamedIndicator(d: *mut std::ffi::c_void, device_spec: u32, name: u64,
                             ndx: *mut i32, state: *mut i32, map: *mut std::ffi::c_void) -> i32;
+    fn XGrabKeyboard(d: *mut std::ffi::c_void, grab_window: u64, owner_events: i32,
+                     pointer_mode: i32, keyboard_mode: i32, time: u64) -> i32;
+    fn XUngrabKeyboard(d: *mut std::ffi::c_void, time: u64) -> i32;
+    fn XSelectInput(d: *mut std::ffi::c_void, w: u64, mask: i64);
+    fn XPending(d: *mut std::ffi::c_void) -> i32;
+    fn XNextEvent(d: *mut std::ffi::c_void, ev: *mut XEvBuf) -> i32;
+    fn XPeekEvent(d: *mut std::ffi::c_void, ev: *mut XEvBuf) -> i32;
+    fn XGetInputFocus(d: *mut std::ffi::c_void, w: *mut u64, revert: *mut i32) -> i32;
+    fn XSendEvent(d: *mut std::ffi::c_void, w: u64, propagate: i32,
+                  mask: i64, ev: *mut XEvBuf) -> i32;
+    fn XGrabKey(d: *mut std::ffi::c_void, keycode: i32, modifiers: u32,
+                grab_window: u64, owner_events: i32, pointer_mode: i32,
+                keyboard_mode: i32);
+    fn XRootWindow(d: *mut std::ffi::c_void, screen: i32) -> u64;
+}
+
+/// 192-byte XEvent union — only the leading type/serial/send_event fields
+/// are read; the rest is re-sent verbatim.
+#[repr(C)]
+union XEvBuf { any: XAnyEv, key: XKeyEv, _pad: [u64; 24] }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct XAnyEv {
+    t: i32,             // 2 = KeyPress, 3 = KeyRelease
+    _p0: i32,
+    _serial: u64,
+    send_event: i32,    // nonzero → synthetic (our own reinjected copy)
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct XKeyEv {
+    t: i32, _p0: i32, _serial: u64, send_event: i32, _p1: i32,
+    _dpy: u64, _win: u64, _root: u64, _sub: u64, time: u64,
+    _x: i32, _y: i32, _xr: i32, _yr: i32,
+    state: u32, keycode: u32, _same: i32, _p2: i32,
 }
 
 /// Host NumLock via the XKB "Num Lock" virtual indicator (XkbUseCoreKbd
@@ -395,10 +631,11 @@ fn input_worker(conn: std::sync::Arc<zbus::blocking::Connection>,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                   console_path: &str, console_idx: usize, title: &str, w: usize, h: usize,
                   jrx: std::sync::mpsc::Receiver<XJob>, dims: std::sync::Arc<Dims>,
-                  heads: std::sync::Arc<Heads>) -> Result<()> {
+                  heads: std::sync::Arc<Heads>, esc: std::sync::Arc<EscState>) -> Result<()> {
     use minifb::{Window, WindowOptions};
     let mut win = Window::new(title, w, h, WindowOptions { resize: true, ..WindowOptions::default() })?;
     win.limit_update_rate(Some(std::time::Duration::from_micros(2000)));
@@ -407,6 +644,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     // host's NumLock state in the event loop (see below)
     let mut xdpy: *mut std::ffi::c_void = std::ptr::null_mut();
     let mut num_atom = 0u64;
+    let xwin_id;
 
     // GL worker owns the EGL context — all device calls are single-threaded
     {
@@ -414,6 +652,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
         let wh = win.window_handle().unwrap();
         if let RawWindowHandle::Xlib(xw) = wh.as_raw() {
             let xid = xw.window;
+            xwin_id = xid;
             // EWMH identity: minifb never sets WM_CLASS or _NET_WM_PID, which
             // leaves the heads invisible to pid/class lookups (wmctrl -p,
             // xdotool --pid, KWin wmclass rules). A second X connection is
@@ -449,7 +688,18 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                 while let Ok(first) = jrx.recv() {
                     fps_n += 1;
                     if fps_t.elapsed().as_secs() >= 5 {
-                        eprintln!("[fps] {t}: {} frames/{:.0}s", fps_n, fps_t.elapsed().as_secs_f32());
+                        // fd telemetry: QEMU ships a dma-buf fd per frame —
+                        // a leak in the import chain surfaces here (self) or
+                        // system-wide (file-nr; kernel-pinned dma-buf/sync_file
+                        // structs don't show in any /proc/<pid>/fd).
+                        let fds = std::fs::read_dir("/proc/self/fd")
+                            .map(|d| d.count()).unwrap_or(0);
+                        let fnr = std::fs::read_to_string("/proc/sys/fs/file-nr")
+                            .ok()
+                            .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+                            .unwrap_or_else(|| "?".into());
+                        eprintln!("[fps] {t}: {} frames/{:.0}s fds={fds} file-nr={fnr}",
+                            fps_n, fps_t.elapsed().as_secs_f32());
                         fps_n = 0; fps_t = std::time::Instant::now();
                     }
                     // coalesce: newest fd wins, collapse nudges
@@ -526,15 +776,78 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
         (gx as u32, gy as u32)
     };
 
+    // qnums the guest currently believes are held — drained into key-up
+    // events on focus loss so the release half of a combo the WM consumed
+    // (alt-tab et al.) can't leave a modifier stuck down in the guest.
+    let pressed = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::<u32>::new()));
+    // Shared with KbCb: triggers whose press fired an escape get swallowed —
+    // cleared on focus loss too, else a release that lands outside the
+    // window (VD switch steals focus mid-combo) leaves the trigger dead
+    // forever ("escape worked once, then nothing").
+    let swallowed = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::<u32>::new()));
     let itx2 = itx.clone();
-    struct KbCb(std::sync::mpsc::Sender<In>);
+    let esc2 = esc.clone();
+    let title2 = title.to_string();
+    let swallowed2 = swallowed.clone();
+    struct KbCb {
+        tx: std::sync::mpsc::Sender<In>,
+        pressed: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u32>>>,
+        /// triggers whose press fired an escape action — their release (and
+        /// autorepeat re-presses) are swallowed instead of forwarded.
+        swallowed: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u32>>>,
+        esc: std::sync::Arc<EscState>,
+        title: String,
+    }
     impl minifb::InputCallback for KbCb {
         fn add_char(&mut self, _c: u32) {}
         fn set_key_state(&mut self, key: minifb::Key, state: bool) {
-            if let Some(q) = qnum_for(key) { let _ = self.0.send(In::Key(q, state)); }
+            let Some(q) = qnum_for(key) else { return };
+            // swallowed trigger: drop the release/repeat without forwarding
+            {
+                let mut sw = self.swallowed.lock().unwrap();
+                if sw.contains(&q) {
+                    if !state { sw.remove(&q); }
+                    return;
+                }
+            }
+            // Intercept whenever the viewer runs under --grab: the grab
+            // can drop transiently (focus races, server grabs) and a combo
+            // that slips through falls to the host's own bindings — worse
+            // than dispatching ourselves. Under --grab the kglobalaccel
+            // copies are never installed, so there's no double-fire.
+            if state && self.esc.enabled {
+                let combo = self.esc.combos.iter().find(|c| c.trig == q).and_then(|c| {
+                    // held-modifier bitmask must equal the combo's exactly
+                    let p = self.pressed.lock().unwrap();
+                    let held = [M_CTRL, M_ALT, M_SHIFT, M_META].iter().enumerate()
+                        .fold(0u8, |b, (i, g)| b | ((g.iter().any(|k| p.contains(k))) as u8) << i);
+                    (held == c.mods).then(|| c.clone())
+                });
+                if let Some(c) = combo {
+                    self.swallowed.lock().unwrap().insert(q);
+                    // lift the combo's forwarded halves so the guest isn't
+                    // left with phantom held modifiers while we run the
+                    // host action
+                    let mut p = self.pressed.lock().unwrap();
+                    for g in [M_CTRL, M_ALT, M_SHIFT, M_META] {
+                        for k in g { if p.remove(&k) { let _ = self.tx.send(In::Key(k, false)); } }
+                    }
+                    drop(p);
+                    self.esc.fire(&c, &self.title);
+                    return;
+                }
+            }
+            {
+                let mut p = self.pressed.lock().unwrap();
+                if state { p.insert(q); } else { p.remove(&q); }
+            }
+            let _ = self.tx.send(In::Key(q, state));
         }
     }
-    win.set_input_callback(Box::new(KbCb(itx2)));
+    win.set_input_callback(Box::new(KbCb {
+        tx: itx2, pressed: pressed.clone(), swallowed: swallowed2,
+        esc: esc2, title: title2,
+    }));
 
     // numlock reconcile — guest lock state is exposed as the Keyboard
     // "Modifiers" property (Scroll|Num|Caps = bits 0|1|2). NumLock presses
@@ -549,8 +862,166 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     } else { None };
     let mut last_num_sync = std::time::Instant::now() - std::time::Duration::from_secs(1);
 
+    // Host-wide passive grabs for the escape combos — the same mechanism
+    // global hotkeys use, so combos fire while the VM isn't focused (and
+    // while focused-but-ungrabbed, where the passive grab consumes the
+    // trigger before it reaches the window — never double-firing with the
+    // active-grab path, which shadows passive grabs entirely). Console 0
+    // only: passive grabs are per-connection and extra heads would just
+    // BadAccess. Four registrations per combo cover numlock/capslock
+    // (LockMask|Mod2Mask) states. A combo already grabbed by the WM loses
+    // with an async BadAccess — logged, not fatal.
+    if console_idx == 0 && !xdpy.is_null() && !esc.combos.is_empty() {
+        unsafe {
+            let root = XRootWindow(xdpy, 0);
+            XSelectInput(xdpy, root, 0x3);
+            for c in &esc.combos {
+                for lock in [0u32, 2, 16, 18] {
+                    XGrabKey(xdpy, c.xkey as i32, c.xmods | lock, root, 0, 1, 1);
+                }
+            }
+            XFlush(xdpy);
+        }
+    }
+    // last fire time per passive-grab trigger — X autorepeat would otherwise
+    // re-fire the action every repeat interval while the combo is held.
+    let mut passive_last = std::collections::HashMap::<usize, std::time::Instant>::new();
+    // Trigger keycodes still physically held after a passive-grab fire —
+    // suppresses autorepeat re-fires until a real release. X emits repeats
+    // either as press-only or as same-timestamp release+press pairs; the
+    // release branch peeks for the pair so `held` survives fake releases.
+    let mut passive_held = std::collections::HashSet::<u32>::new();
+
+    // Keyboard grab (--grab = spec.display.grabKeyboard on the dmabuf
+    // viewer): minifb has no grab, so while a head is focused we hold an
+    // X11 keyboard grab — host-global combos (alt-tab, super, …) reach the
+    // guest instead of the WM, matching freerdp +grab-keyboard semantics.
+    // Focus loss ungrabs (grab dies with the conn on exit anyway); the
+    // `ungrab` escape action holds the grab off until the focus cycles.
+    let mut was_active = false;
+    let mut grabbed = false;
+    let mut grab_hold_off = false;
+    let mut last_grab_try = std::time::Instant::now() - std::time::Duration::from_secs(1);
+
     while win.is_open() {
         win.update(); // events only — EGL renders into this window directly
+        let active = win.is_active();
+        if !active { grab_hold_off = false; }
+        if esc.enabled && !xdpy.is_null() {
+            if esc.ungrab_req.swap(false, Ordering::Relaxed) {
+                grab_hold_off = true;
+                if grabbed {
+                    unsafe {
+                        XUngrabKeyboard(xdpy, 0);
+                        XSelectInput(xdpy, xwin_id, 0);
+                        XFlush(xdpy);
+                    }
+                    grabbed = false;
+                    esc.grab_active.store(false, Ordering::Relaxed);
+                }
+                eprintln!("[+{}s][grab] ungrabbed via escape ({title}) — re-grabs on refocus", ts());
+            }
+            if active && !grabbed && !grab_hold_off && last_grab_try.elapsed().as_millis() > 500 {
+                // retry while focused — a grab attempt loses to any
+                // transient server grab (e.g. KWin's own alt-tab tabbox)
+                last_grab_try = std::time::Instant::now();
+                grabbed = unsafe { XGrabKeyboard(xdpy, xwin_id, 1, 1, 1, 0) } == 0;
+                if grabbed {
+                    // Grabbed keys are delivered ONLY to the grabbing client
+                    // — xdpy owns no windows, so without this select+reinject
+                    // every key vanishes into the grab. Forward each real
+                    // event back to the window as a synthetic copy: send_event
+                    // delivery ignores grabs, and minifb's conn processes it
+                    // through KbCb like any normal key.
+                    unsafe { XSelectInput(xdpy, xwin_id, 0x3); XFlush(xdpy); }
+                    eprintln!("[+{}s][grab] keyboard grabbed ({title})", ts());
+                }
+                esc.grab_active.store(grabbed, Ordering::Relaxed);
+            } else if !active && grabbed {
+                unsafe {
+                    XUngrabKeyboard(xdpy, 0);
+                    XSelectInput(xdpy, xwin_id, 0);
+                    XFlush(xdpy);
+                }
+                grabbed = false;
+                esc.grab_active.store(false, Ordering::Relaxed);
+                eprintln!("[+{}s][grab] keyboard ungrabbed ({title})", ts());
+            }
+        }
+        // Drain xdpy whenever combos exist — not only under --grab: the
+        // root passive grabs need servicing even when no head is grabbed.
+        // While grabbed, real events are reinjected as synthetic copies;
+        // ungrabbed, a real KeyPress here is a passive-grab fire → dispatch
+        // the escape action. Our own send_event copies are filtered.
+        if !xdpy.is_null() && !esc.combos.is_empty() {
+            while unsafe { XPending(xdpy) } > 0 {
+                let mut ev: XEvBuf = unsafe { std::mem::zeroed() };
+                unsafe { XNextEvent(xdpy, &mut ev); }
+                let a = unsafe { ev.any };
+                if a.send_event != 0 { continue; }
+                if grabbed && (a.t == 2 || a.t == 3) {
+                    let m = if a.t == 2 { 1 } else { 2 }; // KeyPressMask|KeyReleaseMask
+                    unsafe { XSendEvent(xdpy, xwin_id, 0, m, &mut ev); }
+                } else if !grabbed {
+                    let k = unsafe { ev.key };
+                    let trig = esc.combos.iter().any(|c| c.xkey == k.keycode);
+                    let mut consumed = false;
+                    if a.t == 2 && trig {
+                        let held = k.state & 0x4d; // Shift|Control|Mod1|Mod4
+                        if passive_held.contains(&k.keycode) {
+                            consumed = true; // autorepeat re-press of our trigger
+                        } else if let Some(i) = esc.combos.iter()
+                            .position(|c| c.xkey == k.keycode && c.xmods == held) {
+                            if passive_last.get(&i).is_none_or(|t| t.elapsed().as_millis() > 300) {
+                                passive_last.insert(i, std::time::Instant::now());
+                                passive_held.insert(k.keycode);
+                                eprintln!("[+{}s][esc] combo via host grab ({title})", ts());
+                                esc.fire(&esc.combos[i].clone(), &title);
+                            }
+                            consumed = true;
+                        }
+                    } else if a.t == 3 && trig && passive_held.contains(&k.keycode) {
+                        // release of a fired trigger — but X autorepeat emits
+                        // fake release+press pairs at the same timestamp; a
+                        // paired press means the key is still held → eat both
+                        consumed = true;
+                        if unsafe { XPending(xdpy) } > 0 {
+                            let mut pv: XEvBuf = unsafe { std::mem::zeroed() };
+                            unsafe { XPeekEvent(xdpy, &mut pv); }
+                            let p = unsafe { pv.key };
+                            if p.t == 2 && p.keycode == k.keycode && p.time == k.time {
+                                let mut sink: XEvBuf = unsafe { std::mem::zeroed() };
+                                unsafe { XNextEvent(xdpy, &mut sink); }
+                            } else {
+                                passive_held.remove(&k.keycode);
+                            }
+                        } else {
+                            passive_held.remove(&k.keycode);
+                        }
+                    }
+                    if !consumed && (a.t == 2 || a.t == 3) {
+                        // non-trigger event during an active passive grab —
+                        // it belongs to whoever holds focus, not us
+                        let (mut focus, mut revert) = (0u64, 0i32);
+                        unsafe { XGetInputFocus(xdpy, &mut focus, &mut revert); }
+                        if focus > 1 { // not None(0)/PointerRoot(1)
+                            let m = if a.t == 2 { 1 } else { 2 };
+                            unsafe { XSendEvent(xdpy, focus, 0, m, &mut ev); }
+                        }
+                    }
+                }
+            }
+            unsafe { XFlush(xdpy); }
+        }
+        if was_active && !active {
+            swallowed.lock().unwrap().clear();
+            let ups: Vec<u32> = pressed.lock().unwrap().drain().collect();
+            for q in ups { let _ = itx.send(In::Key(q, false)); }
+            for (i, d) in btns.iter_mut().enumerate() {
+                if *d { *d = false; let _ = itx.send(In::Btn(i as u8, false)); }
+            }
+        }
+        was_active = active;
         if let Some((mx, my)) = win.get_mouse_pos(minifb::MouseMode::Pass) {
             let (ww, wh) = win.get_size();
             let inb = mx >= 0.0 && my >= 0.0 && mx < ww as f32 && my < wh as f32;
@@ -632,9 +1103,23 @@ async fn main() -> Result<()> {
     let mut offsets: Vec<(u32, u32)> = Vec::new();
     let mut probes: Vec<String> = Vec::new();
     let mut clipboard = true;
+    let mut grab = false;
+    let mut escapes: Vec<EscCombo> = Vec::new();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--no-clipboard" => clipboard = false,
+            // grab the keyboard while a head is focused (spec.display.grabKeyboard)
+            "--grab" => grab = true,
+            // "<mods+key>=<action>" — spec.display.escapeShortcuts, run by
+            // the viewer while the grab makes the WM's bindings blind
+            "--escape" => {
+                if let Some(s) = args.next() {
+                    match parse_escape(&s) {
+                        Some(c) => escapes.push(c),
+                        None => eprintln!("[esc] unparsable escape spec '{s}' — ignored"),
+                    }
+                }
+            }
             "--title" => title = args.next().unwrap_or(title),
             "--size" => {
                 if let Some(s) = args.next() {
@@ -793,14 +1278,23 @@ async fn main() -> Result<()> {
         offsets,
     });
 
+    if grab && !escapes.is_empty() {
+        eprintln!("[*] {} escape combo(s) grabbed host-wide", escapes.len());
+    }
     let mut joins = Vec::new();
     for (i, p) in pending.into_iter().enumerate() {
         let ci = p.cpath.rsplit('_').next().unwrap_or("0").to_string();
         let t = if multi { format!("{title}:{ci}") } else { title.clone() };
         let ic = iconn.clone();
         let hd = heads.clone();
+        let esc = std::sync::Arc::new(EscState {
+            enabled: grab,
+            combos: escapes.clone(),
+            grab_active: std::sync::atomic::AtomicBool::new(false),
+            ungrab_req: std::sync::atomic::AtomicBool::new(false),
+        });
         joins.push(std::thread::spawn(move || {
-            let r = present_window(ic, &p.cpath, i, &t, w, h, p.jrx, p.dims, hd);
+            let r = present_window(ic, &p.cpath, i, &t, w, h, p.jrx, p.dims, hd, esc);
             eprintln!("[*] window closed ({t}) — {r:?}");
         }));
     }

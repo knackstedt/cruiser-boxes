@@ -48,12 +48,12 @@ Edit while the VM is stopped; the next `vm start` picks changes up.
 | `sticky` | `false` | fullscreen-monitor only: show on all desktops |
 | `virtualDesktop` | `2` | target desktop for virtual-desktop mode |
 | `windowSize` | `{w:1600, h:1000}` | windowed mode size |
-| `escapeShortcuts` | `[{keys:"ctrl+alt+delete", action:"host-desktop:1"}, {keys:"ctrl+alt+end", action:"command:{cli} vm kill {vm}"}]` | host keybindings while the viewer runs — keys normalized lowercase, action `name` or `name:arg` |
+| `escapeShortcuts` | `[{keys:"ctrl+super+f1…f4", action:"host-desktop:1…4"}, {keys:"ctrl+super+end", action:"command:{cli} vm kill {vm}"}]` | host keybindings while the viewer runs — keys normalized lowercase, action `name` or `name:arg`. Prefer combos the host doesn't bind — a combo that reaches the host (grab gap, viewer unfocused) fires the host's own action |
 | `dynamicResolution` | `true` | freerdp dynamic-resolution channel |
 | `wallpaper` | `{managed:true, position:"bottom-right"}` | cruiser-managed guest wallpaper — watermarked with the VM name + escape hints; `position`: corner/`center`/`off` (no watermark); `managed:false` leaves the guest alone; `source` = host image path (default: generated gradient) |
 | `sound` / `microphone` | `true` | RDP redirection toggles |
 | `clipboard` | `true` | guest clipboard sync — freerdp `+clipboard` on the rdp viewer; on dmabuf, a `qemu-vdagent` chardev ↔ `viewer-dd` D-Bus bridge (text only). dmabuf needs a VM restart to add/remove the port. Wayland guests: spice-vdagent is X11-only — host→guest reaches native Wayland apps via KWin's bridge, but guest→host only sees X11/XWayland copies |
-| `grabKeyboard` | `false` | `false` → freerdp `-grab-keyboard` (host keeps global shortcuts — required for escape shortcuts); `true` → `+grab-keyboard` (guest gets all keys) |
+| `grabKeyboard` | `false` | `false` → freerdp `-grab-keyboard` (host keeps global shortcuts); `true` → guest gets all keys — freerdp `+grab-keyboard`, dmabuf → viewer-dd holds an XGrabKeyboard while a head is focused. Escape shortcuts install either way: under grab they're shadowed only while the viewer holds it — dmabuf self-dispatches there, freerdp swallows them |
 
 Escape actions: `host-desktop:<n>` · `desktop-cycle-left` ·
 `desktop-cycle-right` · `ungrab` · `none` · `command:<cmdline>` (run via
@@ -141,8 +141,11 @@ immediately on a running VM).
     "monitors": "all",
     "virtualDesktop": 3,
     "escapeShortcuts": [
-      { "keys": "ctrl+alt+delete", "action": "host-desktop:1" },
-      { "keys": "ctrl+alt+end", "action": "command:{cli} vm kill {vm}" }
+      { "keys": "ctrl+super+f1", "action": "host-desktop:1" },
+      { "keys": "ctrl+super+f2", "action": "host-desktop:2" },
+      { "keys": "ctrl+super+f3", "action": "host-desktop:3" },
+      { "keys": "ctrl+super+f4", "action": "host-desktop:4" },
+      { "keys": "ctrl+super+end", "action": "command:{cli} vm kill {vm}" }
     ],
     "grabKeyboard": false
   },

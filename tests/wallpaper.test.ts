@@ -30,20 +30,20 @@ describe("watermark text", () => {
         expect(escapeActionLabel("command:{cli} vm kill {vm}", "testvm")).toBe("run: cruiser vm kill testvm");
         expect(escapeActionLabel("weird")).toBe("weird");
     });
-    test("escapesActive gates on head mode + grab", () => {
+    test("escapesActive gates on head mode, not grab", () => {
         const s = spec();
         s.display.headMode = "windowed";
         expect(escapesActive(s)).toBe(false);
         s.display.headMode = "virtual-desktop";
         expect(escapesActive(s)).toBe(true);
         s.display.grabKeyboard = true;
-        expect(escapesActive(s)).toBe(false);
+        expect(escapesActive(s)).toBe(true);
     });
     test("watermarkLines carry the vm name, escape hint, and kill hint", () => {
         const s = spec();
         const l = watermarkLines(s).map((x) => x.text);
         expect(l[0]).toContain("testvm");
-        expect(l.join(" ")).toContain("ctrl+alt+delete");
+        expect(l.join(" ")).toContain("ctrl+super+f1");
         expect(l.join(" ")).toContain("cruiser vm kill testvm");
         expect(l.join(" ")).toMatch(/^[\x20-\x7e]+$/); // bitmap fonts are ASCII-only
     });
@@ -54,7 +54,7 @@ describe("watermark text", () => {
     });
     test("shortcutsDoc lists keys, kill command, and TTY fallback", () => {
         const d = shortcutsDoc(spec(), true);
-        expect(d).toContain("ctrl+alt+delete");
+        expect(d).toContain("ctrl+super+f1");
         expect(d).toContain("cruiser vm kill testvm");
         expect(d).toContain("ctrl+alt+F3");
     });

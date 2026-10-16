@@ -43,7 +43,7 @@ const sq = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
  * from here — treated as capable.)
  */
 export function escapesActive(spec: VmSpec): boolean {
-    return spec.display.headMode !== "windowed" && !spec.display.grabKeyboard;
+    return spec.display.headMode !== "windowed";
 }
 
 export function escapeActionLabel(action: string, vmName = "{vm}"): string {
@@ -89,7 +89,7 @@ export function shortcutsDoc(spec: VmSpec, bindable?: boolean): string {
     // adapter can't install global shortcuts gets the honest answer.
     bindable ??= (() => { try { return detectAdapter().caps.shortcuts; } catch { return true; } })();
     const esc = !escapesActive(spec)
-        ? `None — this VM's head mode is \`${spec.display.headMode}\`${spec.display.grabKeyboard ? " with keyboard grab on" : ""}, so no host bindings are installed.`
+        ? `None — this VM's head mode is \`${spec.display.headMode}\`, so no host bindings are installed.`
         : !bindable
         ? `None — this host session's window manager has no keybinding API cruiser's adapter can reach, so no escape shortcuts are installed.`
         : spec.display.escapeShortcuts.map((s) => `- \`${s.keys}\` — ${escapeActionLabel(s.action, spec.name)}`).join("\n") ||

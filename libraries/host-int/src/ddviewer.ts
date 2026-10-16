@@ -37,6 +37,22 @@ export async function ddViewerPath(): Promise<string | null> {
     return null;
 }
 
+/** viewer-dd argv — pure builder (tested like freerdpArgs). `escapes` are
+ *  "<keys>=<action>" pairs ({vm}/{cli} expanded by the caller) — under
+ *  --grab the WM's global bindings can't fire, so the viewer recognizes
+ *  the combos itself and dispatches the actions. */
+export function ddViewerArgs(spec: VmSpec, monitorSock: string, offsets?: string, escapes?: string[]): string[] {
+    const { w, h } = spec.display.windowSize;
+    const argv = [monitorSock, "--title", `cruiser:${spec.name}`, "--size", `${w}x${h}`];
+    if (offsets) argv.push("--offsets", offsets);
+    if (!spec.display.clipboard) argv.push("--no-clipboard");
+    // --grab: XGrabKeyboard while a head is focused (freerdp +grab-keyboard
+    // analog — guest sees alt-tab etc. instead of the host WM)
+    if (spec.display.grabKeyboard) argv.push("--grab");
+    (escapes ?? []).forEach((e) => argv.push("--escape", e));
+    return argv;
+}
+
 /**
  * Launch the dmabuf viewer process; returns immediately (caller waits for
  * window). `offsets` = each guest console's position in the composite
@@ -44,14 +60,10 @@ export async function ddViewerPath(): Promise<string | null> {
  * needed because the guest's single virtio tablet maps over the whole
  * composite — QEMU does NOT add per-console offsets for us.
  */
-export async function launchDdViewer(spec: VmSpec, offsets?: string): Promise<ViewerLaunch> {
+export async function launchDdViewer(spec: VmSpec, offsets?: string, escapes?: string[]): Promise<ViewerLaunch> {
     const bin = await ddViewerPath();
     if (!bin) throw new Error("viewer-dd not found — cargo build --release in viewer-dd/ (or install it on PATH)");
-    const monitorSock = vmPaths(spec.name).monitorSock;
-    const { w, h } = spec.display.windowSize;
-    const argv = [monitorSock, "--title", `cruiser:${spec.name}`, "--size", `${w}x${h}`];
-    if (offsets) argv.push("--offsets", offsets);
-    if (!spec.display.clipboard) argv.push("--no-clipboard");
+    const argv = ddViewerArgs(spec, vmPaths(spec.name).monitorSock, offsets, escapes);
     const child = spawnChild(bin, argv, {
         detached: true,
         logFile: join(vmPaths(spec.name).run, "viewer-dd.log"),

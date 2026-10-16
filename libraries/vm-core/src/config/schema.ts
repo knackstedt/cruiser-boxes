@@ -227,8 +227,14 @@ export const VmSpec = z.object({
          * guest-hung escape hatch.
          */
         escapeShortcuts: z.array(EscapeShortcut).default([
-            { keys: "ctrl+alt+delete", action: "host-desktop:1" },
-            { keys: "ctrl+alt+end", action: "command:{cli} vm kill {vm}" },
+            // ctrl+super+FN are unbound in KDE — an escape combo that ever
+            // leaks to the host (grab gap, viewer not focused) is a no-op
+            // there; ctrl+alt+delete collides with ksmserver's logout.
+            { keys: "ctrl+super+f1", action: "host-desktop:1" },
+            { keys: "ctrl+super+f2", action: "host-desktop:2" },
+            { keys: "ctrl+super+f3", action: "host-desktop:3" },
+            { keys: "ctrl+super+f4", action: "host-desktop:4" },
+            { keys: "ctrl+super+end", action: "command:{cli} vm kill {vm}" },
         ]),
         dynamicResolution: z.boolean().default(true),
         /**
@@ -248,7 +254,10 @@ export const VmSpec = z.object({
         /** guest clipboard sync: freerdp +clipboard on the rdp viewer,
          *  qemu-vdagent ↔ viewer-dd D-Bus bridge on the dmabuf viewer. */
         clipboard: z.boolean().default(true),
-        grabKeyboard: z.boolean().default(false), // freerdp -grab-keyboard → host shortcuts win
+        /** freerdp -grab-keyboard / viewer-dd XGrabKeyboard — true gives the
+         *  guest all keys (alt-tab included), false lets host shortcuts win
+         *  (required for escape shortcuts). */
+        grabKeyboard: z.boolean().default(false),
     }).prefault({}),
 
     usb: z.object({ autoAttach: z.array(UsbDeviceRef).default([]) }).prefault({}),

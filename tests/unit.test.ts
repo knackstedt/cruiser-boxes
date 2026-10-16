@@ -13,6 +13,7 @@ import { guestSetupScript } from "../libraries/provision/src/guest-setup";
 import { guestThemeScript } from "../libraries/provision/src/theme";
 import { pickImageFromIndex, supportsKrdp, defaultRelease } from "../libraries/provision/src/distros";
 import { freerdpArgs } from "../libraries/host-int/src/freerdp";
+import { ddViewerArgs } from "../libraries/host-int/src/ddviewer";
 import { parseEscapeAction } from "../libraries/host-int/src/session";
 import { kdeDesktopsRc, kdeKeys, kglobalConflicts, khotkeysDataGroups, khotkeysDropGroups, khotkeysUuid, KWIN_VD_UUID, unwrapShC } from "../libraries/host-int/src/kde";
 import { autoSnaps, autoSnapshotDue, autoPruneList } from "../libraries/vm-core/src/lifecycle/autosnap";
@@ -373,6 +374,41 @@ describe("freerdpArgs", () => {
     });
 });
 
+// ── viewer-dd argv ──
+
+describe("ddViewerArgs", () => {
+    test("base argv + flags", () => {
+        const s = defaultSpec("t1");
+        const a = ddViewerArgs(s, "/run/mon.sock");
+        expect(a[0]).toBe("/run/mon.sock");
+        expect(a).toContain("--title");
+        expect(a).toContain("cruiser:t1");
+        expect(a).toContain("--size");
+        expect(a).not.toContain("--no-clipboard");
+        expect(a).not.toContain("--grab");
+        const b = ddViewerArgs(s, "/run/mon.sock", "0,0 1920,0");
+        expect(b).toContain("--offsets");
+        expect(b).toContain("0,0 1920,0");
+    });
+    test("clipboard off → --no-clipboard; grabKeyboard → --grab", () => {
+        const s = defaultSpec("t1");
+        s.display.clipboard = false;
+        s.display.grabKeyboard = true;
+        const a = ddViewerArgs(s, "/run/mon.sock");
+        expect(a).toContain("--no-clipboard");
+        expect(a).toContain("--grab");
+    });
+    test("escape shortcuts → --escape pairs", () => {
+        const s = defaultSpec("t1");
+        const a = ddViewerArgs(s, "/run/mon.sock", undefined,
+            ["ctrl+alt+delete=host-desktop:1", "ctrl+alt+end=command:cruiser vm kill t1"]);
+        const i = a.indexOf("--escape");
+        expect(i).toBeGreaterThan(-1);
+        expect(a[i + 1]).toBe("ctrl+alt+delete=host-desktop:1");
+        expect(a).toContain("ctrl+alt+end=command:cruiser vm kill t1");
+    });
+});
+
 // ── logs ──
 
 describe("logs", () => {
@@ -484,7 +520,7 @@ describe("escape shortcuts", () => {
     });
     test("default spec carries the kill escape hatch", () => {
         const esc = defaultSpec("abc").display.escapeShortcuts;
-        expect(esc).toContainEqual({ keys: "ctrl+alt+end", action: "command:{cli} vm kill {vm}" });
+        expect(esc).toContainEqual({ keys: "ctrl+super+end", action: "command:{cli} vm kill {vm}" });
     });
     test("khotkeysDataGroups maps top-level Data_N markers", () => {
         const src = [

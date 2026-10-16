@@ -65,20 +65,23 @@ a redundant `add,fullscreen` triggers the same collapse.
 ## Escape shortcuts
 
 `display.escapeShortcuts` installs *host* keybindings that fire while the
-viewer is focused — e.g. the default `ctrl+alt+delete → host-desktop:1`
+viewer is focused — e.g. the default `ctrl+super+f1 → host-desktop:1`
 jumps you back to host desktop 1 instead of sending the combo to the guest.
 
 Actions: `host-desktop:<n>`, `desktop-cycle-left`, `desktop-cycle-right`,
 `ungrab`, `none`, `command:<cmdline>` — arbitrary host command via `sh -c`
 (`{vm}`/`{cli}` placeholders expand at install). The default
-`ctrl+alt+end → command:{cli} vm kill {vm}` is the escape hatch for a hung
-guest.
+`ctrl+super+end → command:{cli} vm kill {vm}` is the escape hatch for a
+hung guest.
 
-They're only possible because the schema default `display.grabKeyboard:
-false` runs freerdp with `-grab-keyboard` — freerdp *doesn't* grab the
-keyboard, so the host WM still sees global shortcuts. Setting
-`grabKeyboard: true` (`+grab-keyboard`) gives the guest all keys and
-disables escape-shortcut install.
+The bindings fire anywhere on the host while the viewer runs — in the VM
+or in any other app. On the dmabuf viewer, `viewer-dd` itself grabs each
+combo globally (X11 passive grabs) and dispatches the action host-side,
+so they work regardless of focus or `grabKeyboard`. On freerdp they're
+installed as host-WM global shortcuts; under `+grab-keyboard` they're
+swallowed while the window is focused but work from anywhere else. Pick
+combos the host doesn't bind: if a combo ever leaks through, it hits the
+host's own shortcuts.
 
 ## Theme sync
 

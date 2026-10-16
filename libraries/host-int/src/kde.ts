@@ -226,8 +226,10 @@ async function kdeRestoreKeys(kc: string, entries: KglobalBoundEntry[]): Promise
 
 /**
  * Install a global escape shortcut by editing kglobalshortcutsrc + reloading
- * kglobalaccel. Only meaningful when the viewer does NOT grab the keyboard
- * (freerdp -grab-keyboard), so the host WM sees the combo.
+ * kglobalaccel. Installed even under grabKeyboard — the binding is only
+ * shadowed while the viewer's grab is held, which is exactly when the
+ * dmabuf viewer dispatches the same combo itself (freerdp's own grab just
+ * swallows it) — so escapes still fire whenever the VM isn't focused.
  *
  * Returns an uninstaller restoring the previous binding.
  */

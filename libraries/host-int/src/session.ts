@@ -115,6 +115,16 @@ export class ViewerSession extends EventEmitter {
                 }
             }
 
+            // viewer-dd gets the escape list verbatim ({vm}/{cli} expanded):
+            // it XGrabKeys each combo on root (fires while unfocused too)
+            // and dispatches the matching action itself. Windowed sessions
+            // get none — same "don't steal global combos" rule as the WM
+            // install path below.
+            const ddEscapes = dmabuf && d.headMode !== "windowed"
+                ? d.escapeShortcuts.map((s) =>
+                    `${s.keys}=${s.action.replaceAll("{vm}", this.spec.name).replaceAll("{cli}", cruiserCliPrefix())}`)
+                : undefined;
+
             // Newer krdp (Plasma ≥6.5) negotiates NLA but has no CredSSP
             // credentials — the connection dies in negotiation. Probe the
             // security layer up front (TLS-only → /sec:tls immediately), and
@@ -122,7 +132,7 @@ export class ViewerSession extends EventEmitter {
             const tlsOnly = !dmabuf && await rdpTlsOnly(this.spec.network.rdpPort!).catch(() => false);
             for (let attempt = 0; ; attempt++) {
                 const { child } = dmabuf
-                    ? await launchDdViewer(this.spec, ddOffsets)
+                    ? await launchDdViewer(this.spec, ddOffsets, ddEscapes)
                     : await launchFreerdp(this.spec, { rdpPort: this.spec.network.rdpPort!, logFile, tlsOnly: tlsOnly || attempt > 0 });
                 this.child = child;
                 child.on("exit", (c) => { this.child = null; this.emit("closed", c); this.cleanupDone = this.cleanup(); });
@@ -210,10 +220,16 @@ export class ViewerSession extends EventEmitter {
             }
         }
 
-        // Escape shortcuts need the host WM to see the keys (no keyboard grab).
-        // Windowed sessions get none — stealing e.g. ctrl+alt+delete from a
-        // normal app window is worse than losing the escape hatch.
-        if (d.headMode !== "windowed" && this.adapter.caps.shortcuts && !d.grabKeyboard) {
+        // Escape shortcuts via the WM's binding API — freerdp only. dmabuf
+        // skips this path entirely: viewer-dd owns escapes end-to-end with
+        // XGrabKey passive grabs on root (same coverage, no first-grab-wins
+        // races with kglobalaccel, and immune to the daemon flushing its
+        // in-memory state over kglobalshortcutsrc edits). Freerdp's own
+        // +grab-keyboard still gets these — the bindings are only shadowed
+        // while its window actually holds the grab. Windowed sessions get
+        // none — stealing keys from a normal app window is worse than
+        // losing the escape hatch.
+        if (!dmabuf && d.headMode !== "windowed" && this.adapter.caps.shortcuts) {
             for (let i = 0; i < d.escapeShortcuts.length; i++) {
                 const s = d.escapeShortcuts[i]!;
                 const action = parseEscapeAction(
