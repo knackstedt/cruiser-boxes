@@ -24,15 +24,18 @@ pub fn write_frame(w: &mut impl Write, tag: u8, payload: &[u8]) -> IoResult<()> 
     w.write_all(payload)
 }
 
-/// Incremental decoder — buffers partial frames across reads.
+/// Incremental decoder — buffers partial frames across reads. Consumed
+/// bytes are tracked by a cursor and compacted lazily: drain-per-frame is
+/// O(remaining) each time, which goes quadratic on a read full of frames.
 #[derive(Default)]
 pub struct Decoder {
     buf: Vec<u8>,
+    start: usize,
 }
 
 impl Decoder {
     pub fn new() -> Self {
-        Self { buf: Vec::with_capacity(8192) }
+        Self { buf: Vec::with_capacity(8192), start: 0 }
     }
 
     /// Feed bytes; returns each complete frame as (tag, payload).
@@ -40,17 +43,26 @@ impl Decoder {
         self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
         loop {
-            if self.buf.len() < 5 {
+            let avail = self.buf.len() - self.start;
+            if avail < 5 {
                 break;
             }
-            let len = u32::from_le_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
-            if self.buf.len() < 5 + len {
+            let i = self.start;
+            let len = u32::from_le_bytes([self.buf[i], self.buf[i + 1], self.buf[i + 2], self.buf[i + 3]]) as usize;
+            if avail < 5 + len {
                 break;
             }
-            let tag = self.buf[4];
-            let payload = self.buf[5..5 + len].to_vec();
-            self.buf.drain(..5 + len);
-            out.push((tag, payload));
+            out.push((self.buf[i + 4], self.buf[i + 5..i + 5 + len].to_vec()));
+            self.start = i + 5 + len;
+        }
+        // Compact the dead prefix only when it's all dead or large — keeps
+        // push() amortized O(chunk) instead of O(frames × buf).
+        if self.start == self.buf.len() {
+            self.buf.clear();
+            self.start = 0;
+        } else if self.start > 64 * 1024 {
+            self.buf.drain(..self.start);
+            self.start = 0;
         }
         out
     }
