@@ -14,7 +14,7 @@ export interface JsonSocketEvents {
 
 export class JsonSocket extends EventEmitter {
     protected sock: Socket;
-    private buf: Buffer = Buffer.alloc(0);
+    private parts: Buffer[] = [];
     private pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
     private nextId = 1;
     private handshake: { resolve: (first: any) => void; reject: (e: Error) => void } | null = null;
@@ -44,13 +44,33 @@ export class JsonSocket extends EventEmitter {
     onMessage(_msg: any): void { /* overridden by clients */ }
 
     protected feed(d: Buffer): void {
-        this.buf = Buffer.concat([this.buf, d]);
+        // Chunk queue, not a rolling concat: a 1MiB guest-file-read chunk
+        // arrives as ~16 socket reads and concat-per-read is O(n²) copy.
+        this.parts.push(d);
         // Messages are newline-delimited JSON; QGA prefixes sync replies with 0xFF.
         for (;;) {
-            const nl = this.buf.indexOf(0x0a);
-            if (nl < 0) break;
-            let line = this.buf.subarray(0, nl);
-            this.buf = this.buf.subarray(nl + 1);
+            // locate the next newline, possibly spanning chunks
+            let i = 0, pre = 0, nl = -1;
+            for (; i < this.parts.length; i++) {
+                nl = this.parts[i]!.indexOf(0x0a);
+                if (nl >= 0) break;
+                pre += this.parts[i]!.length;
+            }
+            if (nl < 0) return;
+            let line: Buffer;
+            if (i === 0) {
+                // newline inside the head chunk — cheap slice, no copy
+                line = this.parts[0]!.subarray(0, nl);
+                const rest = this.parts[0]!.subarray(nl + 1);
+                if (rest.length) this.parts[0] = rest; else this.parts.shift();
+            } else {
+                // spans chunks — concat the head only
+                const head = Buffer.concat(this.parts.slice(0, i + 1));
+                line = head.subarray(0, pre + nl);
+                const rest = head.subarray(pre + nl + 1);
+                this.parts.splice(0, i + 1);
+                if (rest.length) this.parts.unshift(rest);
+            }
             const ff = line.indexOf(0xff);
             if (ff >= 0) line = line.subarray(ff + 1);   // QGA sync marker
             const t = line.toString("utf-8").trim();
