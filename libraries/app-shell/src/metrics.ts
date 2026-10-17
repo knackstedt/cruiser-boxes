@@ -40,6 +40,10 @@ interface Prev {
 export class VmMetricsSampler {
     private hist = new Map<string, Hist>();
     private prev = new Map<string, Prev>();
+    /** consecutive samples where QGA didn't answer — the agent can appear
+     *  at any time (still installing, confined→fixed, late boot), so the
+     *  retry never stops entirely, it just gets rare. */
+    private qgaMiss = new Map<string, number>();
 
     async sample(h: VmHandle, state: VmState): Promise<VmMetrics> {
         const name = h.spec.name;
@@ -49,6 +53,7 @@ export class VmMetricsSampler {
         if (state !== "running") {
             this.hist.delete(name);
             this.prev.delete(name);
+            this.qgaMiss.delete(name);
             return m;
         }
         const hh = this.hist.get(name) ?? { cpu: [], mem: [], disk: [], net: [], gpu: [] };
@@ -59,16 +64,26 @@ export class VmMetricsSampler {
         const wall = pv.at ? (now - pv.at) / 1000 : 0;
         const pid = h.pid();
 
+        // A guest with no agent burns the whole ~2.5s QGA timeout on every
+        // 3s tick. After 3 misses back off to ~1 retry/minute (miss counts
+        // samples since the last answer — cheap bookkeeping, no timer).
+        const miss = (this.qgaMiss.get(name) ?? 0) + 1;
+        this.qgaMiss.set(name, miss);
+        const wantQga = miss <= 3 || miss % 20 === 0;
+
         const [guest, blkOps, drm] = await Promise.all([
-            h.withQga(async (qga) => Promise.all([
-                qga.readFile("/proc/stat", 256 * 1024, 4_000).catch(() => null),
-                qga.readFile("/proc/meminfo", 64 * 1024, 4_000).catch(() => null),
-                qga.readFile("/proc/net/dev", 64 * 1024, 4_000).catch(() => null),
-                qga.getFsInfo(4_000).catch(() => null),
-            ]), 2_500).catch(() => null),
+            wantQga
+                ? h.withQga(async (qga) => Promise.all([
+                    qga.readFile("/proc/stat", 256 * 1024, 4_000).catch(() => null),
+                    qga.readFile("/proc/meminfo", 64 * 1024, 4_000).catch(() => null),
+                    qga.readFile("/proc/net/dev", 64 * 1024, 4_000).catch(() => null),
+                    qga.getFsInfo(4_000).catch(() => null),
+                ]), 2_500).catch(() => null)
+                : Promise.resolve(null),
             h.withQmp((q) => q.execute("query-blockstats"), 2_500).catch(() => null),
             pid ? drmGpu(pid) : Promise.resolve(null),
         ]);
+        if (guest) this.qgaMiss.delete(name);
 
         let cpuPct: number | null = null;
         let memPct: number | null = null;
@@ -143,6 +158,7 @@ export class VmMetricsSampler {
     drop(name: string): void {
         this.hist.delete(name);
         this.prev.delete(name);
+        this.qgaMiss.delete(name);
     }
 }
 

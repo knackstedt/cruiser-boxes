@@ -9,7 +9,7 @@
 
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import type { VmSpec } from "../../vm-core/src/config/schema";
-import { guestAgentContext } from "../../vm-core/src/logs";
+import { appendVmLog, guestAgentContext } from "../../vm-core/src/logs";
 import { sq } from "../../sys/src/exec";
 import { profileFromSpec, resolvePackages, resolveFlatpaks } from "./packages";
 import { guestDevtoolsScript } from "./devtools";
@@ -432,4 +432,8 @@ export async function runGuestSetup(
     const stderr = res.stderr?.toString() ?? "";
     if (!stdout.includes("CRUISER_GUEST_SETUP_OK") && !stderr.includes("CRUISER_GUEST_SETUP_OK"))
         throw new Error(`guest setup did not complete cleanly:\n--- stderr ---\n${stderr.slice(-2000)}\n--- stdout ---\n${stdout.slice(-2000)}`);
+    // Every best-effort step echoes its skips to stderr — keep them in the
+    // VM journal on success too, so "provisioned but package X missing"
+    // is diagnosable after the fact.
+    if (stderr.trim()) void appendVmLog(h.paths, `guest-setup stderr:\n${stderr.trim().slice(-4000)}`);
 }
