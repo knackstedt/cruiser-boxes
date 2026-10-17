@@ -81,7 +81,8 @@ export class VmMetricsSampler {
                 ]), 2_500).catch(() => null)
                 : Promise.resolve(null),
             h.withQmp((q) => q.execute("query-blockstats"), 2_500).catch(() => null),
-            pid ? drmGpu(pid) : Promise.resolve(null),
+            // software mode holds no DRM fds — skip the /proc/pid/fd scan
+            pid && h.spec.gpu.mode !== "software" ? drmGpu(pid) : Promise.resolve(null),
         ]);
         if (guest) this.qgaMiss.delete(name);
 
