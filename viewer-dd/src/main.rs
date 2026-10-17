@@ -49,6 +49,21 @@ enum XJob {
     Nudge,
 }
 
+/// Guest hardware cursor pushed by QEMU over the listener — CursorDefine
+/// carries the sprite (ARGB32, same layout as XcursorPixel: a packed
+/// 0xAARRGGBB u32 per pixel) and MouseSet carries visibility (virtio-gpu
+/// binds `on` to whether the guest has a cursor plane bound). Applied as
+/// the host window's X cursor so the pointer shape tracks what it hovers
+/// in the guest — dropping it leaves the host arrow showing forever.
+struct CurImg { w: u32, h: u32, hx: u32, hy: u32, px: Vec<u32> }
+enum CurJob { Define(usize, CurImg), Show(usize, bool) }
+
+/// Per-console cursor slot: latest sprite + its built X cursor (freed on
+/// replace), visibility, and a generation counter the apply path uses to
+/// skip redundant XDefineCursor calls.
+#[derive(Default)]
+struct CurSlot { seen: bool, on: bool, gen: u64, img: Option<CurImg>, xc: u64 }
+
 fn fourcc_str(f: u32) -> String {
     String::from_utf8_lossy(&[(f & 0xFF) as u8, ((f >> 8) & 0xFF) as u8,
         ((f >> 16) & 0xFF) as u8, ((f >> 24) & 0xFF) as u8]).into_owned()
@@ -94,7 +109,7 @@ fn open_dbus_channel(monitor: &str) -> Result<UnixStream> {
 
 // ── D-Bus listener objects QEMU calls into ──
 
-struct Listener { tx: std::sync::mpsc::Sender<XJob>, id: u32 }
+struct Listener { tx: std::sync::mpsc::Sender<XJob>, ctx: std::sync::mpsc::Sender<CurJob>, id: u32, idx: usize }
 #[zbus::interface(name = "org.qemu.Display1.Listener")]
 impl Listener {
     fn scanout(&mut self, _w: u32, _h: u32, _stride: u32, _fmt: u32, _data: Vec<u8>) {}
@@ -115,8 +130,24 @@ impl Listener {
         if MOUSE_VERBOSE.load(Ordering::Relaxed) != 0 || n % 20 == 1 {
             eprintln!("[listener:{}] mouse_set {x},{y} on={on}", self.id);
         }
+        let _ = self.ctx.send(CurJob::Show(self.idx, on != 0));
     }
-    fn cursor_define(&mut self, _w: i32, _h: i32, _hx: i32, _hy: i32, _data: Vec<u8>) {}
+    fn cursor_define(&mut self, w: i32, h: i32, hx: i32, hy: i32, data: Vec<u8>) {
+        let (w, h) = (w.max(0) as u32, h.max(0) as u32);
+        // reject nonsense — 4 bytes per pixel, sane sprite size
+        if w == 0 || h == 0 || w as u64 * h as u64 > 65536
+            || data.len() < w as usize * h as usize * 4 {
+            return;
+        }
+        let px = data.chunks_exact(4).take((w * h) as usize)
+            .map(|b| u32::from_ne_bytes(b.try_into().unwrap()))
+            .collect();
+        let _ = self.ctx.send(CurJob::Define(self.idx, CurImg {
+            w, h,
+            hx: hx.max(0) as u32, hy: hy.max(0) as u32,
+            px,
+        }));
+    }
     #[zbus(property)]
     fn interfaces(&self) -> Vec<String> {
         vec!["org.qemu.Display1.Listener.Unix.ScanoutDMABUF2".to_string()]
@@ -582,8 +613,58 @@ extern "C" {
                           prop_ret: *mut *mut u8) -> i32;
     fn XTestFakeButtonEvent(d: *mut std::ffi::c_void, button: u32,
                             is_press: i32, delay: u64) -> i32;
+    fn XDefineCursor(d: *mut std::ffi::c_void, w: u64, cursor: u64) -> i32;
+    fn XUndefineCursor(d: *mut std::ffi::c_void, w: u64) -> i32;
+    fn XFreeCursor(d: *mut std::ffi::c_void, cursor: u64) -> i32;
     fn XSetErrorHandler(h: Option<extern "C" fn(*mut std::ffi::c_void, *mut XErrEv) -> i32>)
         -> Option<extern "C" fn(*mut std::ffi::c_void, *mut XErrEv) -> i32>;
+}
+
+/// libXcursor image — the layout XcursorImageCreate/LoadCursor expect
+/// (Xcursor.h: every field is a 32-bit XcursorUInt/XcursorDim + the
+/// pixels pointer).
+#[repr(C)]
+struct XcursorImage {
+    _version: u32, _size: u32, _width: u32, _height: u32,
+    xhot: u32, yhot: u32, _delay: u32, pixels: *mut u32,
+}
+
+/// libXcursor — dlopen'd like libXinerama: present on every X desktop,
+/// and its absence degrades to the host's default cursor rather than
+/// failing the viewer.
+struct Xcursor {
+    create: unsafe extern "C" fn(i32, i32) -> *mut XcursorImage,
+    load: unsafe extern "C" fn(*mut std::ffi::c_void, *const XcursorImage) -> u64,
+    destroy: unsafe extern "C" fn(*mut XcursorImage),
+    _lib: libloading::Library,
+}
+
+fn xcursor() -> Option<&'static Xcursor> {
+    static XC: std::sync::OnceLock<Option<Xcursor>> = std::sync::OnceLock::new();
+    XC.get_or_init(|| unsafe {
+        let lib = libloading::Library::new("libXcursor.so.1")
+            .or_else(|_| libloading::Library::new("libXcursor.so")).ok()?;
+        Some(Xcursor {
+            create: *lib.get(b"XcursorImageCreate\0").ok()?,
+            load: *lib.get(b"XcursorImageLoadCursor\0").ok()?,
+            destroy: *lib.get(b"XcursorImageDestroy\0").ok()?,
+            _lib: lib,
+        })
+    }).as_ref()
+}
+
+/// CurImg → X Cursor XID via libXcursor. The pixel block copies straight
+/// over — QEMU's ARGB32 wire data and XcursorPixel are the same layout.
+unsafe fn build_xcursor(d: *mut std::ffi::c_void, img: &CurImg) -> Option<u64> {
+    let xc = xcursor()?;
+    let im = (xc.create)(img.w as i32, img.h as i32);
+    if im.is_null() { return None; }
+    (*im).xhot = img.hx.min(img.w - 1);
+    (*im).yhot = img.hy.min(img.h - 1);
+    std::ptr::copy_nonoverlapping(img.px.as_ptr(), (*im).pixels, img.px.len());
+    let c = (xc.load)(d, im);
+    (xc.destroy)(im);
+    (c != 0).then_some(c)
 }
 
 /// Xinerama screen list — the index space _NET_WM_FULLSCREEN_MONITORS
@@ -863,6 +944,7 @@ fn input_worker(conn: std::sync::Arc<zbus::blocking::Connection>,
 fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                   console_paths: Vec<String>, title: &str, mut w: usize, mut h: usize,
                   jrx: std::sync::mpsc::Receiver<XJob>,
+                  crx: std::sync::mpsc::Receiver<CurJob>,
                   heads: std::sync::Arc<Heads>, span: Option<Span>,
                   esc: std::sync::Arc<EscState>) -> Result<()> {
     use minifb::{Window, WindowOptions};
@@ -1179,6 +1261,12 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     let mut num_suppress_until = std::time::Instant::now() - std::time::Duration::from_secs(1);
     let mut num_mismatch = 0u32;
     let mut num_diag = 0u32;
+
+    // Guest-cursor state — see the apply block at the bottom of the loop.
+    let mut cur_slots: Vec<CurSlot> = (0..nheads).map(|_| CurSlot::default()).collect();
+    let mut cur_dirty = true;
+    let mut cur_applied: Option<(usize, u64, bool, bool)> = None;
+    let mut blank_xc = 0u64;
 
     while win.is_open() {
         win.update(); // events only — EGL renders into this window directly
@@ -1575,6 +1663,71 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                 let _ = itx.send(In::Move(ci, gx, gy));
             }
         }
+        // Guest cursor state from the listener. Per console — a head
+        // crossing swaps to that output's sprite. gen bumps per Define so
+        // the apply below only touches X when the desired cursor changed.
+        while let Ok(c) = crx.try_recv() {
+            match c {
+                CurJob::Define(ci, img) => {
+                    if let Some(s) = cur_slots.get_mut(ci) {
+                        s.seen = true;
+                        s.gen += 1;
+                        if s.xc != 0 && !xdpy.is_null() {
+                            unsafe { XFreeCursor(xdpy, s.xc); }
+                            s.xc = 0;
+                        }
+                        s.img = Some(img);
+                        cur_dirty = true;
+                    }
+                }
+                CurJob::Show(ci, on) => {
+                    if let Some(s) = cur_slots.get_mut(ci) {
+                        s.seen = true;
+                        if s.on != on { s.on = on; cur_dirty = true; }
+                    }
+                }
+            }
+        }
+        if (cur_dirty || cur_applied.map(|a| a.0) != Some(cur_ci)) && !xdpy.is_null() {
+            cur_dirty = false;
+            if let Some(s) = cur_slots.get_mut(cur_ci) {
+                let key = (cur_ci, s.gen, s.on, s.seen);
+                if cur_applied != Some(key) {
+                    cur_applied = Some(key);
+                    unsafe {
+                        if !s.seen || (s.on && s.img.is_none()) {
+                            // nothing pushed yet / on but no sprite — the
+                            // host's inherited default is the sane fallback
+                            XUndefineCursor(xdpy, xwin_id);
+                        } else if s.on {
+                            if s.xc == 0 {
+                                s.xc = build_xcursor(xdpy, s.img.as_ref().unwrap()).unwrap_or(0);
+                            }
+                            if s.xc != 0 {
+                                XDefineCursor(xdpy, xwin_id, s.xc);
+                            } else {
+                                XUndefineCursor(xdpy, xwin_id);
+                            }
+                        } else {
+                            // guest unbound its cursor sprite — a
+                            // transparent cursor so no phantom arrow floats
+                            // over a guest that draws (or hides) its own
+                            if blank_xc == 0 {
+                                blank_xc = build_xcursor(xdpy, &CurImg {
+                                    w: 1, h: 1, hx: 0, hy: 0, px: vec![0],
+                                }).unwrap_or(0);
+                            }
+                            if blank_xc != 0 {
+                                XDefineCursor(xdpy, xwin_id, blank_xc);
+                            } else {
+                                XUndefineCursor(xdpy, xwin_id);
+                            }
+                        }
+                        XFlush(xdpy);
+                    }
+                }
+            }
+        }
     }
     if !xdpy.is_null() { unsafe { XCloseDisplay(xdpy); } }
     Ok(())
@@ -1721,6 +1874,7 @@ async fn main() -> Result<()> {
     let mut pending = Vec::new();
     let mut _lconns = Vec::new();
     let (jtx, jrx) = std::sync::mpsc::channel::<XJob>();
+    let (ctx, crx) = std::sync::mpsc::channel::<CurJob>();
     for (idx, &ci) in consoles.iter().enumerate() {
         let cpath = zbus::zvariant::ObjectPath::try_from(format!("/org/qemu/Display1/Console_{ci}"))?;
         let console = zbus::Proxy::new(&conn, "org.qemu", cpath.clone(), "org.qemu.Display1.Console").await?;
@@ -1736,7 +1890,7 @@ async fn main() -> Result<()> {
         drop(p2);
         s2.set_nonblocking(true)?;
         let lc = connection::Builder::unix_stream(tokio::net::UnixStream::from_std(s2)?)
-            .serve_at("/org/qemu/Display1/Listener", Listener { tx: jtx.clone(), id: ci })?
+            .serve_at("/org/qemu/Display1/Listener", Listener { tx: jtx.clone(), ctx: ctx.clone(), id: ci, idx })?
             .serve_at("/org/qemu/Display1/Listener", UnixDmabuf2 { tx: jtx.clone(), dims: dims.clone(), id: ci, idx })?
             .p2p().build().await?;
         _lconns.push(lc);
@@ -1824,7 +1978,7 @@ async fn main() -> Result<()> {
     // first proxy call. Spawned tasks (watchdog, signals) keep running on
     // the runtime's workers while we join.
     let t = title.clone();
-    let wh = std::thread::spawn(move || present_window(iconn, paths, &t, w, h, jrx, heads, span, esc));
+    let wh = std::thread::spawn(move || present_window(iconn, paths, &t, w, h, jrx, crx, heads, span, esc));
     let r = wh.join().unwrap_or_else(|_| Err(anyhow::anyhow!("window thread panicked")));
     eprintln!("[*] window closed — {r:?}");
     Ok(())
