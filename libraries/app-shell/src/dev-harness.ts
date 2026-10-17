@@ -5,6 +5,8 @@
 // nowhere. Knobs:
 //   CRUISER_SCREENSHOT=/path.png CRUISER_SHOT_FRAMES=N  frame-N screenshot
 //   CRUISER_FAKE_VM=1                                  append a fake running VM
+//     (+CRUISER_FAKE_TICK_MS=N — jitter its metrics every N ms: mutation
+//      storm for the region-patch/raster path)
 //   CRUISER_ROUTE=create|vm|settings|logs (+CRUISER_VM, CRUISER_LOG_SOURCE,
 //     CRUISER_LOG_FILE, CRUISER_FAKE_BUSY=sec)         preselect a route
 //   CRUISER_INPUT_SCRIPT=/path.json (+CRUISER_UI_ZOOM, CRUISER_INPUT_DELAY)
@@ -42,7 +44,7 @@ export interface DevHarnessCtx {
 /** Wire every env-gated dev hook. No-op when none are set. */
 export function initDevHarness(ctx: DevHarnessCtx): void {
     const env = ctx.env ?? process.env;
-    if (env.CRUISER_FAKE_VM) installFakeVm(ctx);
+    if (env.CRUISER_FAKE_VM) installFakeVm(ctx, env);
     if (env.CRUISER_ROUTE) forceRoute(ctx, env);
     if (env.CRUISER_INPUT_SCRIPT) runInputScript(ctx, env);
 }
@@ -50,8 +52,11 @@ export function initDevHarness(ctx: DevHarnessCtx): void {
 // ── CRUISER_FAKE_VM ──
 
 /** Appends a fake running VM on every refresh — exercises the running
- *  vmrow layout (sparks + extra buttons). */
-function installFakeVm({ store }: DevHarnessCtx): void {
+ *  vmrow layout (sparks + extra buttons). CRUISER_FAKE_TICK_MS jitters its
+ *  metric samples on an interval — a cheap mutation storm driving the
+ *  store→region-patch→raster path far faster than the real 3s cadence
+ *  (smoke runs with screenshots verify textures survive partial updates). */
+function installFakeVm({ store }: DevHarnessCtx, env: NodeJS.ProcessEnv): void {
     const fake: VmSummary = {
         name: "fake-runner", state: "running", gpuMode: "venus", headMode: "windowed",
         cpus: 4, memMiB: 8192, diskGiB: 64, nestedVirt: false, sshPort: 4022, rdpPort: 43389,
@@ -73,6 +78,21 @@ function installFakeVm({ store }: DevHarnessCtx): void {
     };
     const orig = store.getState().setVms;
     store.setState({ setVms: (vms) => orig([fake, ...vms.filter((v) => v.name !== fake.name)]) });
+    const tickMs = Number(env.CRUISER_FAKE_TICK_MS) || 0;
+    if (tickMs > 0) {
+        const jit = (a: number[], lo: number, hi: number) =>
+            [...a.slice(-40), Math.round(lo + Math.random() * (hi - lo))];
+        setInterval(() => {
+            // Mutate the fixture in place — the setVms wrapper above
+            // re-prepends `fake`, so a fresh object here would be dropped.
+            fake.cpu = jit(fake.cpu, 5, 90);
+            fake.mem = jit(fake.mem, 20, 80);
+            fake.disk = jit(fake.disk, 0, 1500);
+            fake.net = jit(fake.net, 0, 4e6);
+            fake.gpu = jit(fake.gpu, 0, 70);
+            store.getState().setVms([...store.getState().vms]);
+        }, tickMs);
+    }
 }
 
 // ── CRUISER_ROUTE ──

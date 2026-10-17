@@ -296,7 +296,10 @@ function vmBtns(vm: VmSummary, s: CruiserState, detail = false): string {
     return parts.join("");
 }
 
-function vmRow(vm: VmSummary, s: CruiserState): string {
+/** Inner markup of a list row — #vmrow-<name> is patched via innerHtml on
+ *  same-route updates, so the row node (and any :active/hover on it)
+ *  survives metric ticks. VM names match [a-z0-9-]+ — css-ident safe. */
+function vmRowInner(vm: VmSummary, s: CruiserState): string {
     const up = vm.state === "running";
     const specs = `${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB RAM · ${vm.diskGiB} GiB cap`;
     const diskParts = [
@@ -310,8 +313,7 @@ function vmRow(vm: VmSummary, s: CruiserState): string {
     const mode = [GPU_LABEL[vm.gpuMode] ?? vm.gpuMode, HEAD_LABEL[vm.headMode] ?? vm.headMode, ports,
         vm.encrypt !== "off" ? `luks ${vm.encrypt}${vm.diskLocked ? " · locked" : ""}` : ""]
         .filter(Boolean).join(" · ");
-    return `<div class="vmrow">
-        <div class="grow" data-action="nav" data-route="vm" data-vm="${esc(vm.name)}">
+    return `<div class="grow" data-action="nav" data-route="vm" data-vm="${esc(vm.name)}">
             <div class="vmname">${esc(vm.name)}</div>
             ${vm.description ? `<div class="vmmode">${esc(vm.description)}</div>` : ""}
             <div class="vmspecs">${esc(specs)}</div>
@@ -320,8 +322,7 @@ function vmRow(vm: VmSummary, s: CruiserState): string {
         </div>
         <div class="pill ${pillClass(vm.state)}">${esc(vm.state)}</div>
         <div class="vmbtns">${vmBtns(vm, s)}</div>
-        ${up ? sparksFor(vm) : ""}
-    </div>`;
+        ${up ? sparksFor(vm) : ""}`;
 }
 
 /** The parked auto-snapshot low-space decision — the user picks between
@@ -358,14 +359,25 @@ function unlockBanner(s: CruiserState): string {
             ${btn("Cancel", "unlock-cancel", attr("vm", p.vm), "btn sm dim")}</div></div>`;
 }
 
-function home(s: CruiserState): string {
-    const list = s.vms.length
-        ? `<div class="vmlist">${s.vms.map((vm) => vmRow(vm, s)).join("")}</div>`
+/** The VM list is the hot path — a store tick every ~3s rebuilds it. Rows
+ *  carry stable ids so applyHtml can patch just the changed rows through
+ *  rowGroup instead of re-parsing the whole list (each running row is
+ *  ~200 sparkline divs). */
+function home(s: CruiserState): RouteBody {
+    const head = `${unlockBanner(s)}${autoSnapBanner(s)}<div class="vmlist-head"><div class="h1">Virtual Machines</div>
+        ${btn("+ New VM", "nav", attr("route", "create"))}</div>`;
+    const rows = s.vms.map((vm) => ({ id: `vmrow-${vm.name}`, html: vmRowInner(vm, s) }));
+    // .vmlist is the row container — it survives even when empty so add/
+    // remove/reorder swaps patch it rather than the whole .content.
+    const listInner = rows.length
+        ? rows.map((r) => `<div class="vmrow" id="${esc(r.id)}">${r.html}</div>`).join("")
         : `<div class="empty">No VMs yet.
             <div style="margin-top:14px">${btn("+ New VM", "nav", attr("route", "create"))}</div></div>`;
-    return `${unlockBanner(s)}${autoSnapBanner(s)}<div class="vmlist-head"><div class="h1">Virtual Machines</div>
-        ${btn("+ New VM", "nav", attr("route", "create"))}</div>
-        ${list}`;
+    return {
+        html: `<div id="homehead">${head}</div><div class="vmlist" id="vmlist">${listInner}</div>`,
+        regions: [{ sel: "#homehead", html: head }],
+        rowGroup: { container: "#vmlist", containerHtml: listInner, rows },
+    };
 }
 
 // ── create wizard ──
@@ -566,9 +578,9 @@ function create(s: CruiserState): string {
 
 // ── vm detail ──
 
-function vmDetail(s: CruiserState): string {
+function vmDetail(s: CruiserState): RouteBody {
     const vm = s.vms.find((v) => v.name === s.selectedVm);
-    if (!vm) return `<div class="h1">${esc(s.selectedVm ?? "?")}</div><div class="empty">not found</div>`;
+    if (!vm) return { html: `<div class="h1">${esc(s.selectedVm ?? "?")}</div><div class="empty">not found</div>` };
     const up = vm.state === "running";
     const snaps = vm.snapshots.length
         ? vm.snapshots.map((sn) => {
@@ -600,7 +612,11 @@ function vmDetail(s: CruiserState): string {
         : pwRev !== null
             ? `${esc(vm.username)} · <b style="user-select:text">${esc(pwRev)}</b> ${btn("hide", "vm-pw", attr("vm", vm.name), "btn sm dim")}`
             : `${esc(vm.username)} · •••••••• ${btn("show password", "vm-pw", attr("vm", vm.name), "btn sm dim")}`;
-    return `<div class="crumb" data-action="nav" data-route="home">‹ VMs</div>
+    // #vmtop carries everything that churns on a metrics tick (pill, kv,
+    // sparkline band, action buttons); #vmrest holds the slow sections —
+    // the share form's inputs only rebuild when share/snapshot state
+    // actually changes, not every poll.
+    const top = `<div class="crumb" data-action="nav" data-route="home">‹ VMs</div>
         <div class="h1">${esc(vm.name)} <span class="pill ${pillClass(vm.state)}">${esc(vm.state)}</span></div>
         ${vm.description ? `<div class="meta" style="margin:-8px 0 12px">${esc(vm.description)}</div>` : ""}
         ${vm.pendingRestart?.length
@@ -623,8 +639,8 @@ function vmDetail(s: CruiserState): string {
         ${up ? `<div class="h2">Usage</div>${sparksFor(vm)}` : ""}
         <div style="margin:10px 0 18px">
             ${vmBtns(vm, s, true)}
-        </div>
-        <div class="h2">Portable config</div>
+        </div>`;
+    const rest = `<div class="h2">Portable config</div>
         <div class="row"><div class="lbl">Export / pull</div>
             ${btn("Export (yaml)", "vm-export", attr("vm", vm.name), "btn sm")}
             ${btn("Push to gist", "vm-gist-push", attr("vm", vm.name), "btn sm")}
@@ -634,6 +650,10 @@ function vmDetail(s: CruiserState): string {
         ${shareSection(vm, s, up)}
         <div class="h2">Snapshots</div>
         ${snapSection}`;
+    return {
+        html: `<div id="vmtop">${top}</div><div id="vmrest">${rest}</div>`,
+        regions: [{ sel: "#vmtop", html: top }, { sel: "#vmrest", html: rest }],
+    };
 }
 
 /** The shares list + add form on the vm detail screen. */
@@ -693,7 +713,7 @@ function shareSection(vm: VmSummary, s: CruiserState, up: boolean): string {
 
 // ── logs ──
 
-function logsView(s: CruiserState): string {
+function logsView(s: CruiserState): RouteBody {
     const name = s.selectedVm ?? "?";
     const vm = s.vms.find((v) => v.name === name);
     const l = s.logs;
@@ -735,12 +755,16 @@ function logsView(s: CruiserState): string {
 
     // .logpre is NOT emitted here — it's a sibling of .content patched
     // through the RouteParts.log region so the scrollport node survives
-    // content patches (see applyHtml).
-    return `<div class="crumb" data-action="nav" data-route="vm" data-vm="${esc(name)}">‹ ${esc(name)}</div>
+    // content patches (see applyHtml). #logmeta splits off the "fetched Ns
+    // ago" line — it changes on every refresh while the controls don't.
+    const ctl = `<div class="crumb" data-action="nav" data-route="vm" data-vm="${esc(name)}">‹ ${esc(name)}</div>
         <div class="h1">${esc(name)} logs <span class="pill ${pillClass(vm?.state ?? "")}">${esc(vm?.state ?? "?")}</span></div>
         <div class="logbar">${srcTabs}<span class="meta">lines</span>${linesSel}${follow}${btn("Refresh", "log-refresh", "", "btn sm")}</div>
-        ${controls}
-        <div class="logmeta" style="margin-bottom:6px">${esc(meta)}</div>`;
+        ${controls}`;
+    return {
+        html: `<div id="logctl">${ctl}</div><div id="logmeta"><div class="logmeta" style="margin-bottom:6px">${esc(meta)}</div></div>`,
+        regions: [{ sel: "#logctl", html: ctl }, { sel: "#logmeta", html: `<div class="logmeta" style="margin-bottom:6px">${esc(meta)}</div>` }],
+    };
 }
 
 /** Inner markup of the logs scrollpane — patched into .logpre directly so
@@ -759,18 +783,25 @@ function logPaneInner(s: CruiserState): string {
 /** Term route — a head strip + the empty #termbox the webui terminal view
  *  composites over. Sessions outlive the route (TermManager); the head
  *  shows the connect status and offers reconnect / host-window escapes. */
-function termView(s: CruiserState): string {
+/** Term route — a head strip + the empty #termbox the webui terminal view
+ *  composites over. Sessions outlive the route (TermManager); the head
+ *  shows the connect status and offers reconnect / host-window escapes.
+ *  #termhead is its own region so termLine ticks never rebuild #termbox —
+ *  TermManager holds its rect, and a node swap under the composited view
+ *  would blank the terminal for a frame. */
+function termView(s: CruiserState): RouteBody {
     const name = s.selectedVm ?? "?";
     const vm = s.vms.find((v) => v.name === name);
-    return `<div class="termhead">
-        <div class="crumb" data-action="nav" data-route="vm" data-vm="${esc(name)}">‹ ${esc(name)}</div>
+    const head = `<div class="crumb" data-action="nav" data-route="vm" data-vm="${esc(name)}">‹ ${esc(name)}</div>
         <span class="pill ${pillClass(vm?.state ?? "")}">${esc(vm?.state ?? "?")}</span>
         <div class="meta">terminal · ${esc(s.termLine || "…")}</div>
         <div style="flex:1"></div>
         ${btn("Reconnect", "vm-term-reconnect", attr("vm", name), "btn sm dim")}
-        ${btn("Open in window", "vm-term-host", attr("vm", name), "btn sm dim")}
-    </div>
-    <div id="termbox"></div>`;
+        ${btn("Open in window", "vm-term-host", attr("vm", name), "btn sm dim")}`;
+    return {
+        html: `<div class="termhead" id="termhead">${head}</div><div id="termbox"></div>`,
+        regions: [{ sel: "#termhead", html: head }],
+    };
 }
 
 // ── settings / doctor ──
@@ -828,6 +859,23 @@ function settings(s: CruiserState): string {
         ${btn("Run doctor", "doctor")}${docRows ? `<div style="margin-top:8px">${docRows}</div>` : `<div class="meta" style="display:inline-block;margin-left:10px">not run</div>`}`;
 }
 
+/** A patchable region — a stable container whose INNER markup is swapped
+ *  via setInnerHtml when it changes between same-route renders. */
+export interface RegionPart { sel: string; html: string }
+/** A row inside a rowGroup — inner markup keyed by the row element's id. */
+export interface RowPart { id: string; html: string }
+
+/** What a route renderer returns — full inner markup for .content plus the
+ *  fine-grained patch surface used on same-route updates. */
+interface RouteBody {
+    html: string;
+    /** Containers patched individually when their markup changed. */
+    regions?: RegionPart[];
+    /** Ordered rows inside `container` — patched per-row when the id list
+     *  is unchanged, wholesale via containerHtml on add/remove/reorder. */
+    rowGroup?: { container: string; containerHtml: string; rows: RowPart[] };
+}
+
 /** Per-region markup — same-route updates patch these into the live doc via
  *  setInnerHtml, which keeps the .content scrollport node (and its scroll
  *  offset) alive. A full setHtml rebuild resets scroll and replays the
@@ -839,6 +887,11 @@ export interface RouteParts {
     /** Inner markup of the logs scrollpane (.logpre), or null on other
      *  routes — patched as its own region so the scrollport node survives. */
     log: string | null;
+    /** Fine-grained patch surface for .content (region/row ops) — when
+     *  present on both prev and cur render, applyHtml mutates only the
+     *  changed regions instead of re-parsing all of .content. */
+    regions?: RegionPart[];
+    rowGroup?: RouteBody["rowGroup"];
     /** Full document (topbar/content/footer wrapped in the page shell) —
      *  used for mount, route changes, and gate dedupe. */
     html: string;
@@ -854,13 +907,13 @@ export function renderRouteParts(s: CruiserState): RouteParts {
     // and the form shouldn't be touched mid-flight. Everywhere else the
     // topbar "working…" + footer status carry the in-flight op: blanking the
     // VM list for a 20s stop drain reads as "the list vanished".
-    const body =
-        s.busy && s.route === "create" ? spinner :
+    const b: RouteBody =
+        s.busy && s.route === "create" ? { html: spinner } :
         s.route === "home" ? home(s) :
-        s.route === "create" ? create(s) :
+        s.route === "create" ? { html: create(s) } :
         s.route === "vm" ? vmDetail(s) :
         s.route === "logs" ? logsView(s) :
-        s.route === "term" ? termView(s) : settings(s);
+        s.route === "term" ? termView(s) : { html: settings(s) };
     const topbar = `<div class="brand">cruiser</div>
         <div class="nav">${nav("home", "VMs", ["home", "create", "vm", "logs", "term"].includes(s.route))}${nav("settings", "Settings")}</div>
         <div style="flex:1"></div>`;
@@ -868,10 +921,11 @@ export function renderRouteParts(s: CruiserState): RouteParts {
     const footer = `<div class="fbar${fcls}"><div class="fdot"></div><div class="ftext">${esc(s.status)}</div></div>`;
     const log = s.route === "logs" ? logPaneInner(s) : null;
     return {
-        topbar, content: body, footer, log,
+        topbar, content: b.html, footer, log,
+        regions: b.regions, rowGroup: b.rowGroup,
         html: `<html><head><style>${fontFaceCss()}${CSS}</style></head><body>
         <div class="topbar">${topbar}</div>
-        <div class="content${log !== null ? " logtop" : ""}${s.route === "term" ? " termroute" : ""}">${body}</div>
+        <div class="content${log !== null ? " logtop" : ""}${s.route === "term" ? " termroute" : ""}">${b.html}</div>
         ${log !== null ? `<div class="logpre" id="logpane">${log}</div>` : ""}
         <div class="footer">${footer}</div>
     </body></html>`,

@@ -9,6 +9,7 @@ import type { InputBus } from "./input-bus";
 import type { CruiserService } from "./service";
 import type { Store, CreateForm } from "./store";
 import { renderRouteParts, type RouteParts } from "./screens";
+import { applySameRoute } from "./content-patch";
 import { DISTROS } from "../../provision/src/distros";
 import { DEVTOOLS, DEVTOOLS_PRESET } from "../../provision/src/packages";
 import { registerUiFonts } from "./fonts";
@@ -30,7 +31,6 @@ const SPIN = ["◐", "◓", "◑", "◒"];
 
 /** The busy overlay that replaces the create form — identified by its root
  *  element since RouteParts carries markup, not flags. */
-const isSpinwrap = (html: string) => html.startsWith('<div class="spinwrap"');
 
 export class CruiserShell {
     private host: HtmlUiHost;
@@ -105,7 +105,8 @@ export class CruiserShell {
             if (id !== null) { this.gate.pressDown(); return; }
             if (this.gate.pressUp()) queueMicrotask(() => this.pushRender());
         };
-        // Re-render on state change (cheap for now; targeted mutations later).
+        // Re-render on state change — applyHtml diffs the parts and only
+        // mutates the regions/rows that actually moved (see contentPatch).
         let pending = false;
         this.unsub = store.subscribe(() => {
             if (pending) return;
@@ -365,8 +366,12 @@ export class CruiserShell {
     /**
      * Apply fresh markup. Route changes swap the whole document (scroll
      * resets to the top — intentional). Same-route updates patch
-     * topbar/content/footer via innerHtml instead: the .content scrollport
-     * node survives, so scroll offset persists with no restore scroll —
+     * topbar/content/footer via innerHtml — and routes that declare a fine
+     * surface (regions/rowGroup) go one level deeper: contentPatch diffs
+     * per-region markup and emits a single batched mutate() covering only
+     * the changed subtrees, so a metrics tick reparses the one row that
+     * moved instead of the whole page. The .content scrollport node always
+     * survives, so scroll offset persists with no restore scroll —
      * which means no scroll=0 frame between rebuild and restore (the
      * flicker) and no scrollbar thumb re-flash on every poll.
      */
@@ -395,27 +400,8 @@ export class CruiserShell {
             }
         } else {
             const prev = this.lastParts!;
-            if (parts.topbar !== prev.topbar) p.setInnerHtml(".topbar", parts.topbar);
-            if (parts.content !== prev.content) {
-                p.setInnerHtml(".content", parts.content);
-                // The scrollport node survives the patch with its scroll
-                // offset, and nothing re-clamps it when the content shrinks
-                // — the Create button sits at the bottom of a long form, so
-                // the form→spinner swap leaves a near-max offset pointing
-                // past the end of the 540px .spinwrap and the pane paints
-                // empty. A spinner↔content swap resets to the top.
-                if (isSpinwrap(prev.content) !== isSpinwrap(parts.content))
-                    p.scrollTo(".content", 0, 0);
-            }
-            // .logpre is a sibling of .content patched through its own
-            // region — the scrollport node (and its scroll offset) survives,
-            // so refreshes don't reset or blank the pane. Re-pin to the
-            // newest lines only when already at the bottom or following.
-            if (parts.log !== null && parts.log !== prev.log) {
-                p.setInnerHtml(".logpre", parts.log);
-                if (this.logPinned || st.logs.follow) this.pinLogToBottom();
-            }
-            if (parts.footer !== prev.footer) p.setInnerHtml(".footer", parts.footer);
+            if (applySameRoute(prev, parts, p)
+                && (this.logPinned || st.logs.follow)) this.pinLogToBottom();
         }
         this.lastParts = parts;
         // Post-layout: activate/place the terminal view for the term route,
