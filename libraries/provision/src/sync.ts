@@ -694,7 +694,13 @@ export class SessionSyncs {
     private agent: AgentForward | null = null;
     private pushing = false;
     private queued = false;
-    private last = new Map<string, string>();
+    /** Applied-channel hashes — loaded from run/sync.state on first use and
+     *  shared by live pushes and oneshots, so a channel that succeeded last
+     *  session with unchanged inputs isn't re-pushed at every viewer open.
+     *  Keys are disjoint (live: theme/accentColor/contrast/timezone vs the
+     *  oneshot ids) so the shared map needs no namespacing. */
+    private stateP: Promise<Record<string, string>> | null = null;
+    private saveChain: Promise<void> = Promise.resolve();
 
     constructor(
         private readonly h: VmHandle,
@@ -756,13 +762,30 @@ export class SessionSyncs {
         if (this.queued) { this.queued = false; void this.pushLive(); }
     }
 
-    /** Changed-since-last-success check — `last` only advances on a clean
-     *  push so a failed apply retries on the next host change. */
+    private loadState(): Promise<Record<string, string>> {
+        this.stateP ??= (async () => JSON.parse(
+            await readFile(join(this.h.paths.run, "sync.state"), "utf-8").catch(() => "{}")))();
+        return this.stateP;
+    }
+
+    /** Serialized write-back — live pushes and oneshots can interleave. */
+    private saveState(): void {
+        this.saveChain = this.saveChain.then(async () => {
+            const state = await this.loadState();
+            await mkdir(this.h.paths.run, { recursive: true });
+            await writeFile(join(this.h.paths.run, "sync.state"), `${JSON.stringify(state, null, 1)}\n`);
+        }).catch(() => {});
+    }
+
+    /** Changed-since-last-success check — the hash only lands in state on
+     *  a clean push so a failed apply retries on the next host change. */
     private async pushIfChanged(id: string, val: unknown, apply: () => Promise<void>): Promise<void> {
         const key = chanHash(val);
-        if (key === this.last.get(id)) return;
+        const state = await this.loadState();
+        if (key === state[id]) return;
         await apply();
-        this.last.set(id, key);
+        state[id] = key;
+        this.saveState();
         this.log?.(`${id} synced into guest`);
     }
 
@@ -773,9 +796,7 @@ export class SessionSyncs {
      */
     private async runOneshots(): Promise<void> {
         const spec = this.h.spec;
-        const statePath = join(this.h.paths.run, "sync.state");
-        const state: Record<string, string> = JSON.parse(
-            await readFile(statePath, "utf-8").catch(() => "{}"));
+        const state = await this.loadState();
 
         const tryChan = async (id: SyncId, val: unknown, apply: () => Promise<void>) => {
             if (!syncEnabled(spec, id) || val === null || val === undefined) return;
@@ -888,8 +909,7 @@ export class SessionSyncs {
         }
 
         await Promise.allSettled(jobs);
-        await mkdir(this.h.paths.run, { recursive: true });
-        await writeFile(statePath, `${JSON.stringify(state, null, 1)}\n`);
+        this.saveState();
     }
 
     dispose(): void {
