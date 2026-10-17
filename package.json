@@ -14,13 +14,12 @@
     "term-dd:stage": "bun run toolchain/stage-term-dd.mts",
     "term:bundle": "bun run toolchain/build-term-page.mts",
     "opt:stage": "bun run toolchain/stage-opt.mts",
-    "postinstall": "bun run toolchain/postinstall.mts",
     "lint": "oxlint",
     "test": "bun test tests/",
     "typecheck": "tsc --noEmit",
     "engine:link": "bun scripts/link-engine.mjs",
     "preinstall": "bun scripts/link-engine.mjs --prune",
-    "postinstall": "bun scripts/link-engine.mjs"
+    "postinstall": "bun scripts/link-engine.mjs && bun run toolchain/postinstall.mts"
   },
   "dependencies": {
     "@downdraft/engine": "^0.5.0",
