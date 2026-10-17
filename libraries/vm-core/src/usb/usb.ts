@@ -30,29 +30,32 @@ const SYS_USB = "/sys/bus/usb/devices";
 export async function listUsbDevices(): Promise<UsbDevice[]> {
     let entries: string[];
     try { entries = await readdir(SYS_USB); } catch { return []; }
-    const out: UsbDevice[] = [];
-    for (let ei = 0; ei < entries.length; ei++) {
-        const e = entries[ei]!;
-        // Entries look like "1-2" (bus-port) for devices; skip "usbN" roots + interfaces "1-2:1.0".
-        if (!/^(\d+)-(\d+(?:\.\d+)*)$/.test(e)) continue;
+    // Entries look like "1-2" (bus-port) for devices; skip "usbN" roots + interfaces "1-2:1.0".
+    const devs = entries.filter((e) => /^(\d+)-(\d+(?:\.\d+)*)$/.test(e));
+    // All attribute reads for all devices in parallel — sysfs reads are
+    // cheap but there are ~8 per device and this runs on every refresh.
+    const out = await Promise.all(devs.map(async (e) => {
         const dir = join(SYS_USB, e);
         const rd = async (n: string) => (await readFile(join(dir, n), "utf-8")).trim();
-        let vendorId: string, productId: string;
-        try { vendorId = await rd("idVendor"); productId = await rd("idProduct"); } catch { continue; }
-        const bus = Number(await rd("busnum").catch(() => "0"));
-        const addr = Number(await rd("devnum").catch(() => "0"));
+        const attrs = await Promise.all([
+            rd("idVendor"), rd("idProduct"),
+            rd("busnum").catch(() => "0"), rd("devnum").catch(() => "0"),
+            rd("manufacturer").catch(() => undefined), rd("product").catch(() => undefined),
+            rd("serial").catch(() => undefined), rd("speed").catch(() => undefined),
+        ]).catch(() => null);
+        if (!attrs) return null;
+        const [vendorId, productId, busnum, devnum, vendor, product, serial, speed] = attrs;
+        if (!vendorId || !productId) return null;
+        const bus = Number(busnum), addr = Number(devnum);
         const devNode = `/dev/bus/usb/${String(bus).padStart(3, "0")}/${String(addr).padStart(3, "0")}`;
-        out.push({
-            bus, addr, vendorId, productId,
-            vendor: await rd("manufacturer").catch(() => undefined),
-            product: await rd("product").catch(() => undefined),
-            serial: await rd("serial").catch(() => undefined),
-            speed: await rd("speed").catch(() => undefined),
+        return {
+            bus, addr, vendorId, productId, vendor, product, serial, speed,
             devNode,
             writable: await canAccess(devNode, 2 /* W_OK */ | 4 /* R_OK */),
-        });
-    }
-    return out.sort((a, b) => (a.vendor ?? "").localeCompare(b.vendor ?? "") || a.productId.localeCompare(b.productId));
+        } as UsbDevice;
+    }));
+    return out.filter((d): d is UsbDevice => d !== null)
+        .sort((a, b) => (a.vendor ?? "").localeCompare(b.vendor ?? "") || a.productId.localeCompare(b.productId));
 }
 
 export async function findUsb(vendorId: string, productId: string, serial?: string): Promise<UsbDevice | null> {
