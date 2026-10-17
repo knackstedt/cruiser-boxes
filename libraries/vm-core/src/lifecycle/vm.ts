@@ -134,11 +134,18 @@ export class VmHandle {
         try { return Number(readFileSync(this.paths.pidFile, "utf-8").trim()) || null; } catch { return null; }
     }
 
-    /** QEMU process alive (pidfile + kill -0) AND monitor socket present. */
+    /** QEMU process alive (pidfile + kill -0 + the pid is really QEMU) AND
+     *  the monitor socket is present. The comm check guards pid reuse: a
+     *  crashed QEMU whose pid was recycled by an unrelated process must not
+     *  read as "running" (the monitor socket would then never answer and
+     *  probe() would report "starting" forever). */
     isRunning(): boolean {
         const pid = this.pid();
         if (!pid || !existsSync(this.paths.monitorSock)) return false;
-        try { process.kill(pid, 0); return true; } catch { return false; }
+        try {
+            process.kill(pid, 0);
+            return readFileSync(`/proc/${pid}/comm`, "utf-8").trim().startsWith("qemu");
+        } catch { return false; }
     }
 
     async probe(): Promise<VmState> {
