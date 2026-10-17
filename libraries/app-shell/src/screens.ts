@@ -519,6 +519,8 @@ function create(s: CruiserState): string {
         ${f.encrypt === "home" && f.method !== "imported" ? field("Home disk GiB", "homeGiB", f.homeGiB, 80) : ""}
         ${field("Disk password", "diskPassword", f.diskPassword)}
         ${f.encrypt !== "off" || f.method !== "imported" ? field("Repeat", "diskPassword2", f.diskPassword2) : ""}
+        ${f.diskPassword2 && f.diskPassword !== f.diskPassword2
+            ? `<div class="hint" style="color:#f08aa8">disk passwords don't match</div>` : ""}
         <div class="hint">unlocks the qcow2 image itself — separate from the guest login below, and
             <b>not recoverable</b> if lost.</div>`}`}
         <div class="h2">Graphics &amp; display</div>

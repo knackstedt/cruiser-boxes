@@ -152,11 +152,38 @@ else
     echo "guest-setup: $HDEV never appeared — /home stays on the root disk" >&2
 fi`;
 
-    const dmSection = gnome ? `# GDM autologin (console seat; headless RDP seat is separate).
+    const dmSection = gnome ? `# GDM — a seat0 autologin session collides with GRD remote login:
+# GNOME allows ONE graphical session per user, so every RDP greeter login
+# hit the "kick off the other session" prompt, and the replacement session
+# raced the old one's shutdown on the shared user manager
+# (gnome-session@*.target start vs queued gnome-session-shutdown.target →
+# TransactionIsDestructive → "Session never registered" → gray RDP stream).
+# gnome-headless-session@<user> (GDM ~49+) instead keeps a persistent
+# HEADLESS session alive — remote logins reattach to it through the
+# handover path, no prompt, no teardown race. Distros without the unit
+# fall back to the old console autologin below.
+HEADLESS_UNIT=/usr/lib/systemd/system/gnome-headless-session@.service
+if [ -f "$HEADLESS_UNIT" ]; then
+    # Ubuntu 26.04's unit runs a DynamicUser — GDM drops the transient uid's
+    # bus connection before polkit runs ("The connection is closed"); the
+    # manage-user-displays rule + GDM's peer check want the static gdm user.
+    mkdir -p /etc/systemd/system/gnome-headless-session@.service.d
+    tee /etc/systemd/system/gnome-headless-session@.service.d/cruiser.conf <<'GHSD' >/dev/null
+[Service]
+DynamicUser=no
+User=gdm
+GHSD
+    systemctl daemon-reload || true
+fi
 # debian/ubuntu keep custom.conf under /etc/gdm3, fedora under /etc/gdm.
 for GDMCONF in /etc/gdm3/custom.conf /etc/gdm/custom.conf; do
     [ -d "$(dirname "$GDMCONF")" ] || continue
-${p.autologin ? `    # drop prior autologin keys (ours or hand-set) then append our block —
+${p.autologin ? `    if [ -f "$HEADLESS_UNIT" ]; then
+        # headless unit carries autologin — strip seat0 autologin keys so no
+        # console session can compete with (or block) the headless one.
+        [ -f "$GDMCONF" ] && sed -i -e '/^AutomaticLoginEnable=/d' -e '/^AutomaticLogin=/d' "$GDMCONF"
+    else
+    # drop prior autologin keys (ours or hand-set) then append our block —
     # idempotent and able to flip a previous disable back on. The stock
     # "# AutomaticLoginEnable = true" comment doesn't match the ^ anchors.
     [ -f "$GDMCONF" ] && sed -i -e '/^AutomaticLoginEnable=/d' -e '/^AutomaticLogin=/d' "$GDMCONF"
@@ -165,7 +192,8 @@ ${p.autologin ? `    # drop prior autologin keys (ours or hand-set) then append 
 [daemon]
 AutomaticLoginEnable=true
 AutomaticLogin=${u}
-GDM` : `    # autologin off — flip a previous enable back off (re-provision retrofits).
+GDM
+    fi` : `    # autologin off — flip a previous enable back off (re-provision retrofits).
     [ -f "$GDMCONF" ] && sed -i -e 's/^AutomaticLoginEnable=.*/AutomaticLoginEnable=false/' \\
         -e '/^AutomaticLogin=/d' "$GDMCONF"`}
 done
@@ -242,7 +270,17 @@ while [ $i -lt 60 ]; do
 done
 if [ -z "$rdpok" ]; then echo "GRD RDP server is not listening on 3389"; exit 1; fi
 [ -s /var/lib/gnome-remote-desktop/.local/share/gnome-remote-desktop/credentials.ini ] || \\
-    { echo "GRD credentials were not persisted"; exit 1; }` : `# krdpserver — user-session RDP (wanted by plasma-workspace.target).
+    { echo "GRD credentials were not persisted"; exit 1; }
+${p.autologin ? `# persistent headless session — starts after the gdm/GRD churn above so a
+# gdm restart can't kill a half-created session. A leftover session for
+# the same user makes gdm-new-session fail and restart-flap; that session
+# is itself reattachable, so the flap is harmless noise.
+if [ -f /usr/lib/systemd/system/gnome-headless-session@.service ]; then
+    systemctl enable gnome-headless-session@"$U".service 2>/dev/null || true
+    systemctl start gnome-headless-session@"$U".service 2>/dev/null || true
+fi` : `# autologin off — drop a headless-session unit a previous provision enabled
+# (disable only: a live session isn't killed out from under a connected user)
+systemctl disable gnome-headless-session@"$U".service 2>/dev/null || true`}` : `# krdpserver — user-session RDP (wanted by plasma-workspace.target).
 # SystemUserEnabled lets RDP clients authenticate with the system password;
 # the permission-set preseed suppresses the portal allow/deny prompt.
 KDIR="$UHOME/.local/share/krdpserver"
