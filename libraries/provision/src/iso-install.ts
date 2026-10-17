@@ -97,8 +97,9 @@ export async function runIsoInstall(
         if (!existsSync(hp)) await createDisk(tc.qemuImg, hp, spec.disk.homeGiB, keyFile);
     }
     const { copyFile } = await import("node:fs/promises");
+    const { ovmfVarsTemplate } = await import("../../vm-core/src/qemu/args");
     if (!existsSync(paths.ovmfVars))
-        await copyFile("/usr/share/OVMF/OVMF_VARS_4M.fd", paths.ovmfVars);
+        await copyFile(ovmfVarsTemplate(), paths.ovmfVars);
 
     const hash = await passwordHash(o.password);
     const seedOpts: SeedOpts = {
