@@ -21,7 +21,7 @@
 // ============================================================================
 
 import { createHash } from "node:crypto";
-import { existsSync, watch, type FSWatcher } from "node:fs";
+import { watch, type FSWatcher } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
@@ -576,25 +576,26 @@ async function pushScript(h: VmHandle, script: string, label: string, timeoutMs 
         throw new Error(`${label} exited ${r.code} via ${r.transport}: ${(r.stderr || r.stdout).slice(-400)}`);
 }
 
-type FsWatchTarget = { path: string; w: FSWatcher };
-
-/** fs.watch on /etc/localtime (+ /etc/timezone) — the durable timezone
- *  change signal. dbus-monitor on the system bus needs root on most
- *  distros, so inotify is the reliable watcher here. */
+/** fs.watch on /etc — the durable timezone change signal. dbus-monitor on
+ *  the system bus needs root on most distros, so inotify is the reliable
+ *  watcher here. The directory is watched rather than the files:
+ *  /etc/localtime is a symlink that timedatectl REPLACES (rename-over),
+ *  which silently kills an inode-level watch after the first change. */
 function watchHostTimezone(onChanged: () => void): () => void {
-    const targets: FsWatchTarget[] = [];
     let timer: ReturnType<typeof setTimeout> | null = null;
     const fire = () => {
         if (timer) return;
         timer = setTimeout(() => { timer = null; onChanged(); }, 500);
     };
-    ["/etc/localtime", "/etc/timezone"].forEach((p) => {
-        if (!existsSync(p)) return;
-        try { targets.push({ path: p, w: watch(p, { persistent: false }, fire) }); } catch { /* unwatched */ }
-    });
+    let w: FSWatcher | null = null;
+    try {
+        w = watch("/etc", { persistent: false }, (_ev, name) => {
+            if (name === "localtime" || name === "timezone") fire();
+        });
+    } catch { /* /etc unwatched — timezone just won't live-sync */ }
     return () => {
         if (timer) clearTimeout(timer);
-        targets.forEach((t) => t.w.close());
+        w?.close();
     };
 }
 
