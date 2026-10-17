@@ -84,7 +84,12 @@ export class JsonSocket extends EventEmitter {
         });
     }
 
-    send(cmd: string, args?: Record<string, unknown>, timeoutMs?: number): Promise<any> {
+    /** Every command gets a reply deadline — default 2min, generous for any
+     *  synchronous QMP/QGA command (long work rides async jobs + events, not
+     *  blocking replies). Without it a wedged agent leaves a pending entry
+     *  that never resolves, and since VmHandle serializes ops on one chain,
+     *  a single dead send wedges EVERY later op for that VM. */
+    send(cmd: string, args?: Record<string, unknown>, timeoutMs = 120_000): Promise<any> {
         const id = this.nextId++;
         const pkt = JSON.stringify(args ? { execute: cmd, arguments: args, id } : { execute: cmd, id }) + "\n";
         return new Promise((resolve, reject) => {
