@@ -19,15 +19,21 @@ export interface ExecResult {
 export async function run(
     cmd: string,
     args: string[] = [],
-    opts: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; noThrow?: boolean } = {},
+    opts: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; noThrow?: boolean; input?: string | Buffer } = {},
 ): Promise<ExecResult> {
     try {
-        const { stdout, stderr } = await execFileP(cmd, args, {
+        const p = execFileP(cmd, args, {
             cwd: opts.cwd,
             env: opts.env ? { ...process.env, ...opts.env } : undefined,
             timeout: opts.timeoutMs ?? 120_000,
             maxBuffer: 64 * 1024 * 1024,
         });
+        // stdin feeder — for secrets that must never appear in argv
+        // (openssl passwd -stdin, etc.). A failed execFile still carries
+        // .child; EPIPE on a dead child is expected and ignored.
+        if (opts.input !== undefined)
+            p.child.stdin?.on("error", () => {}).end(opts.input);
+        const { stdout, stderr } = await p;
         return { code: 0, stdout: String(stdout), stderr: String(stderr) };
     } catch (e: any) {
         if (e.code === "ENOENT" && opts.noThrow) return { code: 127, stdout: "", stderr: String(e) };

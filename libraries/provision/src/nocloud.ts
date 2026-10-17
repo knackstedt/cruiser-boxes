@@ -116,9 +116,10 @@ export async function buildSeedIso(workDir: string, userData: string, meta: stri
     return iso;
 }
 
-/** sha512-crypt password hash for autoinstall/cloudimg. */
+/** sha512-crypt password hash for autoinstall/cloudimg. -stdin keeps the
+ *  plaintext out of argv (and therefore out of procfs cmdline + ps). */
 export async function passwordHash(plain: string): Promise<string> {
-    const r = await run("openssl", ["passwd", "-6", plain]);
+    const r = await run("openssl", ["passwd", "-6", "-stdin"], { input: plain });
     return r.stdout.trim();
 }
 
