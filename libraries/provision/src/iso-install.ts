@@ -111,6 +111,7 @@ export async function runIsoInstall(
     const { buildArgs } = await import("../../vm-core/src/qemu/args");
     const built = buildArgs(spec, paths, {
         mode: "install",
+        daemonize: false,   // install run is owned — QEMU exits on poweroff
         install: {
             iso: o.iso, seedIso,
             kernel: casper.kernel, initrd: casper.initrd,
@@ -118,8 +119,7 @@ export async function runIsoInstall(
         },
     }, { ldLibraryPath: tc.ldLibraryPath });
 
-    // install run is owned — QEMU exits on `shutdown: poweroff`
-    const child = spawn(tc.qemu, built.argv.filter((a) => a !== "-daemonize"), {
+    const child = spawn(tc.qemu, built.argv, {
         env: { ...process.env, ...built.env },
         stdio: ["ignore", "ignore", "inherit"],
     });
@@ -133,5 +133,7 @@ export async function runIsoInstall(
     });
 
     spec.credentials.username = o.username;
-    spec.provisioned = { method: "iso", source: o.iso, completedAt: new Date().toISOString() };
+    // completedAt is the orchestrator's (provision.ts stamps it after guest
+    // setup) — the install step alone isn't a completed provision.
+    spec.provisioned = { method: "iso", source: o.iso };
 }

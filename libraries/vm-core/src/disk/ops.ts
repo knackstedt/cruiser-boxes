@@ -256,12 +256,28 @@ export async function backupLive(qmp: QmpClient, diskNode: string, destPath: str
 /** Resolve the guest disk's QMP node-name for blockdev ops. */
 export async function diskNodeName(qmp: QmpClient, diskPath: string): Promise<string> {
     const blocks = await qmp.execute("query-block");
+    const basename = diskPath.split("/").pop()!;
+    // file values: a plain path, or a `json:` pseudo-filename whose inner
+    // file.filename is the real one (LUKS drives attach this way).
+    const fileName = (f: unknown): string | null => {
+        if (typeof f !== "string") return null;
+        if (!f.startsWith("json:")) return f;
+        try {
+            const j = JSON.parse(f.slice(5));
+            return typeof j?.file?.filename === "string" ? j.file.filename : null;
+        } catch { return null; }
+    };
+    const suffixHits: string[] = [];
     for (let i = 0; i < (blocks ?? []).length; i++) {
-        const b = blocks[i];
-        const f = b?.inserted?.file ?? b?.inserted?.image?.filename;
-        if (typeof f === "string" && (f === diskPath || f.endsWith("/" + diskPath.split("/").pop()))) {
-            return b?.inserted?.node_name ?? b?.device;
-        }
+        const ins = blocks[i]?.inserted;
+        const node = ins?.node_name ?? blocks[i]?.device;
+        if (!node) continue;
+        const f = fileName(ins?.file) ?? fileName(ins?.image?.filename);
+        if (f === diskPath) return node;
+        if (f?.endsWith(`/${basename}`)) suffixHits.push(node);
     }
+    // Last resort only when unambiguous — two disks sharing a basename
+    // (same filename in different dirs) must fail loud, not pick wrong.
+    if (suffixHits.length === 1) return suffixHits[0]!;
     throw new Error(`disk ${diskPath} not found in query-block`);
 }

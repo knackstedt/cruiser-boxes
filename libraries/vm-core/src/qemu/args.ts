@@ -46,6 +46,9 @@ export interface BuildOpts {
     /** Resolved by the lifecycle: display.clipboard AND the qemu binary has
      *  the qemu-vdagent chardev backend (CONFIG_SPICE_PROTOCOL). */
     vdagent?: boolean;
+    /** false forces a foreground QEMU even for persist=daemonize specs —
+     *  the ISO install runs an owned child it waits on itself. */
+    daemonize?: boolean;
     extraArgs?: string[];
 }
 
@@ -262,7 +265,7 @@ export function buildArgs(
         : paths.serialLog;
     push("-serial", `file:${serialLog}`);
 
-    if (spec.persist === "daemonize") push("-daemonize");
+    if (spec.persist === "daemonize" && opts.daemonize !== false) push("-daemonize");
     push("-pidfile", paths.pidFile, "-D", paths.log);
     if (opts.extraArgs) a.push(...opts.extraArgs);
 
