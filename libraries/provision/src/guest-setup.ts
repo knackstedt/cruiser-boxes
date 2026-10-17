@@ -10,6 +10,7 @@
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { guestAgentContext } from "../../vm-core/src/logs";
+import { sq } from "../../sys/src/exec";
 import { profileFromSpec, resolvePackages, resolveFlatpaks } from "./packages";
 import { guestDevtoolsScript } from "./devtools";
 import { guestSyncScript, guestSharesScript, type HostSnapshot } from "./sync";
@@ -34,9 +35,6 @@ export async function waitForAgent(h: VmHandle, timeoutMs = 5 * 60_000): Promise
         }
     }
 }
-
-/** POSIX single-quote escape — every interpolated value goes through this. */
-const sq = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
 
 /** The guest setup script — run via `qga sh` (one bash -c per section batch). */
 export function guestSetupScript(spec: VmSpec, o: { rdpPassword: string; monitorsXmlB64?: string; host?: HostSnapshot }): string {

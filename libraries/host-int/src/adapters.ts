@@ -11,7 +11,7 @@
 //   generic-x11    — wmctrl/xdotool baseline for other EWMH WMs
 // ============================================================================
 
-import { run } from "../../sys/src/exec";
+import { run, sq } from "../../sys/src/exec";
 import { createHash } from "node:crypto";
 import type {
     AdapterCaps, EscapeActionSpec,
@@ -250,8 +250,8 @@ async function gnomeInstallCommandShortcut(binding: string, argv: string[]): Pro
     const at = `${SUB}:${path}`;
     await run("gsettings", ["set", at, "name", gv(`cruiser escape: ${argv.join(" ").slice(0, 60)}`)]);
     await run("gsettings", ["set", at, "binding", gv(binding)]);
-    // the command runs through a shell — single-quote argv like logs.ts
-    const cmdline = argv.map((a) => `'${a.replaceAll("'", `'"'"'`)}'`).join(" ");
+    // the command runs through a shell — single-quote each argv word
+    const cmdline = argv.map(sq).join(" ");
     await run("gsettings", ["set", at, "command", gv(cmdline)]);
     return async () => {
         await run("gsettings", ["set", BASE, "custom-keybindings", prev || "@as []"], { noThrow: true });

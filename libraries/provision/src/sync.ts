@@ -28,6 +28,7 @@ import { join } from "node:path";
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { guestRun } from "../../vm-core/src/logs";
+import { sq } from "../../sys/src/exec";
 import { guestThemeScript } from "./theme";
 import { detectAdapter } from "../../host-int/src/detect";
 import { guestLayoutFromHost } from "./monitors";
@@ -104,8 +105,6 @@ export async function seedTimezone(spec: VmSpec, explicit?: string): Promise<str
 }
 
 // ── guest scripts ──
-
-const sq = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
 
 /** runuser preamble — the same U/UHOME/UUID/RUNU shape every script needs. */
 const preamble = (spec: VmSpec) => `U=${sq(spec.credentials.username)}

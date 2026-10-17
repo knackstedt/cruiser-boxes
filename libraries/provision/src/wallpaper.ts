@@ -20,6 +20,7 @@ import { join } from "node:path";
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { guestRun } from "../../vm-core/src/logs";
+import { sq } from "../../sys/src/exec";
 import { pushFileToGuest } from "./stage";
 import { detectAdapter } from "../../host-int/src/detect";
 import { hostWallpaperPath } from "../../host-int/src/hoststate";
@@ -33,8 +34,6 @@ export function wallpaperEnabled(env: NodeJS.ProcessEnv = process.env): boolean 
 export type WatermarkPos = VmSpec["display"]["wallpaper"]["position"];
 
 const GUEST_STAGE = "/tmp/cruiser-wallpaper.png";
-const sq = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
-
 /**
  * Host escape shortcuts are only bound while the viewer is up AND the head
  * mode isn't windowed AND the guest doesn't hold the keyboard grab — the

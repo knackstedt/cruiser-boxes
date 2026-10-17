@@ -19,7 +19,7 @@ import { basename } from "node:path";
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import type { ShareSpec, VmSpec } from "../../vm-core/src/config/schema";
 import { guestRun } from "../../vm-core/src/logs";
-import { run, which } from "../../sys/src/exec";
+import { run, sq, which } from "../../sys/src/exec";
 
 /** Enabled copy-mode shares. */
 export function copyEntries(spec: VmSpec): ShareSpec[] {
@@ -30,8 +30,6 @@ export function copyEntries(spec: VmSpec): ShareSpec[] {
 export function filesyncEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
     return env.CRUISER_HOST_SYNC !== "0" && env.CRUISER_FILESYNC !== "0";
 }
-
-const sq = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
 
 /**
  * Guest-side destination for a copy entry. guestPath always names a

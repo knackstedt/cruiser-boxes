@@ -15,6 +15,10 @@ export interface ExecResult {
     stderr: string;
 }
 
+/** POSIX single-quote escape — every interpolated value in a guest/host
+ *  shell string goes through this. */
+export const sq = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
+
 /** Run a command to completion; throws on nonzero exit unless `noThrow`. */
 export async function run(
     cmd: string,

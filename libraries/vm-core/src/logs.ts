@@ -21,7 +21,7 @@ import { appendFile, mkdir, open, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { VmHandle } from "./lifecycle/vm";
 import type { VmPaths } from "./paths";
-import { run } from "../../sys/src/exec";
+import { run, sq } from "../../sys/src/exec";
 import { sshArgv } from "./ssh";
 
 // ── runner logs (host files) ──
@@ -142,9 +142,6 @@ export async function guestAgentContext(h: VmHandle, timeoutMs = 15_000): Promis
     const last = out.trim().split("\n").pop() ?? "";
     return out.includes("_ga_t:") || !last.startsWith("0") ? out : "";
 }
-
-/** POSIX single-quote escape for ssh-remote shell commands. */
-const sq = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
 
 interface GuestRunResult { code: number; stdout: string; stderr: string }
 

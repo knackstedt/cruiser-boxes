@@ -8,11 +8,10 @@
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { guestRun } from "../../vm-core/src/logs";
+import { sq } from "../../sys/src/exec";
 import type { ColorScheme } from "../../host-int/src/appearance";
 
 export type { ColorScheme };
-
-const sq = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
 
 /**
  * Best-effort in-guest script — every line guarded, so it can embed in

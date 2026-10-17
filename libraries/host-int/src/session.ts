@@ -14,7 +14,7 @@ import { detectAdapter } from "./detect";
 import { KWIN_VD_UUID } from "./kde";
 import { launchFreerdp, probeRdp, type RdpProbe } from "./freerdp";
 import { launchDdViewer, waitMonitorSock } from "./ddviewer";
-import { run } from "../../sys/src/exec";
+import { run, sq } from "../../sys/src/exec";
 
 export interface ViewerSessionOpts {
     adapter?: WmAdapter;
@@ -385,12 +385,11 @@ function normKeys(keys: string): string {
  *  SESSION's PATH — which may lack ~/.bun/bin — so binaries are referenced
  *  by absolute path and single-quoted for the shell. */
 export function cruiserCliPrefix(): string {
-    const q = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
     const cli = new URL("../../../src/cli.ts", import.meta.url).pathname;
     if (!existsSync(cli)) {
         const launcher = join(dirname(process.execPath), "cruiser");
-        return existsSync(launcher) ? q(launcher) : "cruiser";
+        return existsSync(launcher) ? sq(launcher) : "cruiser";
     }
-    const bun = /bun/.test(process.execPath.split("/").pop() ?? "") ? q(process.execPath) : "bun";
-    return `${bun} run ${q(cli)}`;
+    const bun = /bun/.test(process.execPath.split("/").pop() ?? "") ? sq(process.execPath) : "bun";
+    return `${bun} run ${sq(cli)}`;
 }
