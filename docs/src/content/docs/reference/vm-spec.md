@@ -48,16 +48,20 @@ Edit while the VM is stopped; the next `vm start` picks changes up.
 | `sticky` | `false` | fullscreen-monitor only: show on all desktops |
 | `virtualDesktop` | `2` | target desktop for virtual-desktop mode |
 | `windowSize` | `{w:1600, h:1000}` | windowed mode size |
-| `escapeShortcuts` | `ctrl+super+f1…f4 → host-desktop:1…4`, `f5 → command:{cli} vm reboot {vm}`, `f6 → … vm suspend`, `f7 → … vm resume`, `f8 → … vm stop`, `ctrl+super+escape → abort`, `ctrl+super+end → command:{cli} vm kill {vm}` | host-side keybindings while the viewer runs — keys normalized lowercase, action `name` or `name:arg`. Prefer combos the host doesn't bind — a combo that reaches the host (grab gap, viewer unfocused) fires the host's own action |
+| `escapeShortcuts` | `ctrl+super+f1…f4 → host-desktop:1…4`, `f5 → command:{cli} vm reboot {vm}`, `f6 → … vm suspend`, `f7 → … vm resume`, `f8 → … vm stop`, `ctrl+super+escape → abort`, `ctrl+super+end → command:{cli} vm kill {vm}`, `ctrl+super+m → relgrab` | host-side keybindings while the viewer runs — keys normalized lowercase, action `name` or `name:arg`. Prefer combos the host doesn't bind — a combo that reaches the host (grab gap, viewer unfocused) fires the host's own action |
 | `dynamicResolution` | `true` | freerdp dynamic-resolution channel |
 | `wallpaper` | `{managed:true, position:"bottom-right"}` | cruiser-managed guest wallpaper — watermarked with the VM name + escape hints; `position`: corner/`center`/`off` (no watermark); `managed:false` leaves the guest alone; `source` = host image path (default: generated gradient) |
 | `sound` / `microphone` | `true` | RDP redirection toggles |
 | `clipboard` | `true` | guest clipboard sync — freerdp `+clipboard` on the rdp viewer; on dmabuf, a `qemu-vdagent` chardev ↔ `viewer-dd` D-Bus bridge (text only). dmabuf needs a VM restart to add/remove the port. Wayland guests: spice-vdagent is X11-only — host→guest reaches native Wayland apps via KWin's bridge, but guest→host only sees X11/XWayland copies |
 | `grabKeyboard` | `false` | `false` → freerdp `-grab-keyboard` (host keeps global shortcuts); `true` → guest gets all keys — freerdp `+grab-keyboard`, dmabuf → viewer-dd holds X11 keyboard+pointer grabs while the window is focused (released on focus loss). Escape shortcuts install either way: under grab they're shadowed only while the viewer holds it — dmabuf self-dispatches there, freerdp swallows them |
+| `pointerLock` | `auto` | dmabuf only: `auto` engages relative capture when the guest hides its cursor while focused (the pointer-lock signature — games/3D tools get `EV_REL` deltas via the PS/2 mouse handler instead of the absolute tablet); `always` captures while focused; `off` never. The `relgrab` escape action toggles capture manually. No effect on freerdp viewers |
 
 Escape actions: `host-desktop:<n>` · `desktop-cycle-left` ·
 `desktop-cycle-right` · `ungrab` (hold the grab off until refocus) ·
 `abort` (release grabs + minimize the viewer window — viewer-side) ·
+`relgrab` (toggle relative pointer capture for the current lock episode
+— dmabuf only; the manual path for apps that lock without hiding the
+guest cursor) ·
 `kwin:<action name>` (invoke a named kglobalaccel kwin action — how
 mirrored host VD bindings dispatch) · `none` · `command:<cmdline>` (run
 via `sh -c`; `{vm}` expands to the VM name, `{cli}` to the cruiser CLI —
@@ -150,7 +154,8 @@ immediately on a running VM).
       { "keys": "ctrl+super+f4", "action": "host-desktop:4" },
       { "keys": "ctrl+super+end", "action": "command:{cli} vm kill {vm}" }
     ],
-    "grabKeyboard": false
+    "grabKeyboard": false,
+    "pointerLock": "auto"
   },
   "shares": [{ "hostPath": "/home/me/code", "tag": "code", "readOnly": false }],
   "os": { "family": "ubuntu", "release": "26.04", "desktop": "gnome",

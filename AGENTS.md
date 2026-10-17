@@ -284,6 +284,37 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   a combo that slips through anywhere hits the host's own bindings
   (ctrl+alt+delete did exactly that → ksmserver logout → dead
   session). `[grab]`/`[esc]` lines carry a `+Ns` elapsed prefix.
+  Pointer capture (dmabuf, spec.display.pointerLock = auto|always|off):
+  QEMU keeps ONE active pointer handler per console — the virtio tablet
+  (ABS) owns it normally, so D-Bus RelMotion errors "Mouse is not
+  relative" and SetAbsPosition errors "Mouse is not absolute" when the
+  PS/2 mouse is head (e.g. while BIOS owns the console). Guest
+  pointer-lock apps (games via pointer-constraints/XInput) need EV_REL
+  deltas the tablet can't produce. Capture mode flips the handler via
+  HMP `mouse_set <idx>` over QMP human-monitor-command (query-mice →
+  first REL vs first ABS index; QMP has no mouse-set command — HMP
+  only), feeds RelMotion, and confines the host pointer
+  (XGrabPointer confine_to=xwin — a held grab can't be amended, so it's
+  ungrab+regrab). `mouse_set` is the input worker's job — In::Mode rides
+  the shared channel so the flip lands before the deltas that follow;
+  a mode-mismatch call error re-asserts the wanted mode (≥400ms apart —
+  a virtio-input activation during guest boot can steal the head
+  handler back mid-capture). Host side: deltas are XQueryPointer
+  samples minus last sample; our own XWarpPointer calls rebase the
+  baseline where they're issued so they never count as motion. While
+  the guest keeps a cursor, each listener MouseSet(x,y,on) report is
+  warped to (console px → window px through the same head_rects +
+  fit_viewport the abs map inverts) so the guest-sprite X cursor sits
+  where the guest thinks the pointer is; hidden-cursor reports don't
+  warp — the pointer re-parks at window center when it drifts >35% out
+  (confined at an edge = no delta room). 'auto' engages only on a seen-visible → now-
+  hidden cursor transition while focused — a never-cursored boot
+  (firmware/splash has no cursor plane) must not capture; visibility =
+  ANY console's slot on (virtio-gpu parks the pointer on one output's
+  cursor plane, the others legitimately report off). Apps that lock
+  without hiding the cursor are invisible to 'auto' — the `relgrab`
+  escape action (default ctrl+super+m) force-toggles, ungrab/abort and
+  focus loss release. `[rel]` log lines mark transitions.
   `[fps]` lines log
   `/proc/self/fd` count + system `file-nr`: dma-buf/sync_file objects
   pinned in-kernel (nvidia EGL/venus fences) never appear in a process's

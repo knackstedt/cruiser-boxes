@@ -101,6 +101,7 @@ export const EscapeAction = z.enum([
     "desktop-cycle-right",
     "ungrab",              // release viewer grab (freerdp ctrl+alt style)
     "abort",               // release grab + minimize the viewer window
+    "relgrab",             // toggle relative pointer capture (viewer-dd only)
     "kwin",                // kwin:<action name> — invoke a named KWin global shortcut
     "none",
 ]);
@@ -224,9 +225,9 @@ export const VmSpec = z.object({
         /**
          * Host keybindings while the viewer runs. action: "<name>" or
          * "<name>:<arg>" — host-desktop:<n>, desktop-cycle-left|right,
-         * ungrab, command:<cmdline> (sh -c; {vm} → vm name, {cli} → the
-         * cruiser cli invocation). The default kill binding is the
-         * guest-hung escape hatch.
+         * ungrab, abort, relgrab, command:<cmdline> (sh -c; {vm} → vm
+         * name, {cli} → the cruiser cli invocation). The default kill
+         * binding is the guest-hung escape hatch.
          */
         escapeShortcuts: z.array(EscapeShortcut).default([
             // ctrl+super+FN are unbound in KDE — an escape combo that ever
@@ -244,6 +245,9 @@ export const VmSpec = z.object({
             // works even while the keyboard is grabbed (viewer-side dispatch)
             { keys: "ctrl+super+escape", action: "abort" },
             { keys: "ctrl+super+end", action: "command:{cli} vm kill {vm}" },
+            // manual pointer-capture toggle for apps that lock without
+            // hiding the guest cursor (auto mode can't see them)
+            { keys: "ctrl+super+m", action: "relgrab" },
         ]),
         dynamicResolution: z.boolean().default(true),
         /**
@@ -273,6 +277,18 @@ export const VmSpec = z.object({
          *  guest all keys (alt-tab included), false lets host shortcuts win
          *  (required for escape shortcuts). */
         grabKeyboard: z.boolean().default(false),
+        /**
+         * Guest pointer-lock support (dmabuf viewer only). QEMU's console
+         * keeps one active pointer handler — the absolute virtio tablet —
+         * so a guest app that grabs the pointer (games, 3D tools) gets no
+         * relative deltas. Capture mode flips the handler to the PS/2
+         * mouse, confines the host pointer to the window, and feeds
+         * RelMotion. "auto" engages when the guest hides its cursor while
+         * the viewer is focused (the pointer-lock signature), "always"
+         * captures whenever focused (dedicated gaming VMs), "off" never.
+         * The `relgrab` escape action toggles capture manually.
+         */
+        pointerLock: z.enum(["auto", "always", "off"]).default("auto"),
     }).prefault({}),
 
     usb: z.object({ autoAttach: z.array(UsbDeviceRef).default([]) }).prefault({}),

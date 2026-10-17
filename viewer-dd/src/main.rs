@@ -52,11 +52,13 @@ enum XJob {
 /// Guest hardware cursor pushed by QEMU over the listener — CursorDefine
 /// carries the sprite (ARGB32, same layout as XcursorPixel: a packed
 /// 0xAARRGGBB u32 per pixel) and MouseSet carries visibility (virtio-gpu
-/// binds `on` to whether the guest has a cursor plane bound). Applied as
-/// the host window's X cursor so the pointer shape tracks what it hovers
-/// in the guest — dropping it leaves the host arrow showing forever.
+/// binds `on` to whether the guest has a cursor plane bound) plus the
+/// guest-side cursor position (console px) — the relative-capture mode
+/// shadows the host pointer onto it. Applied as the host window's X
+/// cursor so the pointer shape tracks what it hovers in the guest —
+/// dropping it leaves the host arrow showing forever.
 struct CurImg { w: u32, h: u32, hx: u32, hy: u32, px: Vec<u32> }
-enum CurJob { Define(usize, CurImg), Show(usize, bool) }
+enum CurJob { Define(usize, CurImg), Show(usize, i32, i32, bool) }
 
 /// Per-console cursor slot: latest sprite + its built X cursor (freed on
 /// replace), visibility, and a generation counter the apply path uses to
@@ -130,7 +132,7 @@ impl Listener {
         if MOUSE_VERBOSE.load(Ordering::Relaxed) != 0 || n % 20 == 1 {
             eprintln!("[listener:{}] mouse_set {x},{y} on={on}", self.id);
         }
-        let _ = self.ctx.send(CurJob::Show(self.idx, on != 0));
+        let _ = self.ctx.send(CurJob::Show(self.idx, x, y, on != 0));
     }
     fn cursor_define(&mut self, w: i32, h: i32, hx: i32, hy: i32, data: Vec<u8>) {
         let (w, h) = (w.max(0) as u32, h.max(0) as u32);
@@ -322,7 +324,18 @@ fn clipboard_worker(iconn: std::sync::Arc<zbus::blocking::Connection>,
 // QEMU key numbers are XT scancodes (qnum table); mouse btns: 0=L,1=M,2=R.
 // Move/Btn carry the console the pointer is over — all consoles share the
 // one virtio tablet, but the D-Bus Mouse objects are per-console.
-enum In { Move(usize, u32, u32), Btn(usize, u8, bool), Key(u32, bool) }
+enum In {
+    Move(usize, u32, u32),
+    Btn(usize, u8, bool),
+    Key(u32, bool),
+    /// Relative deltas — RelMotion on console 0's Mouse proxy (REL events
+    /// route to QEMU's relative handler regardless of console).
+    Rel(i32, i32),
+    /// Flip QEMU's active pointer handler: true → a REL device (the PS/2
+    /// mouse, feeding guest pointer-lock raw deltas), false → the virtio
+    /// tablet (absolute). Done via HMP mouse_set over QMP.
+    Mode(bool),
+}
 
 /// X keycode → QEMU qnum. X keycodes are evdev codes +8, and evdev codes
 /// ARE the XT set-1 scancode for the base block — so `~/`-tilde and every
@@ -365,7 +378,7 @@ static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 fn ts() -> u64 { T0.get_or_init(std::time::Instant::now).elapsed().as_secs() }
 
 #[derive(Clone)]
-enum EscAct { Desktop(u32), Cycle(i8), Kwin(String), Ungrab, Abort, Noop, Cmd(String) }
+enum EscAct { Desktop(u32), Cycle(i8), Kwin(String), Ungrab, Abort, RelGrab, Noop, Cmd(String) }
 
 #[derive(Clone)]
 struct EscCombo {
@@ -410,6 +423,9 @@ struct EscState {
     ungrab_gen: std::sync::atomic::AtomicU64,
     /// abort: release grabs + minimize the window.
     abort_gen: std::sync::atomic::AtomicU64,
+    /// relgrab: toggle relative pointer capture (spec.display.pointerLock
+    /// override for the current lock episode).
+    rel_gen: std::sync::atomic::AtomicU64,
 }
 
 /// SIGUSR1 → abort. Signal handlers can only touch a static; the window
@@ -471,6 +487,7 @@ fn parse_escape(spec: &str) -> Option<EscCombo> {
         "kwin" => EscAct::Kwin(arg?.to_string()),
         "ungrab" => EscAct::Ungrab,
         "abort" => EscAct::Abort,
+        "relgrab" => EscAct::RelGrab,
         "none" => EscAct::Noop,
         "command" => EscAct::Cmd(arg?.to_string()),
         _ => return None,
@@ -531,6 +548,7 @@ impl EscState {
         match &combo.act {
             EscAct::Ungrab => { self.ungrab_gen.fetch_add(1, Ordering::Relaxed); }
             EscAct::Abort => { self.abort_gen.fetch_add(1, Ordering::Relaxed); }
+            EscAct::RelGrab => { self.rel_gen.fetch_add(1, Ordering::Relaxed); }
             EscAct::Noop => { eprintln!("[+{}s][esc] combo → none ({title})", ts()); }
             EscAct::Cmd(c) => {
                 let c = c.clone();
@@ -613,6 +631,9 @@ extern "C" {
                           prop_ret: *mut *mut u8) -> i32;
     fn XTestFakeButtonEvent(d: *mut std::ffi::c_void, button: u32,
                             is_press: i32, delay: u64) -> i32;
+    fn XWarpPointer(d: *mut std::ffi::c_void, src_w: u64, dest_w: u64,
+                    src_x: i32, src_y: i32, src_wd: u32, src_ht: u32,
+                    dest_x: i32, dest_y: i32) -> i32;
     fn XDefineCursor(d: *mut std::ffi::c_void, w: u64, cursor: u64) -> i32;
     fn XUndefineCursor(d: *mut std::ffi::c_void, w: u64) -> i32;
     fn XFreeCursor(d: *mut std::ffi::c_void, cursor: u64) -> i32;
@@ -887,12 +908,61 @@ fn set_fullscreen_monitors(d: *mut std::ffi::c_void, xid: u64, fsm: &[u32; 4]) {
     }
 }
 
+/// One QMP command on a fresh monitor conn — mouse-mode flips are
+/// infrequent, so no persistent conn is kept.
+fn qmp_run(monitor: &str, cmd: &str) -> Result<String> {
+    let mut mon = UnixStream::connect(monitor)?;
+    let mut g = vec![0u8; 2048];
+    let _ = mon.read(&mut g); // greeting
+    qmp(&mut mon, r#"{"execute":"qmp_capabilities"}"#, None)?;
+    qmp(&mut mon, cmd, None)
+}
+
+/// query-mice → (relative handler index, absolute handler index). QEMU
+/// keeps ONE active pointer handler per console: absolute events route
+/// to the first ABS-masking handler (the virtio tablet), relative to
+/// the first REL one (the PS/2 mouse) — and the D-Bus Mouse methods are
+/// gated on which is "current". Field-by-field parse: the reply is a
+/// flat [{name,index,current,absolute}] — good enough without a json dep.
+fn mouse_indices(monitor: &str) -> (Option<i64>, Option<i64>) {
+    let Ok(r) = qmp_run(monitor, r#"{"execute":"query-mice"}"#) else { return (None, None) };
+    let (mut rel, mut abs) = (None, None);
+    for obj in r.split('{').skip(1) {
+        let idx = obj.find("\"index\":").and_then(|i| {
+            obj[i + 8..].trim_start().chars().take_while(|c| c.is_ascii_digit())
+                .collect::<String>().parse::<i64>().ok()
+        });
+        let is_abs = obj.find("\"absolute\":")
+            .map(|i| obj[i + 11..].trim_start().starts_with("true"));
+        if let (Some(i), Some(a)) = (idx, is_abs) {
+            if a { abs = Some(i) } else { rel = Some(i) }
+        }
+    }
+    (rel, abs)
+}
+
+/// Flip QEMU's active pointer handler — `mouse_set` exists only as an
+/// HMP command, invoked over QMP's human-monitor-command. rel → PS/2
+/// (RelMotion accepted, SetAbsPosition rejected), abs → tablet (inverse).
+fn mouse_set(monitor: &str, rel: bool) -> Result<()> {
+    let (ri, ai) = mouse_indices(monitor);
+    let idx = (if rel { ri } else { ai }).ok_or_else(|| anyhow::anyhow!(
+        "no {} mouse handler in query-mice", if rel { "relative" } else { "absolute" }))?;
+    let r = qmp_run(monitor, &format!(
+        r#"{{"execute":"human-monitor-command","arguments":{{"command-line":"mouse_set {idx}"}}}}"#))?;
+    anyhow::ensure!(!r.contains("\"error\""), "mouse_set {idx}: {r}");
+    Ok(())
+}
+
 /// One input worker for all consoles — QEMU's @dbus-display keeps a single
 /// client channel, so every console's Keyboard/Mouse calls multiplex over
 /// it. Keys always ride console 0's proxy (one physical keyboard in the
-/// guest); pointer events go to the console the pointer is over.
+/// guest); pointer events go to the console the pointer is over. Also
+/// owns the absolute↔relative handler flips (In::Mode) — a virtio-input
+/// device activating during guest boot can steal the head handler back,
+/// so a call that fails on mode grounds re-asserts the wanted mode.
 fn input_worker(conn: std::sync::Arc<zbus::blocking::Connection>,
-                paths: Vec<String>, rx: std::sync::mpsc::Receiver<In>) {
+                paths: Vec<String>, rx: std::sync::mpsc::Receiver<In>, monitor: String) {
     let kbds: Vec<_> = paths.iter().map(|p|
         zbus::blocking::Proxy::new(&conn, "org.qemu", p.as_str(),
             "org.qemu.Display1.Keyboard").expect("kbd proxy")).collect();
@@ -900,7 +970,18 @@ fn input_worker(conn: std::sync::Arc<zbus::blocking::Connection>,
         zbus::blocking::Proxy::new(&conn, "org.qemu", p.as_str(),
             "org.qemu.Display1.Mouse").expect("mouse proxy")).collect();
     let mut moves = 0u64;
+    let mut want_rel = false;
+    let mut last_mode_set = std::time::Instant::now() - std::time::Duration::from_secs(1);
     while let Ok(ev) = rx.recv() {
+        if let In::Mode(rel) = ev {
+            want_rel = rel;
+            match mouse_set(&monitor, rel) {
+                Ok(()) => eprintln!("[input] mouse mode → {}", if rel { "relative" } else { "absolute" }),
+                Err(e) => eprintln!("[input] mouse_set({rel}) failed: {e:#}"),
+            }
+            last_mode_set = std::time::Instant::now();
+            continue;
+        }
         let r: Result<(), zbus::Error> = (|| match ev {
             In::Move(ci, x, y) => {
                 moves += 1;
@@ -910,11 +991,13 @@ fn input_worker(conn: std::sync::Arc<zbus::blocking::Connection>,
                     None => Ok(()),
                 }
             }
+            In::Rel(dx, dy) => mice[0].call::<_, _, ()>("RelMotion", &(dx, dy)),
             In::Btn(ci, b, d) => match mice.get(ci) {
                 Some(m) => m.call::<_, _, ()>(if d { "Press" } else { "Release" }, &(b as u32,)),
                 None => Ok(()),
             },
             In::Key(k, d) => kbds[0].call::<_, _, ()>(if d { "Press" } else { "Release" }, &(k,)),
+            In::Mode(_) => unreachable!(),
         })();
         if let Err(e) = r {
             match &e {
@@ -926,15 +1009,34 @@ fn input_worker(conn: std::sync::Arc<zbus::blocking::Connection>,
                 }
                 // transient call errors (e.g. "Mouse is not absolute" while
                 // the BIOS owns the console) — drop the event, keep going.
+                // A mode-mismatch error also means the active handler
+                // flipped underneath us → re-assert the wanted mode
+                // (throttled — a failing stream must not spin QMP conns).
                 _ => {
                     static IN_ERRS: AtomicU64 = AtomicU64::new(0);
                     let n = IN_ERRS.fetch_add(1, Ordering::Relaxed) + 1;
                     if n % 50 == 1 { eprintln!("[input] call failed x{n}: {e}"); }
+                    let msg = e.to_string();
+                    if (msg.contains("not absolute") || msg.contains("not relative"))
+                        && last_mode_set.elapsed().as_millis() > 400 {
+                        last_mode_set = std::time::Instant::now();
+                        match mouse_set(&monitor, want_rel) {
+                            Ok(()) => eprintln!("[input] mouse mode re-asserted → {}",
+                                if want_rel { "relative" } else { "absolute" }),
+                            Err(e) => eprintln!("[input] mouse re-assert failed: {e:#}"),
+                        }
+                    }
                 }
             }
         }
     }
 }
+
+/// spec.display.pointerLock → when to run relative pointer capture.
+/// 'auto' engages when the guest hides its cursor while focused (the
+/// pointer-lock signature); 'always' while focused; 'off' never.
+#[derive(Clone, Copy, PartialEq)]
+enum RelMode { Off, Auto, Always }
 
 /// THE window — every guest console renders into its rect of this one
 /// surface (a monitor rect in span mode, a slice of the letterboxed
@@ -946,7 +1048,8 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                   jrx: std::sync::mpsc::Receiver<XJob>,
                   crx: std::sync::mpsc::Receiver<CurJob>,
                   heads: std::sync::Arc<Heads>, span: Option<Span>,
-                  esc: std::sync::Arc<EscState>) -> Result<()> {
+                  esc: std::sync::Arc<EscState>, rel_mode: RelMode,
+                  monitor: String) -> Result<()> {
     use minifb::{Window, WindowOptions};
     let nheads = console_paths.len();
     let span = span.map(std::sync::Arc::new);
@@ -1114,7 +1217,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     {
         let ic2 = iconn.clone();
         let paths = console_paths.clone();
-        std::thread::spawn(move || input_worker(ic2, paths, irx));
+        std::thread::spawn(move || input_worker(ic2, paths, irx, monitor));
     }
 
     let mut mouse = (-1.0f32, -1.0f32);
@@ -1253,6 +1356,31 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     let mut seen_abort = 0u64;
     let mut last_grab_try = std::time::Instant::now() - std::time::Duration::from_secs(1);
 
+    // ── relative pointer capture (spec.display.pointerLock / --relmouse) ──
+    // QEMU keeps ONE active pointer handler per console — the virtio
+    // tablet (absolute) owns it normally and RelMotion is rejected while
+    // it does ("Mouse is not relative" ↔ "Mouse is not absolute"). An app
+    // grabbing the guest pointer (games via pointer-constraints/XInput)
+    // needs EV_REL deltas, so capture mode flips the active handler to
+    // the PS/2 mouse (input worker's QMP mouse_set), feeds RelMotion
+    // deltas, and confines the host pointer to the window. While the
+    // guest keeps its cursor visible we shadow it: each mouse_set report
+    // warps the host pointer to the guest's own cursor spot, so the
+    // guest sprite (applied as the X cursor) sits where the guest thinks
+    // the pointer is. Triggering: 'always' = while focused; 'auto' = the
+    // guest had a visible cursor and now hides it (a locked app's tell);
+    // EscAct::RelGrab toggles a per-episode override; ungrab/abort and
+    // focus loss release.
+    let mut captured = false;
+    let mut rel_override: Option<bool> = None;
+    let mut rel_hold_off = false;
+    let mut seen_rel = 0u64;
+    let mut rel_last: Option<(f32, f32)> = None; // last pointer sample (delta baseline)
+    let mut rel_acc = (0.0f32, 0.0f32);          // fractional deltas pending send
+    let mut rel_send = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    let mut cursor_visible = false;
+    let mut cursor_ever_visible = false;
+
     // numlock reconcile guard: a NumLock press forwarded to the guest
     // flips host state instantly but the guest's LED report lags — a poll
     // inside that window would pulse a spurious second toggle and leave
@@ -1271,7 +1399,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     while win.is_open() {
         win.update(); // events only — EGL renders into this window directly
         let active = win.is_active();
-        if !active { grab_hold_off = false; }
+        if !active { grab_hold_off = false; rel_hold_off = false; rel_override = None; }
         if !xdpy.is_null() {
             if SIG_ABORT.swap(false, Ordering::Relaxed) {
                 // panic path — needs no keyboard; the generation bump
@@ -1286,6 +1414,8 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                 seen_ungrab = ungrab_g;
                 seen_abort = abort_g;
                 grab_hold_off = true;
+                rel_hold_off = true;
+                rel_override = None;
                 grab_held_since = None;
                 if pgrabbed {
                     unsafe { XUngrabPointer(xdpy, 0); }
@@ -1364,6 +1494,57 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                 unsafe { XFlush(xdpy); }
                 eprintln!("[+{}s][grab] ungrabbed ({title})", ts());
             }
+        }
+        // relgrab toggle — a per-episode manual override (cleared on
+        // unfocus, and under 'auto' when the lock episode ends — see the
+        // cursor-visibility bookkeeping in the cursor drain below)
+        if !xdpy.is_null() {
+            let rg = esc.rel_gen.load(Ordering::Relaxed);
+            if rg != seen_rel {
+                seen_rel = rg;
+                rel_override = Some(!captured);
+                eprintln!("[+{}s][rel] toggle → {} ({title})", ts(),
+                    if captured { "release" } else { "capture" });
+            }
+        }
+        // Capture decision → transition. Entering: flip QEMU's handler to
+        // relative (In::Mode rides the input channel, so mouse_set lands
+        // before the deltas that follow), confine the pointer to the
+        // window via a grab (re-issued — a grab's confine can't be
+        // amended), reset the delta baseline. Leaving: unconfine, restore
+        // the tablet, and force the next abs sample to re-send so the
+        // guest pointer resyncs to where the host cursor actually is.
+        let want = active && !xdpy.is_null() && !rel_hold_off
+            && rel_override.unwrap_or(match rel_mode {
+                RelMode::Always => true,
+                RelMode::Auto => cursor_ever_visible && !cursor_visible,
+                RelMode::Off => false,
+            });
+        if want != captured {
+            captured = want;
+            rel_last = None;
+            rel_acc = (0.0, 0.0);
+            let _ = itx.send(In::Mode(captured));
+            unsafe {
+                XUngrabPointer(xdpy, 0);
+                pgrabbed = captured
+                    && XGrabPointer(xdpy, xwin_id, 0, 0xC, 1, 1, xwin_id, 0, 0) == 0;
+                if !captured {
+                    captured_btns.clear();
+                    pending_abs = None;
+                    mouse = (-1.0, -1.0); // force an abs re-send
+                }
+                XFlush(xdpy);
+            }
+            eprintln!("[+{}s][rel] capture {} ({title})", ts(),
+                if captured { "ON — relative motion" } else { "off" });
+        }
+        if captured && !pgrabbed && last_grab_try.elapsed().as_millis() > 500 {
+            // confine grab lost (transient server grab won the race) —
+            // retry on the same cadence as the --grab path
+            last_grab_try = std::time::Instant::now();
+            pgrabbed = unsafe { XGrabPointer(xdpy, xwin_id, 0, 0xC, 1, 1, xwin_id, 0, 0) == 0 };
+            if pgrabbed { eprintln!("[+{}s][rel] pointer confined ({title})", ts()); }
         }
         // Drain xdpy — THE input path. Key events with window==xwin are
         // real input (selected delivery while focused-ungrabbed, grab
@@ -1556,11 +1737,46 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
             if unsafe { XQueryPointer(xdpy, xwin_id, &mut rw, &mut cw,
                 &mut rx, &mut ry, &mut wx, &mut wy, &mut m) } != 0 {
                 let (mx, my) = (wx as f32, wy as f32);
-                let (ww, wh) = win.get_size();
-                if mx >= 0.0 && my >= 0.0 && mx < ww as f32 && my < wh as f32
-                    && (mx, my) != mouse {
-                    mouse = (mx, my);
-                    pending_abs = Some((mx, my));
+                if captured {
+                    // rel deltas vs the last sample. Our own warps rebase
+                    // rel_last where they're issued, so they never count
+                    // as user motion. If the confine grab lost we only
+                    // count inside-window motion — an unconfined pointer
+                    // roaming the host must not drive the guest — but the
+                    // baseline still tracks outside positions so re-entry
+                    // doesn't emit the jump.
+                    let (ww, wh) = win.get_size();
+                    if pgrabbed
+                        || (mx >= 0.0 && my >= 0.0 && mx < ww as f32 && my < wh as f32) {
+                        if let Some((lx, ly)) = rel_last {
+                            rel_acc.0 += mx - lx;
+                            rel_acc.1 += my - ly;
+                        }
+                    }
+                    rel_last = Some((mx, my));
+                    if pgrabbed && !cursor_visible {
+                        // cursor hidden (a locked app) → park the pointer
+                        // near the window center; confined at an edge it
+                        // has no delta room left. A visible cursor is
+                        // parked by the mouse_set warps instead.
+                        let (cx, cy) = (ww as f32 / 2.0, wh as f32 / 2.0);
+                        let (dx, dy) = (mx - cx, my - cy);
+                        if dx * dx + dy * dy > (ww.min(wh) as f32 * 0.35).powi(2) {
+                            unsafe {
+                                XWarpPointer(xdpy, 0, xwin_id, 0, 0, 0, 0,
+                                    cx as i32, cy as i32);
+                                XFlush(xdpy);
+                            }
+                            rel_last = Some((cx, cy));
+                        }
+                    }
+                } else {
+                    let (ww, wh) = win.get_size();
+                    if mx >= 0.0 && my >= 0.0 && mx < ww as f32 && my < wh as f32
+                        && (mx, my) != mouse {
+                        mouse = (mx, my);
+                        pending_abs = Some((mx, my));
+                    }
                 }
             }
         } else if let Some((mx, my)) = win.get_mouse_pos(minifb::MouseMode::Pass) {
@@ -1653,6 +1869,16 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                 }
             }
         }
+        // rel deltas — trunc keeps the sub-pixel remainder accumulating,
+        // the ~250Hz send gate matches the abs coalesce's pacing
+        if captured && rel_send.elapsed().as_millis() > 4
+            && (rel_acc.0.abs() >= 1.0 || rel_acc.1.abs() >= 1.0) {
+            rel_send = std::time::Instant::now();
+            let (dx, dy) = (rel_acc.0.trunc() as i32, rel_acc.1.trunc() as i32);
+            rel_acc.0 -= dx as f32;
+            rel_acc.1 -= dy as f32;
+            let _ = itx.send(In::Rel(dx, dy));
+        }
         // coalesce position events — ~120Hz is enough for absolute pointer
         if let Some((ax, ay)) = pending_abs {
             if last_pos_send.elapsed().as_millis() > 8 {
@@ -1680,14 +1906,54 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                         cur_dirty = true;
                     }
                 }
-                CurJob::Show(ci, on) => {
+                CurJob::Show(ci, mx, my, on) => {
                     if let Some(s) = cur_slots.get_mut(ci) {
                         s.seen = true;
                         if s.on != on { s.on = on; cur_dirty = true; }
                     }
+                    if captured && on {
+                        // Shadow the guest cursor: warp the host pointer to
+                        // the guest's own cursor spot (console px → window
+                        // px through the same fit the input map inverts)
+                        // so the guest sprite applied as the X cursor sits
+                        // where the guest believes the pointer is. >2px
+                        // gate: don't fight per-report jitter. Hidden-
+                        // cursor reports skip this — parking is the
+                        // recenter check's job.
+                        let (ww, wh) = win.get_size();
+                        let rects = head_rects(&heads, span.as_deref(), ww as i32, wh as i32);
+                        if let Some(&(rx, ry, rw, rh)) = rects.get(ci) {
+                            let iw = (heads.dims[ci].w.load(Ordering::Relaxed) as i32).max(1);
+                            let ih = (heads.dims[ci].h.load(Ordering::Relaxed) as i32).max(1);
+                            let (vx, vy, vw, vh) =
+                                egl::fit_viewport(rw.max(1) as u32, rh.max(1) as u32, iw, ih);
+                            if vw > 0 && vh > 0 {
+                                let (wx, wy) = (rx + vx + mx * vw / iw, ry + vy + my * vh / ih);
+                                let far = rel_last.is_none_or(|(lx, ly)|
+                                    (wx as f32 - lx).abs() > 2.0 || (wy as f32 - ly).abs() > 2.0);
+                                if far {
+                                    unsafe {
+                                        XWarpPointer(xdpy, 0, xwin_id, 0, 0, 0, 0, wx, wy);
+                                        XFlush(xdpy);
+                                    }
+                                    rel_last = Some((wx as f32, wy as f32));
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
+        // 'auto' trigger bookkeeping: visible = any console shows a cursor
+        // (virtio-gpu parks the pointer on one output's cursor plane — the
+        // others legitimately report off). ever-visible is sticky so a
+        // never-cursored boot doesn't masquerade as a lock, and each
+        // visibility transition ends the current lock episode (and with
+        // it any relgrab override).
+        let vis = cur_slots.iter().any(|s| s.seen && s.on);
+        if vis { cursor_ever_visible = true; }
+        if vis != cursor_visible && rel_mode == RelMode::Auto { rel_override = None; }
+        cursor_visible = vis;
         if (cur_dirty || cur_applied.map(|a| a.0) != Some(cur_ci)) && !xdpy.is_null() {
             cur_dirty = false;
             if let Some(s) = cur_slots.get_mut(cur_ci) {
@@ -1745,12 +2011,23 @@ async fn main() -> Result<()> {
     let mut probes: Vec<String> = Vec::new();
     let mut clipboard = true;
     let mut grab = false;
+    let mut rel_mode = RelMode::Off;
     let mut escapes: Vec<EscCombo> = Vec::new();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--no-clipboard" => clipboard = false,
             // grab the keyboard while the window is focused (spec.display.grabKeyboard)
             "--grab" => grab = true,
+            // spec.display.pointerLock — relative pointer capture policy
+            "--relmouse" => {
+                if let Some(s) = args.next() {
+                    rel_mode = match s.as_str() {
+                        "always" => RelMode::Always,
+                        "auto" => RelMode::Auto,
+                        _ => RelMode::Off,
+                    };
+                }
+            }
             // "<mods+key>=<action>" — spec.display.escapeShortcuts, run by
             // the viewer while the grab makes the WM's bindings blind
             "--escape" => {
@@ -1961,6 +2238,7 @@ async fn main() -> Result<()> {
         combos: escapes.clone(),
         ungrab_gen: std::sync::atomic::AtomicU64::new(0),
         abort_gen: std::sync::atomic::AtomicU64::new(0),
+        rel_gen: std::sync::atomic::AtomicU64::new(0),
     });
     // Panic exits — none of these need working keyboard delivery:
     //   · move focus elsewhere (grabs release on FocusOut)
@@ -1978,7 +2256,8 @@ async fn main() -> Result<()> {
     // first proxy call. Spawned tasks (watchdog, signals) keep running on
     // the runtime's workers while we join.
     let t = title.clone();
-    let wh = std::thread::spawn(move || present_window(iconn, paths, &t, w, h, jrx, crx, heads, span, esc));
+    let wh = std::thread::spawn(move ||
+        present_window(iconn, paths, &t, w, h, jrx, crx, heads, span, esc, rel_mode, monitor));
     let r = wh.join().unwrap_or_else(|_| Err(anyhow::anyhow!("window thread panicked")));
     eprintln!("[*] window closed — {r:?}");
     Ok(())

@@ -63,6 +63,10 @@ export function ddViewerArgs(spec: VmSpec, monitorSock: string, geo?: DdViewerGe
     // --grab: XGrabKeyboard while the window is focused (freerdp
     // +grab-keyboard analog — guest sees alt-tab etc. instead of the host WM)
     if (spec.display.grabKeyboard) argv.push("--grab");
+    // --relmouse: pointer-lock capture policy — the viewer flips QEMU's
+    // active handler between the PS/2 mouse (RelMotion deltas) and the
+    // virtio tablet per its state machine
+    argv.push("--relmouse", spec.display.pointerLock);
     (escapes ?? []).forEach((e) => argv.push("--escape", e));
     return argv;
 }

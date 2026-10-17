@@ -401,6 +401,14 @@ describe("ddViewerArgs", () => {
         expect(a).toContain("--no-clipboard");
         expect(a).toContain("--grab");
     });
+    test("pointerLock → --relmouse <mode>", () => {
+        const s = defaultSpec("t1");
+        const a = ddViewerArgs(s, "/run/mon.sock");
+        expect(a[a.indexOf("--relmouse") + 1]).toBe("auto");
+        s.display.pointerLock = "always";
+        const b = ddViewerArgs(s, "/run/mon.sock");
+        expect(b[b.indexOf("--relmouse") + 1]).toBe("always");
+    });
     test("escape shortcuts → --escape pairs", () => {
         const s = defaultSpec("t1");
         const a = ddViewerArgs(s, "/run/mon.sock", undefined,
