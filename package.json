@@ -17,11 +17,14 @@
     "postinstall": "bun run toolchain/postinstall.mts",
     "lint": "oxlint",
     "test": "bun test tests/",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "engine:link": "bun scripts/link-engine.mjs",
+    "preinstall": "bun scripts/link-engine.mjs --prune",
+    "postinstall": "bun scripts/link-engine.mjs"
   },
   "dependencies": {
-    "@downdraft/engine": "file:../downdraft-engine/packages/engine",
-    "@downdraft/platform-native": "file:../downdraft-engine/packages/platform-native",
+    "@downdraft/engine": "^0.5.0",
+    "@downdraft/platform-native": "^0.5.0",
     "@xterm/xterm": "^5.5.0",
     "@xterm/addon-fit": "^0.10.0",
     "jimp": "^1.6.1",
@@ -31,7 +34,7 @@
     "zustand": "^5.0.2"
   },
   "devDependencies": {
-    "@downdraft/cli": "file:../downdraft-engine/packages/cli",
+    "@downdraft/cli": "^0.5.0",
     "@types/node": "^22.10.0",
     "@webgpu/types": "^0.1.71",
     "oxlint": "^1.16.0",

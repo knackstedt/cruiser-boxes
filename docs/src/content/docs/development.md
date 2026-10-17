@@ -6,7 +6,8 @@ description: Dev commands, layout, test/lint/typecheck, the screenshot harness, 
 ## Commands
 
 ```sh
-bun install                            # deps — @downdraft/* resolve via file: to ../downdraft-engine
+bun install                            # deps — npm @downdraft/*, auto-linked to a sibling engine checkout
+bun run engine:link                    # re-run the engine link manually (or set CRUISER_ENGINE_DIR)
 bun run cli -- <args>                  # headless CLI (src/cli.ts)
 bun test tests/                        # unit tests — ALWAYS scope to tests/…
 bunx tsc --noEmit                      # typecheck  (bun run typecheck)
@@ -59,5 +60,5 @@ See [environment variables](/reference/env/).
 - **Fresh sockets per op.** QMP/QGA chardevs accept one pending client;
   never cache a connection (see [architecture](/internals/architecture/)).
 - **Use `/var/tmp`, not `/tmp`.**
-- DownDraft engine fixes belong in the sibling `../downdraft-engine`
-  checkout, not here.
+- DownDraft engine fixes belong in the sibling engine checkout
+  (`../downdraft-engine`/`../downdraft`), not here.
