@@ -13,14 +13,13 @@ import type { VmSpec } from "../../vm-core/src/config/schema";
 import { buildSeedIso, cloudimgUserData, metaData, passwordHash, type SeedOpts } from "./nocloud";
 import { cloudImageFor, defaultRelease } from "./distros";
 import { profileFromSpec, resolvePackages } from "./packages";
+import { downloadTo } from "../../sys/src/download";
 
+/** Cached by name — a .part suffix means the last fetch died mid-flight
+ *  and this call re-downloads instead of trusting a truncated file. */
 async function fetchImg(url: string, dst: string): Promise<void> {
     if (existsSync(dst)) return;
-    await mkdir(CLOUDIMG_DIR, { recursive: true });
-    const res = await fetch(url, { redirect: "follow" });
-    if (!res.ok) throw new Error(`fetch ${url}: HTTP ${res.status}`);
-    const { writeFile } = await import("node:fs/promises");
-    await writeFile(dst, Buffer.from(await res.arrayBuffer()));
+    await downloadTo(url, dst);
 }
 
 /**

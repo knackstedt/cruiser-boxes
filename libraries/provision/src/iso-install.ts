@@ -9,6 +9,7 @@ import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import { run, which } from "../../sys/src/exec";
+import { downloadTo } from "../../sys/src/download";
 import { ISO_DIR, vmPaths, diskPath, homeDiskPath } from "../../vm-core/src/paths";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { buildSeedIso, autoinstallUserData, metaData, passwordHash, type SeedOpts } from "./nocloud";
@@ -20,11 +21,7 @@ import { createDisk, requireDiskKeyFile } from "../../vm-core/src/disk/ops";
 export async function ensureIso(url: string, name?: string): Promise<string> {
     await mkdir(ISO_DIR, { recursive: true });
     const file = join(ISO_DIR, name ?? url.split("/").pop() ?? "install.iso");
-    if (existsSync(file)) return file;
-    const res = await fetch(url, { redirect: "follow" });
-    if (!res.ok) throw new Error(`fetch ${url}: HTTP ${res.status}`);
-    const { writeFile } = await import("node:fs/promises");
-    await writeFile(file, Buffer.from(await res.arrayBuffer()));
+    if (!existsSync(file)) await downloadTo(url, file);
     return file;
 }
 
