@@ -4,7 +4,7 @@
 // ============================================================================
 
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { run } from "../../../sys/src/exec";
@@ -188,29 +188,69 @@ export async function backupOffline(qemuImg: string, disk: string, destPath: str
 export async function backupLive(qmp: QmpClient, diskNode: string, destPath: string, encrypted = false): Promise<void> {
     // Need the source as a blockdev node-name; the drive attaches as "drive0"-ish —
     // caller resolves via query-block. Add target as a fresh node first.
-    const targetNode = `backup-${Date.now()}`;
-    await qmp.execute("blockdev-add", {
-        node_name: targetNode,
-        driver: "qcow2",
-        file: { driver: "file", filename: destPath },
-        ...(encrypted ? { encrypt: { format: "luks", "key-secret": DISK_SECRET_ID } } : {}),
-    });
-    const jobId = `backup-${Date.now()}`;
-    await qmp.blockdevBackup(jobId, diskNode, targetNode, "full");
-    await new Promise<void>((resolve, reject) => {
-        const onEv = (e: any) => {
-            if (e.event === "JOB_STATUS_CHANGE" && e.data?.id === jobId && e.data?.status === "concluded") {
+    const stamp = Date.now();
+    const targetNode = `backup-${stamp}`;
+    const jobId = `backup-${stamp}`;
+    let ok = false;
+    try {
+        await qmp.execute("blockdev-add", {
+            node_name: targetNode,
+            driver: "qcow2",
+            file: { driver: "file", filename: destPath },
+            ...(encrypted ? { encrypt: { format: "luks", "key-secret": DISK_SECRET_ID } } : {}),
+        });
+        await qmp.blockdevBackup(jobId, diskNode, targetNode, "full");
+        await new Promise<void>((resolve, reject) => {
+            const onEv = (e: any) => {
+                if (e.event !== "JOB_STATUS_CHANGE" || e.data?.id !== jobId
+                    || e.data?.status !== "concluded") return;
+                void (async () => {
+                    try {
+                        // JOB_STATUS_CHANGE carries no error field — a failed
+                        // job reports "concluded" the same as a clean one.
+                        // The error string lives in query-jobs.
+                        const jobs = await qmp.execute("query-jobs").catch(() => [] as any[]);
+                        const err = (jobs ?? []).find((j: any) => j?.id === jobId)?.error;
+                        await qmp.jobDismiss(jobId).catch(() => {});
+                        finish(() => err ? reject(new Error(String(err))) : resolve());
+                    } catch (x) {
+                        finish(() => reject(x));
+                    }
+                })();
+            };
+            const timer = setTimeout(() => {
+                // Unwind best-effort: cancel the job, wait for it to reach a
+                // dismissable state so the target node can be dropped, then
+                // reject. Nothing here may throw past finish().
+                void (async () => {
+                    await qmp.execute("job-cancel", { id: jobId }).catch(() => {});
+                    const deadline = Date.now() + 15_000;
+                    for (;;) {
+                        const jobs = await qmp.execute("query-jobs").catch(() => [] as any[]);
+                        const st = (jobs ?? []).find((j: any) => j?.id === jobId)?.status;
+                        if (st !== "running" && st !== "aborting") break;
+                        if (Date.now() > deadline) break;
+                        await new Promise((r) => setTimeout(r, 500));
+                    }
+                    await qmp.jobDismiss(jobId).catch(() => {});
+                    finish(() => reject(new Error("backup job timed out")));
+                })();
+            }, 30 * 60_000);
+            function finish(fn: () => void) {
+                clearTimeout(timer);
                 qmp.off("event", onEv);
-                qmp.jobDismiss(jobId).then(() => resolve(), resolve);
+                fn();
             }
-            if (e.event === "JOB_STATUS_CHANGE" && e.data?.id === jobId && e.data?.status === "null" && e.data?.error) {
-                qmp.off("event", onEv);
-                reject(new Error(String(e.data.error)));
-            }
-        };
-        qmp.on("event", onEv);
-        setTimeout(() => { qmp.off("event", onEv); reject(new Error("backup job timed out")); }, 30 * 60_000);
-    });
+            qmp.on("event", onEv);
+        });
+        ok = true;
+    } finally {
+        // The target node keeps an open fd on the destination — drop it on
+        // every path. A failed run also drops the partial backup file so it
+        // can't masquerade as a valid backup.
+        await qmp.execute("blockdev-del", { node_name: targetNode }).catch(() => {});
+        if (!ok) await rm(destPath, { force: true }).catch(() => {});
+    }
 }
 
 /** Resolve the guest disk's QMP node-name for blockdev ops. */
