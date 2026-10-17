@@ -1745,16 +1745,23 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
             for (b, ci) in btns_down.drain() { let _ = itx.send(In::Btn(ci, b, false)); }
         }
         was_active = active;
-        // Pointer position via XQueryPointer — a REQUEST, immune to grabs.
-        // minifb's get_mouse_pos reads event-fed state, and motion isn't in
-        // our pointer grab's mask, so it would freeze stale while grabbed.
-        if !xdpy.is_null() {
+        // Pointer position. While the pointer grab is held minifb's
+        // event-fed state is stale (motion isn't in the grab mask), so
+        // sample via XQueryPointer — a REQUEST, immune to grabs. Ungrabbed,
+        // get_mouse_pos is live and free: no per-tick X round-trip.
+        let ptr_pos: Option<(f32, f32)> = if pgrabbed && !xdpy.is_null() {
             let (mut rw, mut cw) = (0u64, 0u64);
             let (mut rx, mut ry, mut wx, mut wy) = (0i32, 0i32, 0i32, 0i32);
             let mut m = 0u32;
             if unsafe { XQueryPointer(xdpy, xwin_id, &mut rw, &mut cw,
                 &mut rx, &mut ry, &mut wx, &mut wy, &mut m) } != 0 {
-                let (mx, my) = (wx as f32, wy as f32);
+                Some((wx as f32, wy as f32))
+            } else { None }
+        } else {
+            win.get_mouse_pos(minifb::MouseMode::Pass)
+        };
+        if let Some((mx, my)) = ptr_pos {
+            {
                 if captured {
                     // rel deltas vs the last sample. Our own warps rebase
                     // rel_last where they're issued, so they never count
@@ -1796,13 +1803,6 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                         pending_abs = Some((mx, my));
                     }
                 }
-            }
-        } else if let Some((mx, my)) = win.get_mouse_pos(minifb::MouseMode::Pass) {
-            let (ww, wh) = win.get_size();
-            let inb = mx >= 0.0 && my >= 0.0 && mx < ww as f32 && my < wh as f32;
-            if inb && (mx, my) != mouse {
-                mouse = (mx, my);
-                pending_abs = Some((mx, my));
             }
         }
         // Buttons + wheel while UNGRABBED: those events deliver to minifb's
