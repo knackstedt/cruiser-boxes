@@ -12,14 +12,16 @@ import { createOverlay, requireDiskKeyFile } from "../../vm-core/src/disk/ops";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { buildSeedIso, cloudimgUserData, metaData, passwordHash, type SeedOpts } from "./nocloud";
 import { cloudImageFor, defaultRelease } from "./distros";
+import { imageDigestFor } from "./checksums";
 import { profileFromSpec, resolvePackages } from "./packages";
-import { downloadTo } from "../../sys/src/download";
+import { ensureDownload, type Digest } from "../../sys/src/download";
 
 /** Cached by name — a .part suffix means the last fetch died mid-flight
- *  and this call re-downloads instead of trusting a truncated file. */
-async function fetchImg(url: string, dst: string): Promise<void> {
-    if (existsSync(dst)) return;
-    await downloadTo(url, dst);
+ *  and this call re-downloads instead of trusting a truncated file. With a
+ *  resolved publisher digest the cache hit is hash-checked too, so a
+ *  corrupt partial that somehow lost its .part suffix gets refetched. */
+async function fetchImg(url: string, dst: string, digest: Digest | null): Promise<void> {
+    await ensureDownload(url, dst, { expect: digest ?? undefined });
 }
 
 /**
@@ -42,7 +44,10 @@ export async function provisionCloudimg(
     const release = o.release ?? (spec.os.release || defaultRelease(spec.os.family));
     const { url, file } = await cloudImageFor(spec.os.family, release);
     const base = join(CLOUDIMG_DIR, file);
-    await fetchImg(url, base);
+    // Publisher checksum — best-effort: a failed sums fetch must not block
+    // provisioning (integrity check, not a signature gate).
+    const digest = await imageDigestFor(spec.os.family, release, file).catch(() => null);
+    await fetchImg(url, base, digest);
 
     // qcow2 overlay sized to spec — at spec.disk.file, which may live outside
     // the vm dir (custom disk location). disk.encrypt="full" makes the

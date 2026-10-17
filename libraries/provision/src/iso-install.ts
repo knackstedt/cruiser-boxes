@@ -9,7 +9,8 @@ import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import { run, which } from "../../sys/src/exec";
-import { downloadTo } from "../../sys/src/download";
+import { ensureDownload } from "../../sys/src/download";
+import { probeIsoDigest } from "./checksums";
 import { ISO_DIR, vmPaths, diskPath, homeDiskPath } from "../../vm-core/src/paths";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { buildSeedIso, autoinstallUserData, metaData, passwordHash, type SeedOpts } from "./nocloud";
@@ -17,11 +18,13 @@ import { profileFromSpec, resolvePackages } from "./packages";
 import { resolveToolchain } from "../../vm-core/src/qemu/resolve";
 import { createDisk, requireDiskKeyFile } from "../../vm-core/src/disk/ops";
 
-/** Fetch a desktop ISO into ISO_DIR if absent. */
+/** Fetch a desktop ISO into ISO_DIR if absent. When the mirror publishes a
+ *  sidecar/sums digest it's enforced — a corrupt cached file refetches. */
 export async function ensureIso(url: string, name?: string): Promise<string> {
     await mkdir(ISO_DIR, { recursive: true });
     const file = join(ISO_DIR, name ?? url.split("/").pop() ?? "install.iso");
-    if (!existsSync(file)) await downloadTo(url, file);
+    const digest = await probeIsoDigest(url).catch(() => null);
+    await ensureDownload(url, file, { expect: digest ?? undefined });
     return file;
 }
 
