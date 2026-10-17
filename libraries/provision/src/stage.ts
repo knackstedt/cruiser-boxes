@@ -5,7 +5,7 @@
 // wallpaper.ts (PNG) and sync.ts (monitors.xml, CA certs).
 // ============================================================================
 
-import { writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import { run } from "../../sys/src/exec";
@@ -23,12 +23,16 @@ export async function pushFileToGuest(h: VmHandle, guestPath: string, buf: Buffe
     const { priv } = await ensureKeypair();
     const tmp = join(h.paths.run, `stage.push.${Math.random().toString(36).slice(2, 8)}`);
     await writeFile(tmp, data);
-    const r = await run("scp", [
-        "-i", priv, "-P", String(port),
-        "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-        "-o", "ConnectTimeout=15",
-        tmp, `${h.spec.credentials.username}@127.0.0.1:${guestPath}`,
-    ], { noThrow: true, timeoutMs: 60_000 });
-    if (r.code !== 0)
-        throw new Error(`staging ${guestPath} failed via qga and scp: ${r.stderr.slice(-300)}`);
+    try {
+        const r = await run("scp", [
+            "-i", priv, "-P", String(port),
+            "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "ConnectTimeout=15",
+            tmp, `${h.spec.credentials.username}@127.0.0.1:${guestPath}`,
+        ], { noThrow: true, timeoutMs: 60_000 });
+        if (r.code !== 0)
+            throw new Error(`staging ${guestPath} failed via qga and scp: ${r.stderr.slice(-300)}`);
+    } finally {
+        await rm(tmp, { force: true }).catch(() => {});
+    }
 }
