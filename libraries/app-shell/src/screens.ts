@@ -140,9 +140,16 @@ input:focus { border-color:#4fc2f7; outline:none; }
 .unitlist { max-height:104px; overflow-y:scroll; scrollbar-color:#5d6a80 transparent;
             margin:0 0 10px 140px; }
 .footer { height:28px; flex-shrink:0;
-          display:flex; align-items:center; padding:0 18px;
-          background:#161b23; border-top:1px solid #2a313c;
-          font-size:12px; color:#5d6775; }
+          background:#161b23; border-top:1px solid #2a313c; }
+/* Status notifier — one severity-colored bar (dot + single-line text). */
+.fbar { display:flex; align-items:center; gap:9px; height:100%; padding:0 18px;
+        font-size:12px; color:#5d6775; }
+.fbar .fdot { width:7px; height:7px; border-radius:4px; background:#4a515d; flex-shrink:0; }
+.fbar.warn { color:#f0c98a; }
+.fbar.warn .fdot { background:#f0c98a; }
+.fbar.err { color:#f0b8c8; background:#331e27; }
+.fbar.err .fdot { background:#f08aa8; }
+.fbar .ftext { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 /* Term route: the .content scrollport becomes a fixed column — the head
    strip stays put and #termbox fills the rest. The embedded webui view
    composites over #termbox's rect (TermManager probes it post-layout). */
@@ -300,7 +307,8 @@ function vmRow(vm: VmSummary, s: CruiserState): string {
         ? [vm.sshPort && `ssh :${vm.sshPort}`, vm.rdpPort && `rdp :${vm.rdpPort}`]
             .filter(Boolean).join(" · ")
         : "";
-    const mode = [GPU_LABEL[vm.gpuMode] ?? vm.gpuMode, HEAD_LABEL[vm.headMode] ?? vm.headMode, ports]
+    const mode = [GPU_LABEL[vm.gpuMode] ?? vm.gpuMode, HEAD_LABEL[vm.headMode] ?? vm.headMode, ports,
+        vm.encrypt !== "off" ? `luks ${vm.encrypt}${vm.diskLocked ? " · locked" : ""}` : ""]
         .filter(Boolean).join(" · ");
     return `<div class="vmrow">
         <div class="grow" data-action="nav" data-route="vm" data-vm="${esc(vm.name)}">
@@ -331,12 +339,31 @@ function autoSnapBanner(s: CruiserState): string {
         <div style="margin-top:8px">${purge}${skip}</div></div>`;
 }
 
+/** The parked LUKS unlock — a prompt-mode VM's passphrase lives nowhere on
+ *  disk, so ops that need it wait on this banner (re-dispatched by
+ *  unlock-go once provided). */
+function unlockBanner(s: CruiserState): string {
+    const p = s.unlockPrompt;
+    if (!p) return "";
+    const opLabel = ({
+        start: "start it", clone: "clone it", snapshot: "take a snapshot",
+        restore: `restore '${p.arg ?? ""}'`, snapdel: `delete '${p.arg ?? ""}'`,
+        grow: "grow the disk",
+    } as Record<string, string>)[p.op] ?? p.op;
+    return `<div class="hostsum" style="border-color:#6b5527;color:#f0c98a">
+        <b>${esc(p.vm)}</b>: the disk is LUKS-encrypted — enter its passphrase to ${esc(opLabel)}.
+        <div class="row" style="margin-top:8px">
+            <input data-field="unlock-pw" value="${esc(s.unlockPw)}" style="width:240px" placeholder="disk passphrase">
+            ${btn("Unlock", "unlock-go", attr("vm", p.vm), "btn sm")}
+            ${btn("Cancel", "unlock-cancel", attr("vm", p.vm), "btn sm dim")}</div></div>`;
+}
+
 function home(s: CruiserState): string {
     const list = s.vms.length
         ? `<div class="vmlist">${s.vms.map((vm) => vmRow(vm, s)).join("")}</div>`
         : `<div class="empty">No VMs yet.
             <div style="margin-top:14px">${btn("+ New VM", "nav", attr("route", "create"))}</div></div>`;
-    return `${autoSnapBanner(s)}<div class="vmlist-head"><div class="h1">Virtual Machines</div>
+    return `${unlockBanner(s)}${autoSnapBanner(s)}<div class="vmlist-head"><div class="h1">Virtual Machines</div>
         ${btn("+ New VM", "nav", attr("route", "create"))}</div>
         ${list}`;
 }
@@ -475,6 +502,25 @@ function create(s: CruiserState): string {
         ${memRow}
         ${diskRow}
         ${checkRow("Nested virtualization", "nestedVirt", f.nestedVirt, "pass the host's vmx/svm flag to the guest — run KVM inside the VM (needs the host kvm module's nested=1, see doctor)", aptag("boot"))}
+        ${editing ? "" : `<div class="h2">Disk encryption</div>
+        ${optRow("Encryption", "encrypt", f.encrypt, [["off", "off"], ["full", "full disk"], ["home", "/home only"]])}
+        <div class="hint">qcow2 LUKS — the image file is encrypted at rest and QEMU unlocks it with a
+            passphrase (the guest sees a plain disk). <b>full disk</b> encrypts the whole system image;
+            <b>/home only</b> keeps the system disk plaintext and adds a second encrypted volume
+            mounted at /home. Baked into the image — can't be changed after creation.</div>
+        ${f.encrypt === "off" && f.method !== "imported" ? "" : `
+        ${f.method === "imported" ? `<div class="hint">importing an image? If it's already LUKS-encrypted it's detected
+            automatically — enter its disk password below so the VM can unlock it. Plaintext images stay plaintext
+            (encryption can't be retrofitted).</div>` : ""}
+        ${f.method === "imported" ? "" : optRow("Key storage", "keyStore", f.keyStore, [["store", "remember"], ["prompt", "ask each time"]])}
+        ${f.encrypt !== "off" && f.method !== "imported" ? `<div class="hint">${f.keyStore === "store"
+            ? "the passphrase is kept in the VM's secrets/ dir (0600) — the VM boots unattended"
+            : "nothing is kept on disk — starting, cloning, and snapshotting each ask for the passphrase"}</div>` : ""}
+        ${f.encrypt === "home" && f.method !== "imported" ? field("Home disk GiB", "homeGiB", f.homeGiB, 80) : ""}
+        ${field("Disk password", "diskPassword", f.diskPassword)}
+        ${f.encrypt !== "off" || f.method !== "imported" ? field("Repeat", "diskPassword2", f.diskPassword2) : ""}
+        <div class="hint">unlocks the qcow2 image itself — separate from the guest login below, and
+            <b>not recoverable</b> if lost.</div>`}`}
         <div class="h2">Graphics &amp; display</div>
         ${optRow("GPU mode", "gpu", f.gpu, [["venus", "Venus (Vulkan)"], ["virgl", "virgl (GL)"], ["software", "software"]], "set-field", aptag("boot"))}
         ${optRow("Head mode", "headMode", f.headMode, [["virtual-desktop", "virtual desktop"], ["fullscreen-monitor", "fullscreen monitor"], ["windowed", "windowed"], ["app", "app-only"]], "set-field", aptag("live"))}
@@ -559,10 +605,14 @@ function vmDetail(s: CruiserState): string {
             ? `<div class="hostsum" style="border-color:#6b5527;color:#f0c98a">restart pending — these changed while the VM was up and only apply at the next boot: <b>${esc(vm.pendingRestart.join(", "))}</b>. Stop &amp; start to apply.</div>`
             : ""}
         ${autoSnapBanner(s)}
+        ${unlockBanner(s)}
         <div class="kv">
             <div class="k">resources</div><div>${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB · ${vm.diskGiB} GiB disk${vm.nestedVirt ? " · nested virt" : ""}</div>
             ${diskDetail ? `<div class="k">disk usage</div><div>${esc(diskDetail)}</div>` : ""}
             <div class="k">gpu / head</div><div>${esc(vm.gpuMode)} / ${esc(vm.headMode)}</div>
+            <div class="k">encryption</div><div>${vm.encrypt === "off" ? "off"
+                : `qcow2 LUKS — ${vm.encrypt === "full" ? "full disk" : "/home volume"}`
+                  + ` · ${vm.keyStorage === "prompt" ? "passphrase not stored" : "key stored"}${vm.diskLocked ? " · locked" : ""}`}</div>
             <div class="k">ports</div><div>ssh 127.0.0.1:${vm.sshPort ?? "–"} · rdp 127.0.0.1:${vm.rdpPort ?? "–"}</div>
             <div class="k">login</div><div>${login}</div>
             <div class="k">provisioned</div><div>${esc(vm.provisioned ?? "—")}</div>
@@ -812,7 +862,8 @@ export function renderRouteParts(s: CruiserState): RouteParts {
     const topbar = `<div class="brand">cruiser</div>
         <div class="nav">${nav("home", "VMs", ["home", "create", "vm", "logs", "term"].includes(s.route))}${nav("settings", "Settings")}</div>
         <div style="flex:1"></div>`;
-    const footer = esc(s.status);
+    const fcls = s.statusKind === "error" ? " err" : s.statusKind === "warn" ? " warn" : "";
+    const footer = `<div class="fbar${fcls}"><div class="fdot"></div><div class="ftext">${esc(s.status)}</div></div>`;
     const log = s.route === "logs" ? logPaneInner(s) : null;
     return {
         topbar, content: body, footer, log,

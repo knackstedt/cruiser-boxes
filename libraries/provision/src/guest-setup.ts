@@ -125,6 +125,33 @@ command -v firewall-cmd >/dev/null && {
     // channel runs, so provision and post-edit converge identically.
     const shareSection = guestSharesScript(spec);
 
+    // disk.encrypt="home": the second virtio-blk LUKS image arrives as
+    // /dev/disk/by-id/virtio-cruiser-home (serial=cruiser-home in argv).
+    // Format ext4 on first sight, migrate the existing /home over, then
+    // pin a by-id fstab entry + mount — idempotent on re-provision, and
+    // ordered BEFORE the share/dm/rdp sections so everything that writes
+    // under $UHOME lands on the encrypted disk.
+    const homeSection = spec.disk.encrypt !== "home" ? "" : `# cruiser encrypted /home — the qcow2 LUKS layer is unlocked by QEMU;
+# the guest sees a plain virtio disk we own end-to-end.
+HDEV=/dev/disk/by-id/virtio-cruiser-home
+i=0; while [ ! -b "$HDEV" ] && [ $i -lt 30 ]; do i=$((i+1)); sleep 1; done
+if [ -b "$HDEV" ]; then
+    blkid "$HDEV" >/dev/null 2>&1 || mkfs.ext4 -q -F -L cruiser-home "$HDEV"
+    if ! grep -q 'virtio-cruiser-home' /etc/fstab; then
+        mkdir -p /mnt/cruiser-home
+        if mount "$HDEV" /mnt/cruiser-home; then
+            cp -a /home/. /mnt/cruiser-home/ 2>/dev/null || true
+            umount /mnt/cruiser-home
+            echo '/dev/disk/by-id/virtio-cruiser-home /home ext4 defaults 0 2' >> /etc/fstab
+            mount /home || true
+        fi
+    else
+        mountpoint -q /home || mount /home || true
+    fi
+else
+    echo "guest-setup: $HDEV never appeared — /home stays on the root disk" >&2
+fi`;
+
     const dmSection = gnome ? `# GDM autologin (console seat; headless RDP seat is separate).
 # debian/ubuntu keep custom.conf under /etc/gdm3, fedora under /etc/gdm.
 for GDMCONF in /etc/gdm3/custom.conf /etc/gdm/custom.conf; do
@@ -292,6 +319,8 @@ UHOME=$(getent passwd "$U" | cut -d: -f6)
 UUID=$(id -u "$U")
 
 ${pkgSection}
+
+${homeSection}
 
 ${shareSection}
 

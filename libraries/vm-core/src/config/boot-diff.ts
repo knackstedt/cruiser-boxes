@@ -22,12 +22,15 @@ import type { VmSpec } from "./schema";
  *  the filtered list, while direction/readOnly/guestPath/deletions are
  *  guest-fstab + filesync state — the shares sync channel reconciles those
  *  live. usb keeps {vendorId, productId} — usb-host argv carries no serial.
- *  disk keeps {file, format} — sizeGiB is a qemu-img resize property, and
- *  growth is already refused while the VM runs. */
+ *  disk keeps {file, format, encrypt, keyStorage, homeGiB} — sizeGiB is a
+ *  qemu-img resize property (growth is already refused while the VM runs),
+ *  while the encrypt fields drive argv (the -object secret / key-secret /
+ *  home-blk drive) and are create-time only. */
 function bootSlice(s: VmSpec) {
     return {
         resources: s.resources,
-        disk: { file: s.disk.file, format: s.disk.format },
+        disk: { file: s.disk.file, format: s.disk.format,
+            encrypt: s.disk.encrypt, keyStorage: s.disk.keyStorage, homeGiB: s.disk.homeGiB },
         gpu: s.gpu,
         display: {
             viewer: s.display.viewer,

@@ -9,12 +9,12 @@ import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import { run, which } from "../../sys/src/exec";
-import { ISO_DIR, vmPaths, diskPath } from "../../vm-core/src/paths";
+import { ISO_DIR, vmPaths, diskPath, homeDiskPath } from "../../vm-core/src/paths";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { buildSeedIso, autoinstallUserData, metaData, passwordHash, type SeedOpts } from "./nocloud";
 import { profileFromSpec, resolvePackages } from "./packages";
 import { resolveToolchain } from "../../vm-core/src/qemu/resolve";
-import { createDisk } from "../../vm-core/src/disk/ops";
+import { createDisk, requireDiskKeyFile } from "../../vm-core/src/disk/ops";
 
 /** Fetch a desktop ISO into ISO_DIR if absent. */
 export async function ensureIso(url: string, name?: string): Promise<string> {
@@ -83,10 +83,19 @@ export async function runIsoInstall(
     await mkdir(paths.run, { recursive: true });
 
     // spec.disk.file may point outside the vm dir (custom disk location).
+    // disk.encrypt="full" makes the install target LUKS; "home" adds the
+    // second LUKS image the installer also sees (buildArgs attaches it —
+    // it must exist before spawn).
+    const keyFile = spec.disk.encrypt !== "off" ? requireDiskKeyFile(spec, paths) : undefined;
     const disk = diskPath(spec, paths.dir);
     await mkdir(dirname(disk), { recursive: true });
     if (!existsSync(disk))
-        await createDisk(tc.qemuImg, disk, spec.disk.sizeGiB);
+        await createDisk(tc.qemuImg, disk, spec.disk.sizeGiB, spec.disk.encrypt === "full" ? keyFile : undefined);
+    if (spec.disk.encrypt === "home") {
+        const hp = homeDiskPath(spec, paths.dir);
+        await mkdir(dirname(hp), { recursive: true });
+        if (!existsSync(hp)) await createDisk(tc.qemuImg, hp, spec.disk.homeGiB, keyFile);
+    }
     const { copyFile } = await import("node:fs/promises");
     if (!existsSync(paths.ovmfVars))
         await copyFile("/usr/share/OVMF/OVMF_VARS_4M.fd", paths.ovmfVars);

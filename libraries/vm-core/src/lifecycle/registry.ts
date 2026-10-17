@@ -11,7 +11,7 @@ import { createServer } from "node:net";
 import { existsSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
 
-import { VMS_DIR, vmPaths } from "../paths";
+import { VMS_DIR, vmPaths, homeDiskPath } from "../paths";
 import { VmHandle, type VmState } from "./vm";
 import { VmSpec, parseVmSpec } from "../config/schema";
 import { cloneDisk } from "../disk/ops";
@@ -151,11 +151,22 @@ export class VmRegistry extends EventTarget {
         if (pw && pw.startsWith(`${src.paths.dir}/`))
             spec.credentials.passwordFile = join(vmPaths(newName).dir, "secrets", pw.split("/").pop()!);
 
+        // The encrypt=home second image clones alongside the system disk
+        // (same passphrase — the secrets/ dir copy carries it over).
+        const srcHome = homeDiskPath(src.spec, src.paths.dir);
+        const hasHome = src.spec.disk.encrypt === "home" && existsSync(srcHome);
+
         const h = await this.create(spec);   // writes vm.json + allocates ports
         try {
             const tc = await resolveToolchain();
+            // LUKS sources reflink cleanly (a byte copy keeps the same
+            // passphrase); the non-CoW convert fallback needs the key to
+            // read the source — diskKeyFile() supplies it when present.
+            const keyFile = src.diskKeyFile() ?? undefined;
             await mkdir(dirname(dstDisk), { recursive: true });
-            await cloneDisk(tc.qemuImg, srcDisk, dstDisk, spec.disk.format);
+            await cloneDisk(tc.qemuImg, srcDisk, dstDisk, spec.disk.format, keyFile);
+            if (hasHome)
+                await cloneDisk(tc.qemuImg, srcHome, homeDiskPath(spec, h.paths.dir), "qcow2", keyFile);
             if (existsSync(src.paths.ovmfVars)) await copyFile(src.paths.ovmfVars, h.paths.ovmfVars);
             const srcSecrets = join(src.paths.dir, "secrets");
             if (existsSync(srcSecrets)) await cp(srcSecrets, join(h.paths.dir, "secrets"), { recursive: true });
@@ -166,6 +177,12 @@ export class VmRegistry extends EventTarget {
             const { rm } = await import("node:fs/promises");
             await rm(h.paths.dir, { recursive: true, force: true }).catch(() => {});
             if (!dstDisk.startsWith(`${h.paths.dir}/`)) await rm(dstDisk, { force: true }).catch(() => {});
+            // an external system disk means an external <stem>-home too —
+            // sweep the half-clone (in-dir copies die with the dir).
+            if (hasHome) {
+                const dstHome = homeDiskPath(spec, h.paths.dir);
+                if (!dstHome.startsWith(`${h.paths.dir}/`)) await rm(dstHome, { force: true }).catch(() => {});
+            }
             throw e;
         }
         return h;

@@ -61,6 +61,10 @@ export function toPortableSpec(spec: VmSpec): Record<string, unknown> {
                 (f: any) => f?.guestPort !== 22 && f?.guestPort !== 3389);
     }
     if (s.credentials) delete s.credentials.passwordFile;
+    // Encryption config rides along — encrypt/keyStorage/homeGiB describe
+    // the image (LUKS is baked into its header), not a secret. The LUKS
+    // passphrase NEVER leaves the host: it lives in secrets/disk-key or
+    // the caller's memory, neither of which serializes into a spec.
     return s;
 }
 
@@ -178,6 +182,12 @@ export function mergePulledSpec(current: VmSpec, incoming: VmSpec): { spec: VmSp
     next.provisioned = current.provisioned;
     next.credentials = { ...next.credentials, passwordFile: current.credentials.passwordFile };
     next.disk.file = current.disk.file;
+    // LUKS is a property of the existing image — a pulled doc can't flip
+    // encryption on an already-created disk. Keep the live values; a fresh
+    // VM imported from the doc does honor them.
+    next.disk.encrypt = current.disk.encrypt;
+    next.disk.keyStorage = current.disk.keyStorage;
+    next.disk.homeGiB = current.disk.homeGiB;
     next.origin = current.origin;   // pull source is host-local state — survive the merge
 
     return { spec: next, needsRestart: bootRelevantChanges(current, next) };

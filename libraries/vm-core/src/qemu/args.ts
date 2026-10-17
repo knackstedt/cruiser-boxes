@@ -11,7 +11,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { VmSpec } from "../config/schema";
-import { diskPath, optDir, type VmPaths } from "../paths";
+import { DISK_SECRET_ID } from "../disk/ops";
+import { diskPath, diskKeyPath, homeDiskPath, optDir, type VmPaths } from "../paths";
 
 const SYS_OVMF_CODE = "/usr/share/OVMF/OVMF_CODE_4M.fd";
 const SYS_OVMF_VARS_TEMPLATE = "/usr/share/OVMF/OVMF_VARS_4M.fd";
@@ -102,7 +103,28 @@ export function buildArgs(
     push("-smp", `${cpus},sockets=${spec.resources.sockets},cores=${cpus},threads=${spec.resources.threads}`);
     push("-drive", `if=pflash,format=raw,unit=0,readonly=on,file=${ovmfCode()}`);
     push("-drive", `if=pflash,format=raw,unit=1,file=${paths.ovmfVars}`);
-    push("-drive", `file=${disk},if=virtio,format=${spec.disk.format},discard=unmap`);
+
+    // LUKS (spec.disk.encrypt): the passphrase reaches QEMU as a `-object
+    // secret` file reference — never inline on argv. "full" keys the
+    // system drive itself; "home" leaves it plaintext and attaches the
+    // second encrypted image as a virtio-blk disk (serial → a stable
+    // /dev/disk/by-id/virtio-cruiser-home the guest setup mounts at /home).
+    const enc = spec.disk.encrypt;
+    if (enc !== "off") {
+        const keyFile = diskKeyPath(spec, paths);
+        // argv carries the path even when the file is absent — start()
+        // enforces existence beforehand, and `vm args` should still show
+        // the real command line for a locked VM.
+        if (keyFile) push("-object", `secret,id=${DISK_SECRET_ID},file=${keyFile}`);
+        if (enc === "full" && spec.disk.format !== "qcow2")
+            throw new Error(`disk.encrypt=full requires disk.format=qcow2 (got ${spec.disk.format})`);
+    }
+    push("-drive", `file=${disk},if=virtio,format=${spec.disk.format},discard=unmap` +
+        (enc === "full" ? `,encrypt.key-secret=${DISK_SECRET_ID}` : ""));
+    if (enc === "home") {
+        push("-drive", `if=none,id=home0,file=${homeDiskPath(spec, paths.dir)},format=qcow2,discard=unmap,encrypt.key-secret=${DISK_SECRET_ID}`);
+        push("-device", "virtio-blk-pci,drive=home0,serial=cruiser-home");
+    }
 
     // ── GPU ──
     const outs = opts.guestMonitors ?? [{ name: "cruiser-1", xres: 1920, yres: 1080 }];

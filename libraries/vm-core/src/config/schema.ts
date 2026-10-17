@@ -198,6 +198,27 @@ export const VmSpec = z.object({
         file: z.string().default("disk.qcow2"),   // relative to vm dir, or absolute
         sizeGiB: z.number().int().min(4).default(100),
         format: z.string().default("qcow2"),      // qemu-img format (qcow2|raw|vmdk|vdi|qed|vhdx)
+        /**
+         * qcow2 LUKS at-rest encryption (host-side — QEMU holds the key,
+         * the guest sees a plain disk). "full" encrypts the system image
+         * itself; "home" leaves it plaintext and adds a second LUKS image
+         * (<stem>-home.qcow2 beside disk.file) attached as virtio-blk
+         * serial cruiser-home — guest setup formats it ext4 and mounts it
+         * at /home. Create-time only: LUKS is baked into the image header,
+         * flipping this on an existing disk just breaks boot.
+         */
+        encrypt: z.enum(["off", "full", "home"]).default("off"),
+        /**
+         * Where the LUKS passphrase lives. "store" keeps it at
+         * secrets/disk-key (0600 — same protection as the rdp password)
+         * so QEMU unlocks unattended on every boot; "prompt" never
+         * persists it — callers hand the passphrase to the VM before
+         * start()/disk ops and a transient run/disk-key file exists only
+         * for the duration of each qemu invocation.
+         */
+        keyStorage: z.enum(["store", "prompt"]).default("store"),
+        /** home mode only: size of the encrypted /home image. */
+        homeGiB: z.number().int().min(4).default(50),
     }).prefault({}),
 
     gpu: z.object({

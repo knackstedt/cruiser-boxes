@@ -128,6 +128,24 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   qemu-img convert'd — internal snapshots never survive (convert drops
   them; reflink copies then strips them); OVMF_VARS + secrets/ copied,
   spec.origin cleared (a config pull must not rewrite both VMs).
+  Disk encryption (spec.disk.encrypt): qcow2 LUKS — QEMU/qemu-img unlock
+  the image via `-object secret,id=diskkey,file=<key>` + the drive's
+  `encrypt.key-secret=diskkey`. "full" = the system image itself is LUKS;
+  "home" = plaintext root + a second LUKS image <stem>-home.qcow2 attached
+  as virtio-blk serial=cruiser-home (/dev/disk/by-id/virtio-cruiser-home —
+  guest-setup formats ext4, migrates /home, writes the fstab entry).
+  keyStorage "store" keeps the passphrase at secrets/disk-key (0600);
+  "prompt" persists nothing — callers write a transient run/disk-key
+  (h.provideDiskKey) which start()/provision delete after QEMU consumes
+  it (h.clearDiskKey). qemu-img ops thread the key through imgTarget/
+  imgJsonTarget (`json:` pseudo-filenames) — `info` reads LUKS headers
+  keyless, every MUTATION (create/convert/snapshot/resize/backup) fails
+  without encrypt.key-secret. All encryption fields are create-time +
+  boot-diff'd; portable export carries the config but never the key;
+  mergePulledSpec preserves local encryption (can't re-flip an existing
+  image). UI parks keyed ops on an unlock banner (store.unlockPrompt →
+  svc.unlockGo re-dispatches); CLI resolves via --disk-password /
+  CRUISER_DISK_PASSWORD / tty prompt (ensureDiskKey).
 - `libraries/host-int` — WmAdapter impls (kde-x11 full; kde-wayland partial;
   gnome-x11; gnome-wayland — shortcuts via gsettings work there since gsd is
   session-level; only window ops are stubbed), xfreerdp viewer + ViewerSession.
@@ -164,7 +182,15 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   add_client channels EPIPE at the p2p handshake, so all per-console
   Keyboard/Mouse calls share a single conn opened after listener
   registration. QMP `getfd` fdnames are global-namespace — unique per
-  channel or concurrent opens collide onto a stale fd. Dead-QEMU watchdog =
+  channel or concurrent opens collide onto a stale fd. KNOWN WEDGE: a
+  long-running QEMU can start REJECTING all new p2p clients at the auth
+  layer (`REJECTED EXTERNAL DBUS_COOKIE_SHA1` — reproducible with a raw
+  socketpair probe, so it's QEMU/GLib in-process state, not client code;
+  observed after the previous viewer was SIGTERM'd ~months into uptime).
+  A `-M none -display dbus,p2p=on` scratch QEMU accepts the same
+  handshake fine. Once wedged there is no reconnect — only a VM restart
+  gets the console back, so treat a dead viewer as unrecoverable on that
+  QEMU. Dead-QEMU watchdog =
   qemu.pid pid + /proc starttime beside monitor.sock (detects restart too);
   don't ping the control conn, QEMU closes it by design. Multi-head is
   ONE window now (freerdp /multimon semantics): every console's Listener

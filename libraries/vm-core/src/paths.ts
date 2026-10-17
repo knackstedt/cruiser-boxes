@@ -18,7 +18,7 @@
 
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, extname, join } from "node:path";
 
 const HOME = homedir();
 const x = (env: string, dflt: string) => process.env[env] || dflt;
@@ -38,6 +38,30 @@ export function vmDir(name: string): string {
  *  or absolute (custom location / imported image). */
 export function diskPath(spec: { name: string; disk: { file: string } }, vmDirOverride?: string): string {
     return spec.disk.file.startsWith("/") ? spec.disk.file : join(vmDirOverride ?? vmDir(spec.name), spec.disk.file);
+}
+
+/** The encrypted /home image for disk.encrypt="home" — a qcow2 sibling of
+ *  the system disk named "<stem>-home.qcow2" (disk.qcow2 → disk-home.qcow2,
+ *  /big/foo.qcow2 → /big/foo-home.qcow2). */
+export function homeDiskPath(spec: { name: string; disk: { file: string } }, vmDirOverride?: string): string {
+    const d = diskPath(spec, vmDirOverride);
+    const ext = extname(d);
+    return `${d.slice(0, d.length - ext.length)}-home.qcow2`;
+}
+
+/** Where QEMU/qemu-img read the LUKS passphrase from. "store" mode's
+ *  persistent copy is secrets/disk-key (0600 — survives clone via the
+ *  secrets/ dir copy); "prompt" mode's is transient run/ state — written
+ *  when the passphrase is provided, deleted as soon as QEMU consumes it.
+ *  null when the VM isn't encrypted. */
+export function diskKeyPath(
+    spec: { disk: { encrypt: string; keyStorage: string } },
+    paths: { dir: string; run: string },
+): string | null {
+    if (spec.disk.encrypt === "off") return null;
+    return spec.disk.keyStorage === "prompt"
+        ? join(paths.run, "disk-key")
+        : join(paths.dir, "secrets", "disk-key");
 }
 
 export interface VmPaths {

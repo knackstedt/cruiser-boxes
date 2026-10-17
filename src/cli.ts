@@ -15,6 +15,7 @@
 // invoke this CLI.
 // ============================================================================
 
+import { z } from "zod";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -44,6 +45,13 @@ usage: cruiser <area> <command> [args]
                                                         needs the host kvm module's nested=1, see doctor)
                    [--sync a,b,c] [--no-sync x,y]     host→guest sync channels (see vm sync)
                    [--viewer rdp|dmabuf]              dmabuf = direct QEMU dma-buf display (virgl+)
+                   [--encrypt off|full|home]          qcow2 LUKS — full = whole system image,
+                                                      home = separate encrypted /home volume
+                   [--key-store store|prompt]         store: keep key in secrets/ (unattended boot);
+                                                      prompt: ask every time it's needed
+                   [--disk-password P]                LUKS passphrase (or CRUISER_DISK_PASSWORD,
+                                                      or a tty prompt) — required when encrypting
+                   [--home-disk GiB]                  size of the encrypt=home volume (default 50)
                    [--wallpaper PATH] [--wallpaper-pos POS]
                    [--share PATH[:tag]]                mount a host dir rw in the guest
                    [--share-ro PATH[:tag]]             …read-only (host→guest only)
@@ -128,6 +136,39 @@ async function holdViewer(s: ViewerSession): Promise<void> {
     process.off("SIGTERM", onSig);
 }
 
+/** Read a secret from the controlling terminal (echo off). Throws when
+ *  there's no tty — non-interactive callers use --disk-password or
+ *  CRUISER_DISK_PASSWORD. */
+async function promptSecret(question: string): Promise<string> {
+    const { spawnSync } = await import("node:child_process");
+    const r = spawnSync("bash", ["-c",
+        `read -rsp ${JSON.stringify(question)} pw </dev/tty >/dev/tty 2>&1; echo >&2; printf %s "$pw"`],
+        { stdio: ["inherit", "pipe", "inherit"] });
+    const pw = r.stdout?.toString() ?? "";
+    if (r.status !== 0 || !pw)
+        throw new Error("a disk passphrase is required — pass --disk-password, set CRUISER_DISK_PASSWORD, or run on a terminal");
+    return pw;
+}
+
+/** Resolve the LUKS passphrase source for an encrypted VM: flag → env →
+ *  existing key file → tty prompt. Materializes it where QEMU/qemu-img
+ *  read it (secrets/disk-key for store, transient run/disk-key for
+ *  prompt — start()/provision clear it after QEMU consumes it). */
+async function ensureDiskKey(h: VmHandle): Promise<void> {
+    if (h.spec.disk.encrypt === "off" || h.diskKeyFile()) return;
+    const pw = flagVal("--disk-password") ?? process.env.CRUISER_DISK_PASSWORD
+        ?? await promptSecret(`disk passphrase for ${h.spec.name}: `);
+    await h.provideDiskKey(pw);
+}
+
+/** ensureDiskKey + drop the transient run/ key afterwards — prompt-mode
+ *  passphrases exist on disk only for the op that needed them (store-mode
+ *  secrets/ is left alone). */
+async function withDiskKey<T>(h: VmHandle, fn: () => Promise<T>): Promise<T> {
+    await ensureDiskKey(h);
+    try { return await fn(); } finally { await h.clearDiskKey(); }
+}
+
 async function needVm(name?: string): Promise<VmHandle> {
     if (!name) { console.error("missing vm name"); usage(); }
     const h = registry.get(name);
@@ -194,6 +235,19 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             if (num("--cpus")) spec.resources.cpus = num("--cpus")!;
             if (num("--mem")) spec.resources.memoryMiB = num("--mem")!;
             if (num("--disk")) spec.disk.sizeGiB = num("--disk")!;
+            const enc = flagVal("--encrypt");
+            if (enc) {
+                const p = z.enum(["off", "full", "home"]).safeParse(enc);
+                if (!p.success) { console.error(`bad --encrypt '${enc}' — expected off|full|home`); process.exit(2); }
+                spec.disk.encrypt = p.data;
+            }
+            const ks = flagVal("--key-store");
+            if (ks) {
+                const p = z.enum(["store", "prompt"]).safeParse(ks);
+                if (!p.success) { console.error(`bad --key-store '${ks}' — expected store|prompt`); process.exit(2); }
+                spec.disk.keyStorage = p.data;
+            }
+            if (num("--home-disk")) spec.disk.homeGiB = num("--home-disk")!;
             const gpu = flagVal("--gpu"); if (gpu) spec.gpu.mode = gpu as VmSpec["gpu"]["mode"];
             const hm = flagVal("--head-mode"); if (hm) spec.display.headMode = hm as VmSpec["display"]["headMode"];
             const viewer = flagVal("--viewer"); if (viewer) spec.display.viewer = viewer as VmSpec["display"]["viewer"];
@@ -249,6 +303,15 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             // --cpus / --share tag fails here instead of poisoning vm.json.
             const checked = VmSpec.parse(spec);
             const h = await registry.create(checked);
+            // LUKS creation is password-gated by design — flag, env, then a
+            // tty prompt. provideDiskKey routes by keyStorage: secrets/ for
+            // "store", transient run/disk-key for "prompt" (cleared after
+            // the first keyed operation consumes it).
+            if (spec.disk.encrypt !== "off") {
+                const pw = flagVal("--disk-password") ?? process.env.CRUISER_DISK_PASSWORD
+                    ?? await promptSecret(`disk passphrase for ${h.spec.name}: `);
+                await h.provideDiskKey(pw);
+            }
             console.log(`created ${h.spec.name} @ ${h.paths.dir}`);
             console.log(`  ssh:${h.spec.network.sshPort} rdp:${h.spec.network.rdpPort} gpu:${h.spec.gpu.mode} head:${h.spec.display.headMode}`);
             console.log(`  next: cruiser provision cloudimg ${spec.name} <release>  (or drop a disk.qcow2 in)`);
@@ -256,10 +319,14 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
         }
         case "start": {
             const h = await needVm(args[0]);
+            // Encrypted VMs need the passphrase materialized before QEMU —
+            // flag/env, then a tty prompt for key-storage=prompt VMs.
+            await ensureDiskKey(h);
             if (!existsSync(h.diskPath())) {
                 await mkdir(h.paths.dir, { recursive: true });
                 console.log(`creating disk ${h.diskPath()} (${h.spec.disk.sizeGiB}G sparse)`);
-                await createDisk((await resolveToolchain()).qemuImg, h.diskPath(), h.spec.disk.sizeGiB);
+                await createDisk((await resolveToolchain()).qemuImg, h.diskPath(), h.spec.disk.sizeGiB,
+                    h.spec.disk.encrypt === "full" ? h.diskKeyFile() ?? undefined : undefined);
             }
             const mode = flagVal("--mode");
             if (mode) {
@@ -298,7 +365,8 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
         case "clone": {
             const h = await needVm(args[0]);
             if (!args[1]) usage();
-            const nh = await registry.clone(h.spec.name, args[1]);
+            // reflink copies LUKS verbatim; the convert fallback needs the key
+            const nh = await withDiskKey(h, () => registry.clone(h.spec.name, args[1]!));
             console.log(`cloned ${h.spec.name} -> ${nh.spec.name} @ ${nh.paths.dir} (snapshots not carried over)`);
             console.log(`  ssh:${nh.spec.network.sshPort} rdp:${nh.spec.network.rdpPort}`);
             break;
@@ -316,11 +384,11 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             break;
         }
         case "snapshots": { const h = await needVm(args[0]); console.table(await h.snapshots()); break; }
-        case "snapshot": { const h = await needVm(args[0]); await h.snapshot(args[1] ?? `snap-${Date.now()}`); console.log("snapshotted"); break; }
-        case "restore": { const h = await needVm(args[0]); await h.restoreSnapshot(args[1]!); console.log("restored"); break; }
-        case "snapshot-rm": { const h = await needVm(args[0]); await h.deleteSnapshot(args[1]!); console.log("deleted"); break; }
-        case "backup": { const h = await needVm(args[0]); if (!args[1]) usage(); await h.backup(args[1]); console.log(`backed up -> ${args[1]}`); break; }
-        case "resize": { const h = await needVm(args[0]); await h.resizeDisk(Number(args[1])); console.log(`resized to ${args[1]}G`); break; }
+        case "snapshot": { const h = await needVm(args[0]); await withDiskKey(h, () => h.snapshot(args[1] ?? `snap-${Date.now()}`)); console.log("snapshotted"); break; }
+        case "restore": { const h = await needVm(args[0]); await withDiskKey(h, () => h.restoreSnapshot(args[1]!)); console.log("restored"); break; }
+        case "snapshot-rm": { const h = await needVm(args[0]); await withDiskKey(h, () => h.deleteSnapshot(args[1]!)); console.log("deleted"); break; }
+        case "backup": { const h = await needVm(args[0]); if (!args[1]) usage(); await withDiskKey(h, () => h.backup(args[1]!)); console.log(`backed up -> ${args[1]}`); break; }
+        case "resize": { const h = await needVm(args[0]); await withDiskKey(h, () => h.resizeDisk(Number(args[1]))); console.log(`resized to ${args[1]}G`); break; }
         case "rm": { await needVm(args[0]); await registry.remove(args[0]!, { deleteDisk: has("--disk") }); console.log("removed"); break; }
         case "logs": {
             const h = await needVm(args[0]);
@@ -648,6 +716,20 @@ async function doctor() {
         const v = await run(tc.qemu, ["--version"], { noThrow: true, env });
         checks.push([`qemu: ${v.stdout.split("\n")[0] || v.stderr.slice(0, 120)}`, v.code === 0, "cruiser toolchain build"]);
         checks.push([`xfreerdp: ${tc.xfreerdp}`, true, ""]);
+        // LUKS probe — encryption needs QEMU built with gcrypt/nettle; a
+        // create of a tiny encrypted image is the definitive test.
+        const tmp = "/var/tmp";
+        const key = join(tmp, `cruiser-doctor-key-${process.pid}`);
+        const img = join(tmp, `cruiser-doctor-luks-${process.pid}.qcow2`);
+        await writeFile(key, "doctor", { mode: 0o600 });
+        const luks = await run(tc.qemuImg, ["create", "-f", "qcow2",
+            "--object", `secret,id=diskkey,file=${key}`,
+            "-o", "encrypt.format=luks,encrypt.key-secret=diskkey",
+            img, "1G"], { noThrow: true, env });
+        checks.push(["qemu-img LUKS (--encrypt)", luks.code === 0,
+            `qemu-img lacks crypto support${luks.stderr ? ` (${luks.stderr.trim().slice(0, 120)})` : ""}`]);
+        const { rm } = await import("node:fs/promises");
+        await rm(key, { force: true }); await rm(img, { force: true });
     }
     const { ovmfCode } = await import("../libraries/vm-core/src/qemu/args");
     checks.push(["OVMF firmware", existsSync(ovmfCode()), "apt install ovmf"]);
@@ -691,6 +773,9 @@ switch (area) {
     case "doctor": await doctor(); break;
     case "provision": {
         const h = await needVm(rest[0]);
+        // Encrypted VMs: the LUKS passphrase must exist before the overlay
+        // create / install spawn — flag/env first, tty prompt last.
+        await ensureDiskKey(h);
         const o = {
             username: flagVal("--user"), password: flagVal("--password"),
             timezone: flagVal("--timezone"), mirrorHostMonitors: !has("--no-monitor-mirror"),

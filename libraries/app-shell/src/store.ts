@@ -40,6 +40,11 @@ export interface VmSummary {
     persist: string;
     username: string;              // spec.credentials.username
     hasPassword: boolean;          // spec.credentials.passwordFile set
+    encrypt: string;               // spec.disk.encrypt — off|full|home
+    keyStorage: string;            // spec.disk.keyStorage — store|prompt
+    /** encrypted && no key material on disk — a prompt-mode VM waiting on
+     *  the unlock banner before any keyed op (start/snapshot/…). */
+    diskLocked: boolean;
     description: string;           // spec.description
     origin?: string;               // "gist:<id>" / "file:<path>" when imported/pushed
     shares: ShareRow[];            // spec.shares
@@ -98,6 +103,22 @@ export type CreateForm = SyncFormFields & {
     snapAuto: string;              // spec.snapshots.auto — off|daily|weekly|monthly
     snapTrigger: string;           // spec.snapshots.trigger — start|stop|both
     snapKeep: number;              // spec.snapshots.keep — auto-* rotation bound
+    encrypt: string;               // spec.disk.encrypt — off|full|home (create-time only)
+    keyStore: string;              // spec.disk.keyStorage — store|prompt
+    homeGiB: number;               // spec.disk.homeGiB — encrypt=home volume size
+    diskPassword: string;          // LUKS passphrase — in-memory only; provideDiskKey persists per keyStore
+    diskPassword2: string;         // confirm entry
+}
+
+/** A keyed op parked behind the unlock banner: the VM's keyStorage=prompt
+ *  disk has no passphrase on file, so the op is queued until the user
+ *  enters it. `op` is a service dispatch tag ("start", "clone",
+ *  "snapshot", "restore", "snapdel", "grow"); `arg` carries the snapshot
+ *  name / GiB where the op needs one. */
+export interface UnlockPrompt {
+    vm: string;
+    op: string;
+    arg?: string;
 }
 
 /** Low-disk-space decision parked on the user: an auto snapshot wanted to
@@ -188,11 +209,15 @@ export interface LogsState {
     loading: boolean;
 }
 
+/** Footer status severity — tints the notifier bar (dot + text). */
+export type StatusKind = "info" | "warn" | "error";
+
 export interface CruiserState {
     route: Route;
     selectedVm: string | null;
     vms: VmSummary[];
     status: string;
+    statusKind: StatusKind;
     busy: boolean;                 // an async action is in flight
     action: ActionState | null;    // which action — renders on its VM's button
     create: CreateForm;
@@ -217,6 +242,11 @@ export interface CruiserState {
     shareForm: ShareForm;
     /** Parked auto-snapshot low-space decision (null = none pending). */
     autoSnapPrompt: AutoSnapPrompt | null;
+    /** Parked LUKS unlock — a prompt-mode VM waiting on its passphrase. */
+    unlockPrompt: UnlockPrompt | null;
+    /** Unlock-banner passphrase buffer — never rendered back into the input
+     *  (typed in place, cleared on use/dismiss like create.password). */
+    unlockPw: string;
     /** Detail-screen password reveal — keyed to the VM, cleared on nav. */
     pwReveal: { vm: string; pw: string } | null;
 }
@@ -232,7 +262,7 @@ export interface ShareForm {
 export interface CruiserActions {
     setRoute(route: Route, vm?: string | null): void;
     setVms(vms: VmSummary[]): void;
-    setStatus(status: string): void;
+    setStatus(status: string, kind?: StatusKind): void;
     setBusy(busy: boolean): void;
     setAction(a: ActionState | null): void;
     setField<K extends keyof CreateForm>(k: K, v: CreateForm[K]): void;
@@ -252,6 +282,7 @@ export interface CruiserActions {
     setTermLine(s: string): void;
     setShareForm(p: Partial<ShareForm>): void;
     setAutoSnapPrompt(p: AutoSnapPrompt | null): void;
+    setUnlockPrompt(p: UnlockPrompt | null): void;
     setPwReveal(r: { vm: string; pw: string } | null): void;
 }
 
@@ -274,6 +305,8 @@ const defaultCreate = (): CreateForm => ({
     username: "cruiser", password: "",
     memUnit: "GiB", vd: 0, usb: [],
     snapAuto: "off", snapTrigger: "stop", snapKeep: 5,
+    encrypt: "off", keyStore: "store", homeGiB: 50,
+    diskPassword: "", diskPassword2: "",
 });
 
 export function createCruiserStore() {
@@ -282,6 +315,7 @@ export function createCruiserStore() {
         selectedVm: null,
         vms: [],
         status: "ready",
+        statusKind: "info",
         busy: false,
         action: null,
         create: defaultCreate(),
@@ -299,10 +333,12 @@ export function createCruiserStore() {
         termLine: "",
         shareForm: { hostPath: "", guestPath: "", mode: "mount", direction: "both", open: false },
         autoSnapPrompt: null,
+        unlockPrompt: null,
+        unlockPw: "",
         pwReveal: null,
-        setRoute: (route, vm = null) => set({ route, selectedVm: vm, confirm: null, editVm: null, pwReveal: null }),
+        setRoute: (route, vm = null) => set({ route, selectedVm: vm, confirm: null, editVm: null, pwReveal: null, unlockPrompt: null, unlockPw: "" }),
         setVms: (vms) => set({ vms }),
-        setStatus: (status) => set({ status }),
+        setStatus: (status, kind = "info") => set({ status, statusKind: kind }),
         setBusy: (busy) => set({ busy }),
         setAction: (action) => set({ action }),
         setField: (k, v) => set((s) => ({ create: { ...s.create, [k]: v } })),
@@ -320,6 +356,7 @@ export function createCruiserStore() {
         setTermLine: (termLine) => set({ termLine }),
         setShareForm: (p) => set((s) => ({ shareForm: { ...s.shareForm, ...p } })),
         setAutoSnapPrompt: (autoSnapPrompt) => set({ autoSnapPrompt }),
+        setUnlockPrompt: (unlockPrompt) => set({ unlockPrompt }),
         setPwReveal: (pwReveal) => set({ pwReveal }),
         toggleUsb: (key) => set((s) => ({
             create: {

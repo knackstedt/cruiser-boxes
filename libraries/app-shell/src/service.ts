@@ -10,6 +10,7 @@ import { makeShare } from "../../vm-core/src/config/shares";
 import { CACHE_DIR, CLOUDIMG_DIR, CONFIG_DIR, DATA_DIR, ISO_DIR, VMS_DIR } from "../../vm-core/src/paths";
 import { detectAdapter, detectSession } from "../../host-int/src/detect";
 import type { VmSession } from "../../provision/src/session";
+import { ViewerSession } from "../../host-int/src/session";
 import { listUsbDevices } from "../../vm-core/src/usb/usb";
 import { runnerLogFiles, tailFile, guestJournal, guestJournalUnits } from "../../vm-core/src/logs";
 import { run, which } from "../../sys/src/exec";
@@ -144,7 +145,7 @@ export class CruiserService {
             const r = await run(zn, args, { noThrow: true });
             return r.code === 0 && r.stdout.trim() ? r.stdout.trim() : null;
         }
-        this.store.getState().setStatus("no file dialog found (kdialog/zenity) — type the path");
+        this.store.getState().setStatus("no file dialog found (kdialog/zenity) — type the path", "warn");
         return null;
     }
 
@@ -171,7 +172,7 @@ export class CruiserService {
         // run); no vm → a "global" action serialized only against other
         // globals. Global busy never blocks a per-VM action.
         if (opts.vm ? this.busyVms.has(opts.vm) : st.busy) {
-            st.setStatus(`${label} ignored — another action is still running`);
+            st.setStatus(`${label} ignored — another action is still running`, "warn");
             return undefined;
         }
         if (opts.vm) this.busyVms.add(opts.vm); else st.setBusy(true);
@@ -182,7 +183,7 @@ export class CruiserService {
             st.setStatus(opts.done ? opts.done(r) : `${label} done`);
             return r;
         } catch (e) {
-            st.setStatus(`${label} failed: ${e instanceof Error ? e.message : e}`);
+            st.setStatus(`${label} failed: ${e instanceof Error ? e.message : e}`, "error");
             return undefined;
         } finally {
             if (opts.vm) this.busyVms.delete(opts.vm); else st.setBusy(false);
@@ -202,6 +203,8 @@ export class CruiserService {
             sshPort: s.network.sshPort, rdpPort: s.network.rdpPort,
             provisioned: s.provisioned.method, persist: s.persist,
             username: s.credentials.username, hasPassword: !!s.credentials.passwordFile,
+            encrypt: s.disk.encrypt, keyStorage: s.disk.keyStorage,
+            diskLocked: s.disk.encrypt !== "off" && h.diskKeyFile() === null,
             description: s.description,
             origin: s.origin ? `${s.origin.kind}:${s.origin.id ?? s.origin.url ?? ""}` : undefined,
             shares: s.shares.map((sh, idx) => ({
@@ -428,16 +431,24 @@ export class CruiserService {
         // Pre-flight with friendly messages — a schema rejection this late
         // either leaves a half-provisioned dir or writes an unloadable vm.json.
         if (!/^[a-z0-9][a-z0-9-]*$/.test(f.name)) {
-            st.setStatus("name must be lowercase letters/digits/dashes (e.g. 'dev-box')");
+            st.setStatus("name must be lowercase letters/digits/dashes (e.g. 'dev-box')", "warn");
             return;
         }
-        if (this.handles.has(f.name)) { st.setStatus(`a VM named '${f.name}' already exists`); return; }
-        if (f.cpus < 1 || f.cpus > 64) { st.setStatus("vCPUs must be between 1 and 64"); return; }
-        if (f.memMiB < 512) { st.setStatus("memory must be at least 512 MiB"); return; }
-        if (f.diskGiB < 4) { st.setStatus("disk must be at least 4 GiB"); return; }
+        if (this.handles.has(f.name)) { st.setStatus(`a VM named '${f.name}' already exists`, "warn"); return; }
+        if (f.cpus < 1 || f.cpus > 64) { st.setStatus("vCPUs must be between 1 and 64", "warn"); return; }
+        if (f.memMiB < 512) { st.setStatus("memory must be at least 512 MiB", "warn"); return; }
+        if (f.diskGiB < 4) { st.setStatus("disk must be at least 4 GiB", "warn"); return; }
         if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(f.username)) {
-            st.setStatus("username must start with a letter/underscore, lowercase + digits + - _ only");
+            st.setStatus("username must start with a letter/underscore, lowercase + digits + - _ only", "warn");
             return;
+        }
+        // LUKS: encryption is baked into the image at create time, so it
+        // requires the passphrase right here — never silently generated.
+        // (imported images resolve this post-probe — a LUKS source forces
+        // encrypt=full, a plaintext source can't be re-encrypted.)
+        if (f.encrypt !== "off" && f.method !== "imported") {
+            if (!f.diskPassword) { st.setStatus("set a disk password — encrypted VMs need one at creation", "warn"); return; }
+            if (f.diskPassword !== f.diskPassword2) { st.setStatus("disk passwords don't match", "warn"); return; }
         }
         await this.run(`create ${f.name}`, async () => {
             const spec = defaultSpec(f.name);
@@ -451,6 +462,9 @@ export class CruiserService {
             spec.snapshots.auto = f.snapAuto as VmSpec["snapshots"]["auto"];
             spec.snapshots.trigger = f.snapTrigger as VmSpec["snapshots"]["trigger"];
             spec.snapshots.keep = f.snapKeep;
+            spec.disk.encrypt = f.encrypt as VmSpec["disk"]["encrypt"];
+            spec.disk.keyStorage = f.keyStore as VmSpec["disk"]["keyStorage"];
+            spec.disk.homeGiB = f.homeGiB;
             spec.credentials.username = f.username;
             // the ISO autoinstall path is subiquity — ubuntu-only for now;
             // in-guest os-release detection rescues a stale family anyway
@@ -477,13 +491,30 @@ export class CruiserService {
             if (f.method === "imported") {
                 if (!f.importPath) throw new Error("choose a disk image file to import");
                 spec.disk.file = f.importPath;
-                spec.disk.format = await this.probeImageFormat(f.importPath);
+                const img = await this.probeImage(f.importPath);
+                spec.disk.format = img.format;
+                if (img.encrypted) {
+                    // LUKS source: it only boots keyed — adopt encrypt=full
+                    // and require the existing passphrase.
+                    if (!f.diskPassword) throw new Error(`${f.importPath} is LUKS-encrypted — enter its disk password`);
+                    if (f.diskPassword2 && f.diskPassword !== f.diskPassword2)
+                        throw new Error("disk passwords don't match");
+                    spec.disk.encrypt = "full";
+                    spec.disk.keyStorage = f.keyStore as VmSpec["disk"]["keyStorage"];
+                } else if (f.encrypt !== "off") {
+                    throw new Error(`${f.importPath} is plaintext — an existing image can't be re-encrypted (encryption is chosen at image creation)`);
+                }
             } else if (f.diskDir) {
                 spec.disk.file = join(f.diskDir, `${f.name}.qcow2`);
             }
             this.validateSpec(spec);
             const h = await this.registry.create(spec);
             this.handles.set(spec.name, h);
+            // Hand the LUKS passphrase to the VM before any keyed disk op —
+            // secrets/disk-key for "store" (boots unattended), transient
+            // run/disk-key for "prompt" (provision/start clear it after
+            // QEMU consumes the secret).
+            if (spec.disk.encrypt !== "off") await h.provideDiskKey(f.diskPassword);
 
             const onLog = (m: string) => this.store.getState().setStatus(m);
             const pw = f.password || undefined;
@@ -506,8 +537,54 @@ export class CruiserService {
         });
     }
 
+    /** Gate for ops that touch a LUKS image. When the VM's passphrase isn't
+     *  on file (keyStorage=prompt keeps nothing at rest), the op parks on
+     *  the unlock banner instead of failing — unlockGo() re-dispatches it
+     *  once the passphrase lands at the key path. */
+    private diskKeyReady(h: VmHandle, op: string, arg?: string): boolean {
+        if (h.spec.disk.encrypt === "off" || h.diskKeyFile()) return true;
+        const st = this.store.getState();
+        st.setUnlockPrompt({ vm: h.spec.name, op, arg });
+        st.setStatus(`${h.spec.name}'s disk is encrypted — enter its passphrase to continue`, "warn");
+        return false;
+    }
+
+    /** Unlock banner → write the passphrase to the VM's key path (transient
+     *  run/disk-key for prompt mode — consumed + deleted by the next boot)
+     *  and re-run the parked op. A wrong passphrase just fails the retried
+     *  op with QEMU's own error, which re-parks on the banner. */
+    async unlockGo(name: string): Promise<void> {
+        const st = this.store.getState();
+        const p = st.unlockPrompt;
+        const pw = st.unlockPw;
+        st.setUnlockPrompt(null);
+        this.store.setState({ unlockPw: "" });
+        if (!p || p.vm !== name) return;
+        const h = this.handles.get(name); if (!h) return;
+        if (!pw) { st.setStatus("no passphrase entered", "warn"); return; }
+        await h.provideDiskKey(pw);
+        try {
+            switch (p.op) {
+                case "start": await this.start(name); break;
+                case "clone": await this.cloneVm(name); break;
+                case "snapshot": await this.snapshot(name); break;
+                case "restore": await this.restoreSnapshot(name, p.arg!); break;
+                case "snapdel": await this.deleteSnapshot(name, p.arg!); break;
+                case "grow": await this.saveVm(); break;
+            }
+        } finally {
+            await h.clearDiskKey();   // prompt-mode keys never outlive their op
+        }
+    }
+
+    async unlockCancel(): Promise<void> {
+        this.store.getState().setUnlockPrompt(null);
+        this.store.setState({ unlockPw: "" });
+    }
+
     async start(name: string, opts: { skipAutoSnap?: boolean } = {}): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
+        if (!this.diskKeyReady(h, "start")) return;
         // Auto-snapshot "before start" edge — a space shortfall parks the
         // start on the user's choice in the prompt banner.
         if (!opts.skipAutoSnap && !(await this.autoSnapEdge(h, "start"))) return;
@@ -545,13 +622,13 @@ export class CruiserService {
     private async autoSnapEdge(h: VmHandle, trigger: "start" | "stop"): Promise<boolean> {
         const st = this.store.getState();
         const r = await runAutoSnapshot(h, trigger).catch((e) => {
-            st.setStatus(`auto snapshot skipped: ${e instanceof Error ? e.message : e}`);
+            st.setStatus(`auto snapshot skipped: ${e instanceof Error ? e.message : e}`, "warn");
             return null;
         });
         if (!r || r.skipped) return true;
         if (r.shortfall) {
             st.setAutoSnapPrompt({ vm: h.spec.name, ...r.shortfall, context: trigger });
-            st.setStatus(`${h.spec.name}: not enough free space for an auto snapshot`);
+            st.setStatus(`${h.spec.name}: not enough free space for an auto snapshot`, "warn");
             return trigger !== "start";
         }
         if (r.created || r.freed.length || r.pruned.length) {
@@ -591,7 +668,7 @@ export class CruiserService {
     async remove(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
         if (h.isRunning()) {
-            this.store.getState().setStatus(`stop ${name} before deleting it`);
+            this.store.getState().setStatus(`stop ${name} before deleting it`, "warn");
             return;
         }
         await this.run(`remove ${name}`, async () => {
@@ -617,7 +694,7 @@ export class CruiserService {
         const h = this.handles.get(name); if (!h) return;
         const { rdpPassword } = await import("../../host-int/src/freerdp");
         const pw = await rdpPassword(h.spec);
-        if (!pw) { st.setStatus(`${name}: no password on record`); return; }
+        if (!pw) { st.setStatus(`${name}: no password on record`, "warn"); return; }
         st.setPwReveal({ vm: name, pw });
     }
 
@@ -629,7 +706,7 @@ export class CruiserService {
     async term(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
         const st = this.store.getState();
-        if (!h.isRunning()) { st.setStatus(`${name} isn't running`); return; }
+        if (!h.isRunning()) { st.setStatus(`${name} isn't running`, "warn"); return; }
         const { TermManager } = await import("./term/term-manager");
         const { termBundleReady } = await import("./term/page");
         const { termDdPath } = await import("../../host-int/src/termemu");
@@ -650,7 +727,7 @@ export class CruiserService {
             await openHostTerm(h.spec);
             st.setStatus(`${name} — opened a host terminal`);
         } catch (e) {
-            st.setStatus(`terminal failed: ${(e as Error).message}`);
+            st.setStatus(`terminal failed: ${(e as Error).message}`, "error");
         }
     }
 
@@ -668,13 +745,16 @@ export class CruiserService {
         const h = this.handles.get(name);
         if (!h) return;
         const f = st.create;
-        if (f.cpus < 1 || f.cpus > 64) { st.setStatus("vCPUs must be between 1 and 64"); return; }
-        if (f.memMiB < 512) { st.setStatus("memory must be at least 512 MiB"); return; }
-        if (f.diskGiB < h.spec.disk.sizeGiB) { st.setStatus("disk can only grow"); return; }
+        if (f.cpus < 1 || f.cpus > 64) { st.setStatus("vCPUs must be between 1 and 64", "warn"); return; }
+        if (f.memMiB < 512) { st.setStatus("memory must be at least 512 MiB", "warn"); return; }
+        if (f.diskGiB < h.spec.disk.sizeGiB) { st.setStatus("disk can only grow", "warn"); return; }
         if (f.diskGiB !== h.spec.disk.sizeGiB && h.isRunning()) {
-            st.setStatus("stop the VM before growing the disk");
+            st.setStatus("stop the VM before growing the disk", "warn");
             return;
         }
+        // LUKS resize needs the passphrase — park the whole save on the
+        // unlock banner when prompt-mode has no key on file.
+        if (f.diskGiB !== h.spec.disk.sizeGiB && !this.diskKeyReady(h, "grow")) return;
         await this.run(`save ${name}`, async () => {
             const prev = h.spec;
             // Clone-then-validate: a schema rejection must not leave h.spec
@@ -705,8 +785,7 @@ export class CruiserService {
             // re-places its window + retargets the KWin map rule right now.
             if (prev.display.headMode !== spec.display.headMode
                 || prev.display.virtualDesktop !== spec.display.virtualDesktop)
-                this.viewers.get(name)?.viewer.applyDisplaySpec(spec.display)
-                    .catch((e) => this.store.getState().setStatus(`${name} viewer placement failed: ${(e as Error).message}`));
+                this.applyLiveDisplay(h);
             st.resetCreate();
             st.setRoute("vm", name);
             return h.isRunning() ? bootRelevantChanges(prev, spec) : [];
@@ -715,6 +794,19 @@ export class CruiserService {
                 ? `saved ${name} — restart to apply: ${pending.join(", ")}`
                 : `saved ${name}`,
         });
+    }
+
+    /** Push h.spec.display into the VM's live viewer: the tracked session
+     *  when there is one, else a throwaway session that adopts the detached
+     *  window by title (it never respawns the viewer). Fire-and-forget —
+     *  placement failure is a status note, not a save failure. */
+    private applyLiveDisplay(h: VmHandle): void {
+        const name = h.spec.name;
+        const v = this.viewers.get(name)?.viewer ?? new ViewerSession(h.spec, {
+            log: (m) => this.store.getState().setStatus(`${name}: ${m}`),
+        });
+        v.applyDisplaySpec(h.spec.display)
+            .catch((e) => this.store.getState().setStatus(`${name} viewer placement failed: ${(e as Error).message}`, "error"));
     }
 
     /** Open (or raise) the VM's viewer in the background — RDP may take tens
@@ -778,7 +870,7 @@ export class CruiserService {
             await this.ensureViewer(h);
             if (this.viewers.has(name)) st.setStatus(`${name} viewer opened`);
         } catch (e) {
-            st.setStatus(`viewer for ${name}: ${e instanceof Error ? e.message : e}`);
+            st.setStatus(`viewer for ${name}: ${e instanceof Error ? e.message : e}`, "error");
         } finally {
             if (ours && this.store.getState().action === ours) st.setAction(null);
         }
@@ -786,8 +878,9 @@ export class CruiserService {
 
     async snapshot(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
+        if (!this.diskKeyReady(h, "snapshot")) return;
         if (h.isRunning()) {
-            this.store.getState().setStatus(`stop ${name} before taking a snapshot — qemu-img needs the disk offline`);
+            this.store.getState().setStatus(`stop ${name} before taking a snapshot — qemu-img needs the disk offline`, "warn");
             return;
         }
         await this.run(`snapshot ${name}`, () => h.snapshot(`snap-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}`),
@@ -796,13 +889,15 @@ export class CruiserService {
     }
     async restoreSnapshot(name: string, snap: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
+        if (!this.diskKeyReady(h, "restore", snap)) return;
         await this.run(`restore ${snap}`, () => h.restoreSnapshot(snap), { vm: name, verb: "restoring" });
         this.invalidateSnaps(name);
     }
     async deleteSnapshot(name: string, snap: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
+        if (!this.diskKeyReady(h, "snapdel", snap)) return;
         if (h.isRunning()) {
-            this.store.getState().setStatus(`stop ${name} before deleting a snapshot — qemu-img needs the disk offline`);
+            this.store.getState().setStatus(`stop ${name} before deleting a snapshot — qemu-img needs the disk offline`, "warn");
             return;
         }
         await this.run(`delete snapshot ${snap}`, () => h.deleteSnapshot(snap), { vm: name, verb: "deleting snapshot" });
@@ -813,8 +908,9 @@ export class CruiserService {
      *  is reflinked/converted without its snapshots; ports re-allocate. */
     async cloneVm(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
+        if (!this.diskKeyReady(h, "clone")) return;
         if (h.isRunning()) {
-            this.store.getState().setStatus(`stop ${name} before cloning it`);
+            this.store.getState().setStatus(`stop ${name} before cloning it`, "warn");
             return;
         }
         let newName = `${name}-copy`;
@@ -843,7 +939,7 @@ export class CruiserService {
     async importConfig(): Promise<void> {
         const st = this.store.getState();
         const ref = st.create.importRef.trim();
-        if (!ref) { st.setStatus("paste a gist url/id or a config file path first"); return; }
+        if (!ref) { st.setStatus("paste a gist url/id or a config file path first", "warn"); return; }
         await this.run(`import ${ref}`, async () => {
             const P = await import("../../vm-core/src/config/portable");
             const { doc, origin } = await P.loadPortableRef(ref);
@@ -904,12 +1000,19 @@ export class CruiserService {
     async gistPull(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
         if (!h.spec.origin) {
-            this.store.getState().setStatus(`${name} has no origin — push or import it first`);
+            this.store.getState().setStatus(`${name} has no origin — push or import it first`, "warn");
             return;
         }
         await this.run(`pull config for ${name}`, async () => {
             const P = await import("../../vm-core/src/config/portable");
-            return (await P.pullConfigFromOrigin(h)).needsRestart;
+            const prev = h.spec.display;
+            const { needsRestart } = await P.pullConfigFromOrigin(h);
+            // A pulled headMode/virtualDesktop is a live field — re-place the
+            // running viewer instead of waiting for a viewer relaunch.
+            if (prev.headMode !== h.spec.display.headMode
+                || prev.virtualDesktop !== h.spec.display.virtualDesktop)
+                this.applyLiveDisplay(h);
+            return needsRestart;
         }, {
             done: (nr) => nr.length ? `pulled — applies at next boot: ${nr.join(", ")}` : "pulled — nothing boot-relevant changed",
             vm: name, verb: "pulling",
@@ -926,7 +1029,7 @@ export class CruiserService {
         const h = this.handles.get(name); if (!h) return;
         const st = this.store.getState();
         const f = st.shareForm;
-        if (!f.hostPath.trim()) { st.setStatus("set a host path for the share first"); return; }
+        if (!f.hostPath.trim()) { st.setStatus("set a host path for the share first", "warn"); return; }
         await this.run(`add share`, async () => {
             const next = JSON.parse(JSON.stringify(h.spec)) as VmSpec;
             next.shares.push(makeShare(next, {
@@ -978,7 +1081,7 @@ export class CruiserService {
     /** Run the copy-mode shares once, right now. */
     async filesyncNow(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
-        if (!h.isRunning()) { this.store.getState().setStatus(`${name} isn't running`); return; }
+        if (!h.isRunning()) { this.store.getState().setStatus(`${name} isn't running`, "warn"); return; }
         await this.run(`file sync`, async () => {
             const { FileSyncs } = await import("../../provision/src/filesync");
             await new FileSyncs(h, (m) => this.store.getState().setStatus(`${name}: ${m}`)).applyOnce();
@@ -1001,6 +1104,21 @@ export class CruiserService {
             rows.push({ label: "tool: gh (gist push)", ok: !!(await which("gh")), fix: "apt install gh + gh auth login, or set GITHUB_TOKEN" });
             const tc = await resolveToolchain().catch(() => null);
             rows.push({ label: "qemu toolchain", ok: !!tc, fix: "cruiser toolchain build" });
+            if (tc) {
+                // qcow2 LUKS — the --encrypt option needs QEMU's crypto
+                // backend (gcrypt/nettle); a tiny keyed create is the probe.
+                const key = join("/var/tmp", `cruiser-doctor-key-${process.pid}`);
+                const img = join("/var/tmp", `cruiser-doctor-luks-${process.pid}.qcow2`);
+                const { writeFile: wf, rm: rmp } = await import("node:fs/promises");
+                await wf(key, "doctor", { mode: 0o600 });
+                const luks = await run(tc.qemuImg, ["create", "-f", "qcow2",
+                    "--object", `secret,id=diskkey,file=${key}`,
+                    "-o", "encrypt.format=luks,encrypt.key-secret=diskkey",
+                    img, "1G"], { noThrow: true, env: { LD_LIBRARY_PATH: tc.ldLibraryPath } });
+                await rmp(key, { force: true }); await rmp(img, { force: true });
+                rows.push({ label: "qemu LUKS disk encryption", ok: luks.code === 0,
+                    fix: `qemu-img lacks crypto support — encryption (--encrypt) won't work${luks.stderr ? `: ${luks.stderr.trim().slice(0, 80)}` : ""}` });
+            }
             const { ovmfCode } = await import("../../vm-core/src/qemu/args");
             rows.push({ label: "OVMF firmware", ok: existsSync(ovmfCode()), fix: "apt install ovmf" });
             const usbDevs = await listUsbDevices().catch(() => []);
@@ -1011,16 +1129,19 @@ export class CruiserService {
         });
     }
 
-    /** Probe a disk image's real format for `method:"imported"` (qcow2/raw/vmdk/…). */
-    private async probeImageFormat(path: string): Promise<string> {
+    /** Probe a disk image's real format + LUKS flag for `method:"imported"`.
+     *  `qemu-img info` reads LUKS headers without the key, so the probe is
+     *  safe on encrypted images (mutations are what need it). */
+    private async probeImage(path: string): Promise<{ format: string; encrypted: boolean }> {
         try {
             const { resolveToolchain } = await import("../../vm-core/src/qemu/resolve");
             const tc = await resolveToolchain();
             const r = await run(tc.qemuImg, ["info", "--output=json", path]);
-            const fmt = JSON.parse(r.stdout)?.format;
-            if (typeof fmt === "string" && fmt) return fmt;
+            const j = JSON.parse(r.stdout);
+            if (typeof j?.format === "string" && j.format)
+                return { format: j.format, encrypted: j.encrypted === true };
         } catch { /* qemu-img unavailable — fall through to default */ }
-        return "qcow2";
+        return { format: "qcow2", encrypted: false };
     }
 }
 

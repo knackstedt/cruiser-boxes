@@ -57,6 +57,7 @@ function installFakeVm({ store }: DevHarnessCtx): void {
         cpus: 4, memMiB: 8192, diskGiB: 64, nestedVirt: false, sshPort: 4022, rdpPort: 43389,
         provisioned: "cloudimg", persist: "daemonize", snapshots: [], vd: 0, usbKeys: [],
         username: "cruiser", hasPassword: true,
+        encrypt: "off", keyStorage: "store", diskLocked: false,
         snapAuto: "off", snapTrigger: "stop", snapKeep: 5,
         description: "fake VM for the screenshot harness",
         origin: "gist:0123456789abcdef0123456789abcdef",

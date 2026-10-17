@@ -7,8 +7,8 @@
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { run } from "../../sys/src/exec";
 import { CLOUDIMG_DIR, vmPaths, diskPath } from "../../vm-core/src/paths";
+import { createOverlay, requireDiskKeyFile } from "../../vm-core/src/disk/ops";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { buildSeedIso, cloudimgUserData, metaData, passwordHash, type SeedOpts } from "./nocloud";
 import { cloudImageFor, defaultRelease } from "./distros";
@@ -46,12 +46,16 @@ export async function provisionCloudimg(
     await fetchImg(url, base);
 
     // qcow2 overlay sized to spec — at spec.disk.file, which may live outside
-    // the vm dir (custom disk location).
+    // the vm dir (custom disk location). disk.encrypt="full" makes the
+    // overlay LUKS (the shared plaintext backing stays untouched); "home"
+    // leaves this overlay plaintext — the second image is created on first
+    // boot by VmHandle.ensureAuxDisks.
     const disk = diskPath(spec, paths.dir);
+    const keyFile = spec.disk.encrypt === "full" ? requireDiskKeyFile(spec, paths) : undefined;
     await mkdir(paths.dir, { recursive: true });
     await mkdir(dirname(disk), { recursive: true });
     if (!existsSync(disk))
-        await run(qemuImg, ["create", "-f", "qcow2", "-b", base, "-F", "qcow2", disk, `${spec.disk.sizeGiB}G`]);
+        await createOverlay(qemuImg, base, "qcow2", disk, spec.disk.sizeGiB, keyFile);
 
     const hash = await passwordHash(o.password);
     const opts: SeedOpts = {

@@ -18,7 +18,7 @@ import { mark } from "./startup-profile";
 
 const log = createLogger("info");
 
-const NUM_FIELDS: Set<string> = new Set(["cpus", "memMiB", "diskGiB", "snapKeep"]);
+const NUM_FIELDS: Set<string> = new Set(["cpus", "memMiB", "diskGiB", "snapKeep", "homeGiB"]);
 const BOOL_FIELDS: Set<string> = new Set([
     "snap", "extraFonts", "autologin", "nestedVirt",
     "syncTheme", "syncAccent", "syncContrast", "syncTimezone", "syncLocale",
@@ -202,7 +202,7 @@ export class CruiserShell {
             if (!d.key) return;
             const dev = st().usbDevices.find((u) => u.key === d.key);
             if (dev && !dev.writable) {
-                st().setStatus(`${dev.label}: no host access — run doctor for the udev fix`);
+                st().setStatus(`${dev.label}: no host access — run doctor for the udev fix`, "warn");
                 return;
             }
             st().toggleUsb(d.key);
@@ -260,6 +260,8 @@ export class CruiserShell {
         this.host.onAction("vm-clone", (d) => { if (d.vm) void svc.cloneVm(d.vm); });
         this.host.onAction("autosnap-skip", (d) => { if (d.vm) void svc.autoSnapSkip(d.vm); });
         this.host.onAction("autosnap-purge", (d) => { if (d.vm) void svc.autoSnapPurge(d.vm); });
+        this.host.onAction("unlock-go", (d) => { if (d.vm) void svc.unlockGo(d.vm); });
+        this.host.onAction("unlock-cancel", () => { void svc.unlockCancel(); });
         this.host.onAction("doctor", () => { svc.runDoctor(); });
         this.host.onAction("import-config", () => { void svc.importConfig(); });
         this.host.onAction("vm-export", (d) => { if (d.vm) void svc.exportConfig(d.vm); });
@@ -322,6 +324,9 @@ export class CruiserShell {
             // vm-desc / share-* bind outside the create form — write directly
             // (a re-render would destroy the focused input).
             if (field === "vm-desc") { this.store.getState().setVmDesc(String(ev.v)); return; }
+            // unlock-pw binds to the banner state, not the create form —
+            // same direct-write treatment (and it never renders back).
+            if (field === "unlock-pw") { this.store.setState({ unlockPw: String(ev.v) }); return; }
             if (field.startsWith("share-")) {
                 this.store.getState().setShareForm({ [field.slice(6)]: ev.v } as never);
                 return;

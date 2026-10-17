@@ -597,8 +597,15 @@ extern "C" {
     fn XChangeProperty(d: *mut std::ffi::c_void, w: u64, prop: u64, typ: u64,
                        fmt: i32, mode: i32, data: *const u8, nelem: i32);
     fn XFlush(d: *mut std::ffi::c_void);
-    fn XkbGetNamedIndicator(d: *mut std::ffi::c_void, device_spec: u32, name: u64,
-                            ndx: *mut i32, state: *mut i32, map: *mut std::ffi::c_void) -> i32;
+    // XkbGetNamedIndicator is the CORE-keyboard entry point — there is no
+    // device_spec arg (that variant is XkbGetNamedDeviceIndicator). An extra
+    // arg here once silently shifted every parameter one slot and made the
+    // probe fail forever.
+    fn XkbGetNamedIndicator(d: *mut std::ffi::c_void, name: u64,
+                            ndx: *mut i32, state: *mut i32,
+                            map: *mut std::ffi::c_void, real: *mut i32) -> i32;
+    // XkbStateRec — only locked_mods (byte offset 9) is read.
+    fn XkbGetState(d: *mut std::ffi::c_void, device_spec: u32, state: *mut XkbStateRec) -> i32;
     fn XGrabKeyboard(d: *mut std::ffi::c_void, grab_window: u64, owner_events: i32,
                      pointer_mode: i32, keyboard_mode: i32, time: u64) -> i32;
     fn XUngrabKeyboard(d: *mut std::ffi::c_void, time: u64) -> i32;
@@ -746,20 +753,31 @@ struct XClientMsgEv {
     data: [u64; 5],
 }
 
-/// Host NumLock via the XKB "Num Lock" virtual indicator (XkbUseCoreKbd
-/// device). Going through the named indicator instead of locked_mods &
-/// Mod2 keeps working if the numlock modifier got remapped.
+#[repr(C)]
+struct XkbStateRec([u8; 18]);
+
+/// Host NumLock via the XKB "Num Lock" virtual indicator. Going through the
+/// named indicator instead of locked_mods & Mod2 keeps working if the
+/// numlock modifier got remapped; a keymap that never bound a name to the
+/// indicator falls back to the Mod2 bit — a permanently dead probe means
+/// the reconcile below never runs and the guest numpad stays inverted
+/// forever.
 fn host_numlock(dpy: *mut std::ffi::c_void, num_atom: u64) -> Option<bool> {
     if dpy.is_null() || num_atom == 0 { return None; }
     let mut ndx = 0i32;
     let mut st = 0i32;
+    let mut real = 0i32;
     unsafe {
-        if XkbGetNamedIndicator(dpy, 0x0100, num_atom, &mut ndx, &mut st,
-                                std::ptr::null_mut()) != 0 {
-            Some(st != 0)
-        } else {
-            None
+        if XkbGetNamedIndicator(dpy, num_atom, &mut ndx, &mut st,
+                                std::ptr::null_mut(), &mut real) != 0 {
+            return Some(st != 0);
         }
+        let mut s = XkbStateRec([0; 18]);
+        // XkbGetState returns a Status — 0 == Success.
+        if XkbGetState(dpy, 0x0100 /* XkbUseCoreKbd */, &mut s) == 0 {
+            return Some(s.0[9] & 0x10 != 0); // locked_mods & Mod2Mask
+        }
+        None
     }
 }
 

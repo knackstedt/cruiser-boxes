@@ -5,13 +5,13 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, writeFile, readFile, copyFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 
 import type { VmSpec } from "../config/schema";
 import { parseVmSpec } from "../config/schema";
 import { bootRelevantChanges } from "../config/boot-diff";
-import { vmPaths, diskPath as resolveDiskPath, type VmPaths } from "../paths";
+import { vmPaths, diskPath as resolveDiskPath, diskKeyPath, homeDiskPath as resolveHomeDiskPath, type VmPaths } from "../paths";
 import { buildArgs, ovmfVarsTemplate, type BuildOpts, type BuiltArgs } from "../qemu/args";
 import { resolveToolchain, type Toolchain } from "../qemu/resolve";
 import { QmpClient } from "../qmp/client";
@@ -70,6 +70,62 @@ export class VmHandle {
 
     async saveSpec(): Promise<void> {
         await writeFile(this.paths.spec, JSON.stringify(this.spec, null, 2) + "\n");
+    }
+
+    // ── LUKS disk key ──
+    // qcow2 encrypt.format=luks encrypts the image file at rest; QEMU and
+    // qemu-img both unlock it through a `-object secret,file=` pointer.
+    // keyStorage "store" keeps that passphrase at secrets/disk-key (0600);
+    // "prompt" keeps it only in the caller's memory, writing run/disk-key
+    // transiently per launch/op and deleting it right after.
+
+    /** The key file QEMU/qemu-img unlock the image(s) with, or null when
+     *  absent (prompt mode before an unlock, or a store-mode VM missing
+     *  its secrets file). */
+    diskKeyFile(): string | null {
+        const p = diskKeyPath(this.spec, this.paths);
+        return p && existsSync(p) ? p : null;
+    }
+
+    /** Hand the passphrase to the VM — writes it at the keyStorage path
+     *  (secrets/disk-key for "store"; transient run/disk-key for
+     *  "prompt", cleared by start()/clearDiskKey/cleanup). */
+    async provideDiskKey(plain: string): Promise<string> {
+        const p = diskKeyPath(this.spec, this.paths);
+        if (!p) throw new Error(`${this.spec.name} isn't encrypted`);
+        await mkdir(dirname(p), { recursive: true });
+        await writeFile(p, plain, { mode: 0o600 });
+        return p;
+    }
+
+    /** Drop the transient run/ key file — a prompt-mode passphrase never
+     *  sits on disk outside the launch/op that needed it. Store-mode's
+     *  secrets/ copy is left alone (it's the persistent one). */
+    async clearDiskKey(): Promise<void> {
+        if (this.spec.disk.encrypt === "off") return;
+        const p = diskKeyPath(this.spec, this.paths);
+        if (p && this.spec.disk.keyStorage === "prompt")
+            await rm(p, { force: true }).catch(() => {});
+    }
+
+    /** Key for a READ-level disk op — keyed when the file happens to be
+     *  present, plain otherwise (qemu-img info reads LUKS headers fine
+     *  without the secret; the mutation ops below hard-require it). */
+    private diskKeyRead(): string | undefined {
+        if (this.spec.disk.encrypt === "off") return undefined;
+        return this.diskKeyFile() ?? undefined;
+    }
+
+    /** Key for a MUTATING disk op — throws when the disk is encrypted and
+     *  no passphrase has been provided this session. */
+    private needDiskKey(): string | undefined {
+        if (this.spec.disk.encrypt === "off") return undefined;
+        return disk.requireDiskKeyFile(this.spec, this.paths);
+    }
+
+    /** The encrypted /home image's path (disk.encrypt="home"). */
+    homeDiskPath(): string {
+        return resolveHomeDiskPath(this.spec, this.paths.dir);
     }
 
     // ── state probing ──
@@ -175,11 +231,32 @@ export class VmHandle {
         return buildArgs(this.spec, this.paths, opts, { ldLibraryPath: this.toolchain.ldLibraryPath });
     }
 
+    /** Materialize boot-attached images that aren't the system disk —
+     *  currently the encrypt="home" image. Runs inside start() (before
+     *  argv/spawn) so every boot path — cli start, provision's first boot,
+     *  the UI — sees the same devices; the ISO-install spawn calls it
+     *  directly since it bypasses start(). */
+    async ensureAuxDisks(): Promise<void> {
+        if (this.spec.disk.encrypt !== "home") return;
+        const hp = this.homeDiskPath();
+        if (existsSync(hp)) return;
+        const kp = this.needDiskKey();
+        await mkdir(dirname(hp), { recursive: true });
+        await disk.createDisk((await this.tc()).qemuImg, hp, this.spec.disk.homeGiB, kp);
+        void appendVmLog(this.paths, `created encrypted home image ${hp} (${this.spec.disk.homeGiB}G)`);
+    }
+
     async start(opts: BuildOpts & { timeoutMs?: number } = {}): Promise<void> {
         if (this.isRunning()) return;
         if (!existsSync(this.diskPath())) throw new Error(`no disk at ${this.diskPath()} — provision first`);
         this.toolchain ??= await resolveToolchain();
+        // LUKS: the passphrase must resolve to a key file before QEMU
+        // parses argv — fail here, before any daemon spawn.
+        if (this.spec.disk.encrypt !== "off") this.needDiskKey();
         await mkdir(this.paths.run, { recursive: true });
+        // The "home" image materializes on first boot (after run/ exists —
+        // ensureAuxDisks logs into it).
+        if (this.spec.disk.encrypt !== "off") await this.ensureAuxDisks();
         if (!existsSync(this.paths.ovmfVars)) await copyFile(ovmfVarsTemplate(), this.paths.ovmfVars);
 
         const built = await this.buildArgv(opts);
@@ -235,6 +312,12 @@ export class VmHandle {
             // orphans (and a retry would stack dup listeners on the sockets).
             this.killVfsd();
             throw e;
+        } finally {
+            // QEMU consumed the secret during init — a -daemonize parent
+            // only returns once the child is fully up, and the owned path
+            // gates on the QMP handshake. A prompt-mode key never outlives
+            // the launch it unlocked.
+            await this.clearDiskKey();
         }
     }
 
@@ -297,6 +380,7 @@ export class VmHandle {
     private cleanupRunDir(): void {
         this.killVfsd();
         if (this.vfsdTimer) { clearInterval(this.vfsdTimer); this.vfsdTimer = null; }
+        void this.clearDiskKey();   // kill/crash edge — drop any leftover run/disk-key
     }
 
     /** virtiofsd's <socket>.pid is MULTI-LINE (supervisor pid, then sandbox
@@ -415,32 +499,42 @@ export class VmHandle {
         return resolveDiskPath(this.spec, this.paths.dir);
     }
 
-    async diskInfo() { return disk.diskInfo((await this.tc()).qemuImg, this.diskPath()); }
-    async snapshots() { return disk.snapshotList((await this.tc()).qemuImg, this.diskPath()); }
+    async diskInfo() { return disk.diskInfo((await this.tc()).qemuImg, this.diskPath(), this.diskKeyRead()); }
+    async snapshots() { return disk.snapshotList((await this.tc()).qemuImg, this.diskPath(), this.diskKeyRead()); }
     async snapshot(name: string) {
         if (this.isRunning()) throw new Error("stop the VM before taking a snapshot (qemu-img needs the disk offline)");
-        return disk.snapshotCreate((await this.tc()).qemuImg, this.diskPath(), name);
+        return disk.snapshotCreate((await this.tc()).qemuImg, this.diskPath(), name, this.needDiskKey());
     }
     async restoreSnapshot(name: string) {
         if (this.isRunning()) throw new Error("stop the VM before restoring a snapshot");
-        return disk.snapshotApply((await this.tc()).qemuImg, this.diskPath(), name);
+        return disk.snapshotApply((await this.tc()).qemuImg, this.diskPath(), name, this.needDiskKey());
     }
     async deleteSnapshot(name: string) {
         if (this.isRunning()) throw new Error("stop the VM before deleting a snapshot");
-        return disk.snapshotDelete((await this.tc()).qemuImg, this.diskPath(), name);
+        return disk.snapshotDelete((await this.tc()).qemuImg, this.diskPath(), name, this.needDiskKey());
     }
     async resizeDisk(newSizeGiB: number) {
         if (this.isRunning()) throw new Error("stop the VM before resizing the disk (guest growfs happens next boot)");
-        return disk.resizeDisk((await this.tc()).qemuImg, this.diskPath(), newSizeGiB);
+        return disk.resizeDisk((await this.tc()).qemuImg, this.diskPath(), newSizeGiB, this.needDiskKey());
     }
     async backup(destPath: string) {
         if (this.isRunning()) {
+            // Encrypted source: the backup target is LUKS too — a plaintext
+            // copy would silently defeat the encryption. blockdev-add needs
+            // the file to exist, so pre-create it keyed with the same
+            // passphrase the running QEMU already holds (id "diskkey").
+            const key = this.needDiskKey();
+            if (key && !existsSync(destPath)) {
+                const info = await this.diskInfo();
+                await disk.createDisk((await this.tc()).qemuImg, destPath,
+                    Math.ceil(info.virtualSize / (1 << 30)), key);
+            }
             return this.withQmp(async (q) => {
                 const node = await disk.diskNodeName(q, this.diskPath());
-                return disk.backupLive(q, node, destPath);
+                return disk.backupLive(q, node, destPath, this.spec.disk.encrypt !== "off");
             });
         }
-        return disk.backupOffline((await this.tc()).qemuImg, this.diskPath(), destPath);
+        return disk.backupOffline((await this.tc()).qemuImg, this.diskPath(), destPath, "qcow2", this.needDiskKey());
     }
 
     // ── usb ──

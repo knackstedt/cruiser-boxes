@@ -6,6 +6,7 @@
 import { VmSpec } from "../../vm-core/src/config/schema";
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import { appendVmLog } from "../../vm-core/src/logs";
+import { requireDiskKeyFile } from "../../vm-core/src/disk/ops";
 import { detectAdapter } from "../../host-int/src/detect";
 import { guestLayoutFromHost, hostMirroredGuestMonitors } from "./monitors";
 import { provisionCloudimg } from "./cloudimg";
@@ -77,6 +78,11 @@ async function wallpaperApply(h: VmHandle, o: ProvisionOpts): Promise<void> {
 /** Cloud image path: fetch img → overlay disk → seed → boot → agent → setup. */
 export async function provisionVmCloudimg(h: VmHandle, o: ProvisionOpts): Promise<void> {
     const spec = h.spec;
+    // LUKS gate: the passphrase must already sit at the key path (caller
+    // wrote it via provideDiskKey — secrets/ for store, run/ for prompt).
+    // The overlay create + every boot need it.
+    requireDiskKeyFile(spec, h.paths);
+    try {
     const pw = await ensurePassword(spec, o);
     const { pubText } = await (await import("../../vm-core/src/sshkey")).ensureKeypair();
     const sshKeys = [...(o.sshKeys ?? []), pubText];
@@ -104,11 +110,17 @@ export async function provisionVmCloudimg(h: VmHandle, o: ProvisionOpts): Promis
     spec.provisioned.completedAt = new Date().toISOString();
     await h.saveSpec();
     log(h, o, `provisioned ${spec.name} — connect with 'cruiser vm view ${spec.name}'`);
+    } finally {
+        // prompt mode: drop run/disk-key — QEMU holds the secret in memory.
+        await h.clearDiskKey();
+    }
 }
 
 /** ISO path: autoinstall to disk (long), then normal boot + guest setup. */
 export async function provisionVmIso(h: VmHandle, o: ProvisionOpts): Promise<void> {
     const spec = h.spec;
+    requireDiskKeyFile(spec, h.paths);
+    try {
     const pw = await ensurePassword(spec, o);
     const { pubText } = await (await import("../../vm-core/src/sshkey")).ensureKeypair();
     const sshKeys = [...(o.sshKeys ?? []), pubText];
@@ -138,6 +150,9 @@ export async function provisionVmIso(h: VmHandle, o: ProvisionOpts): Promise<voi
     spec.provisioned.completedAt = new Date().toISOString();
     await h.saveSpec();
     log(h, o, `provisioned ${spec.name} — connect with 'cruiser vm view ${spec.name}'`);
+    } finally {
+        await h.clearDiskKey();
+    }
 }
 
 /** Re-run just the in-guest setup on an already-provisioned VM. */

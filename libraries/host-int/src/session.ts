@@ -65,26 +65,8 @@ export class ViewerSession extends EventEmitter {
         const d = this.spec.display;
         const logFile = join(vmPaths(this.spec.name).run, dmabuf ? "viewer-dd.log" : "freerdp.log");
 
-        // Guest composite layout for the virtio tablet: the guest maps the
-        // single absolute pointer over the whole composite and QEMU scales
-        // per-console, so the viewer needs each console's composite offset
-        // (host-mirror positions, normalized — same shape guestKdeMonitorsScript
-        // pushes). `rects` are the picked monitors in absolute px — viewer-dd
-        // spans ONE window over their union (freerdp /multimon semantics).
-        // Console order = picked monitor order = virtio outputs[].
-        const ddGeo: { offsets?: string; rects?: string } = {};
-        if (dmabuf && this.adapter.caps.monitors) {
-            const host = await this.adapter.monitors().catch(() => []);
-            const picked = d.monitors === "all" ? host : host.filter((m) => d.monitors.includes(m.name));
-            if (picked.length > 1) {
-                const ox = Math.min(...picked.map((m) => m.x));
-                const oy = Math.min(...picked.map((m) => m.y));
-                ddGeo.offsets = picked.map((m) => `${m.x - ox},${m.y - oy}`).join(" ");
-            }
-            if (picked.length && d.headMode !== "windowed")
-                ddGeo.rects = picked.map((m) => `${m.x},${m.y},${m.w},${m.h}`).join(" ");
-        }
-        this.ddGeo = ddGeo;
+        this.ddGeo = await this.computeDdGeo();
+        const ddGeo = this.ddGeo;
 
         // Adopt a live viewer for this VM when its window exists — killing a
         // healthy console because a different session owns it reads as a
@@ -229,6 +211,30 @@ export class ViewerSession extends EventEmitter {
     /** Post-map placement per headMode. Runs once at open() and again from
      *  applyDisplaySpec when an edit-form save changes the live display
      *  fields under a running viewer. */
+    /** Guest composite layout for the virtio tablet: the guest maps the
+     *  single absolute pointer over the whole composite and QEMU scales
+     *  per-console, so the viewer needs each console's composite offset
+     *  (host-mirror positions, normalized — same shape guestKdeMonitorsScript
+     *  pushes). `rects` are the picked monitors in absolute px — viewer-dd
+     *  spans ONE window over their union (freerdp /multimon semantics).
+     *  Console order = picked monitor order = virtio outputs[]. */
+    private async computeDdGeo(): Promise<{ offsets?: string; rects?: string }> {
+        const d = this.spec.display;
+        const ddGeo: { offsets?: string; rects?: string } = {};
+        if (d.viewer === "dmabuf" && this.adapter.caps.monitors) {
+            const host = await this.adapter.monitors().catch(() => []);
+            const picked = d.monitors === "all" ? host : host.filter((m) => d.monitors.includes(m.name));
+            if (picked.length > 1) {
+                const ox = Math.min(...picked.map((m) => m.x));
+                const oy = Math.min(...picked.map((m) => m.y));
+                ddGeo.offsets = picked.map((m) => `${m.x - ox},${m.y - oy}`).join(" ");
+            }
+            if (picked.length && d.headMode !== "windowed")
+                ddGeo.rects = picked.map((m) => `${m.x},${m.y},${m.w},${m.h}`).join(" ");
+        }
+        return ddGeo;
+    }
+
     private async placeWindow(): Promise<void> {
         const d = this.spec.display;
         const dmabuf = d.viewer === "dmabuf";
@@ -261,7 +267,17 @@ export class ViewerSession extends EventEmitter {
      *  map rule and re-places the window instead of waiting for relaunch. */
     async applyDisplaySpec(d: VmSpec["display"]): Promise<void> {
         this.spec.display = { ...d };
+        // An ad-hoc session (viewer adopted by a later UI/cli save) never
+        // ran open() — recompute the span geometry so placeWindow still
+        // knows a self-spanned dmabuf window skips the moveToMonitor hint.
+        if (!this.ddGeo.rects) this.ddGeo = await this.computeDdGeo();
         await this.installVdRule();
+        // The viewer process is detached and outlives whatever spawned it —
+        // a save in a later UI session (or after a cli-launched viewer) has
+        // no tracked window here. Adopt it by title; a genuinely dead
+        // viewer leaves placeWindow a no-op while the rule still lands.
+        if (!this.window)
+            this.window = await this.adapter.findWindow({ title: this.titleRe() }, 1_500).catch(() => null);
         await this.placeWindow();
     }
 
