@@ -84,6 +84,7 @@ usage: cruiser <area> <command> [args]
   vm restore <name> <snapname>          vm snapshot-rm <name> <snapname>
   vm backup <name> <dest.qcow2>         vm resize <name> <newGiB>
   vm clone <name> <newname>             clone a stopped VM — fresh ports, disk copied without snapshots
+  vm rename <name> <newname>            rename a stopped VM (moves the vm dir, keeps everything)
   vm rm <name> [--disk]                vm view <name>   launch freerdp viewer + place window
   vm ssh <name> [cmd...]               interactive guest shell (or run cmd) over the cruiser key
   vm cp <name>:<path> <local>          pull a file from the guest (QGA, ssh fallback)
@@ -376,6 +377,15 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const out = await h.stop();
             console.log(out === "stopped" ? "stopped" : "still running — guest ignored shutdown; use kill");
             if (out === "stopped") await cliAutoSnap(h, "stop");
+            break;
+        }
+        case "rename": {
+            await needVm(args[0]);
+            if (!args[1]) usage();
+            try {
+                const nh = await registry.rename(args[0]!, args[1]);
+                console.log(`renamed ${args[0]} → ${nh.spec.name}`);
+            } catch (e) { console.error(`rename failed: ${e instanceof Error ? e.message : e}`); process.exit(1); }
             break;
         }
         case "clone": {

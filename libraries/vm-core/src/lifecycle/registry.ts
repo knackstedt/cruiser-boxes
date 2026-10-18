@@ -6,7 +6,7 @@
 // to monitor/qga sockets.
 // ============================================================================
 
-import { readdir, readFile, copyFile, cp, mkdir } from "node:fs/promises";
+import { readdir, readFile, copyFile, cp, mkdir, rename as fsRename, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { existsSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
@@ -186,6 +186,41 @@ export class VmRegistry extends EventTarget {
             throw e;
         }
         return h;
+    }
+
+    /** Rename a stopped VM: move the vm dir, update spec.name, and repoint
+     *  spec fields that held paths inside the old dir (an absolute
+     *  disk.file/passwordFile/gitSshKeyPath under it moves with it — an
+     *  external path stays valid). The vsock guest CID is name-derived and
+     *  changes too — nothing persists it. */
+    async rename(oldName: string, newName: string): Promise<VmHandle> {
+        const h = this.vms.get(oldName);
+        if (!h) throw new Error(`unknown vm '${oldName}'`);
+        if (h.isRunning()) throw new Error(`stop '${oldName}' before renaming it`);
+        if (this.vms.has(newName)) throw new Error(`vm '${newName}' already exists`);
+        if (!/^[a-z0-9][a-z0-9-]*$/.test(newName))
+            throw new Error("name must be lowercase letters/digits/dashes (e.g. 'dev-box')");
+        const dst = vmPaths(newName);
+        if (existsSync(dst.dir)) throw new Error(`target dir already exists: ${dst.dir}`);
+        const oldDir = h.paths.dir;
+        await fsRename(oldDir, dst.dir);
+        try {
+            const spec = h.spec;
+            spec.name = newName;
+            const repoint = (p?: string) => p?.startsWith(`${oldDir}/`) ? join(dst.dir, p.slice(oldDir.length + 1)) : p;
+            spec.disk.file = repoint(spec.disk.file)!;
+            spec.credentials.passwordFile = repoint(spec.credentials.passwordFile);
+            spec.credentials.gitSshKeyPath = repoint(spec.credentials.gitSshKeyPath);
+            await writeFile(dst.spec, JSON.stringify(spec, null, 2) + "\n");
+        } catch (e) {
+            await fsRename(dst.dir, oldDir).catch(() => {});
+            throw e;
+        }
+        const nh = await VmHandle.load(newName);
+        this.vms.delete(oldName);
+        this.vms.set(newName, nh);
+        this.dispatchEvent(new Event("change"));
+        return nh;
     }
 
     async remove(name: string, { deleteDisk = false } = {}): Promise<void> {
