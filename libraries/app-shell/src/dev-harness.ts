@@ -58,7 +58,7 @@ export function initDevHarness(ctx: DevHarnessCtx): void {
  *  (smoke runs with screenshots verify textures survive partial updates). */
 function installFakeVm({ store }: DevHarnessCtx, env: NodeJS.ProcessEnv): void {
     const fake: VmSummary = {
-        name: "fake-runner", state: "running", gpuMode: "venus", headMode: "windowed",
+        name: "fake-runner", state: "running", gpuMode: "venus", swVk: false, headMode: "windowed",
         cpus: 4, memMiB: 8192, diskGiB: 64, nestedVirt: false, sshPort: 4022, rdpPort: 43389,
         provisioned: "cloudimg", persist: "daemonize", snapshots: [], vd: 0, usbKeys: [],
         username: "cruiser", hasPassword: true,

@@ -197,7 +197,7 @@ export class CruiserService {
         const s = h.spec;
         return {
             name: s.name, state,
-            gpuMode: s.gpu.mode, headMode: s.display.headMode,
+            gpuMode: s.gpu.mode, swVk: s.gpu.softwareVk, headMode: s.display.headMode,
             cpus: s.resources.cpus, memMiB: s.resources.memoryMiB,
             diskGiB: s.disk.sizeGiB, nestedVirt: s.resources.nestedVirt,
             sshPort: s.network.sshPort, rdpPort: s.network.rdpPort,
@@ -457,6 +457,7 @@ export class CruiserService {
             spec.resources.nestedVirt = f.nestedVirt;
             spec.disk.sizeGiB = f.diskGiB;
             spec.gpu.mode = f.gpu as VmSpec["gpu"]["mode"];
+            spec.gpu.softwareVk = f.swVk;
             spec.display.headMode = f.headMode as VmSpec["display"]["headMode"];
             spec.persist = f.persist as VmSpec["persist"];
             spec.snapshots.auto = f.snapAuto as VmSpec["snapshots"]["auto"];
@@ -765,6 +766,7 @@ export class CruiserService {
             spec.resources.nestedVirt = f.nestedVirt;
             spec.disk.sizeGiB = f.diskGiB;
             spec.gpu.mode = f.gpu as VmSpec["gpu"]["mode"];
+            spec.gpu.softwareVk = f.swVk;
             spec.display.headMode = f.headMode as VmSpec["display"]["headMode"];
             if (f.vd > 0) spec.display.virtualDesktop = f.vd;
             spec.persist = f.persist as VmSpec["persist"];

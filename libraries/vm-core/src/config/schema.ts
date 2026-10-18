@@ -227,6 +227,11 @@ export const VmSpec = z.object({
         renderNode: z.string().optional(),
         /** Venus blob hostmem region MiB (needs >= ~2G for real workloads). */
         hostmemMiB: z.number().int().default(4096),
+        /** Venus only: also expose the host's software Vulkan device
+         *  (lavapipe) to the guest. Off hides it from ICD enumeration so a
+         *  guest app requesting a fallback adapter can't rasterize on host
+         *  CPU — the guest's own lavapipe ICD still covers that case. */
+        softwareVk: z.boolean().default(false),
     }).prefault({}),
 
     display: z.object({

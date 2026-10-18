@@ -29,6 +29,7 @@ export interface VmSummary {
     name: string;
     state: VmState;
     gpuMode: string;
+    swVk: boolean;                 // spec.gpu.softwareVk — host lavapipe over Venus
     headMode: string;
     cpus: number;
     memMiB: number;
@@ -77,6 +78,7 @@ export type CreateForm = SyncFormFields & {
     diskGiB: number;
     nestedVirt: boolean;           // pass vmx/svm through — run KVM inside the guest
     gpu: string;                   // venus|virgl|software
+    swVk: boolean;                 // venus: expose host lavapipe (CPU Vulkan) to the guest
     headMode: string;              // fullscreen-monitor|windowed|virtual-desktop|app
     persist: string;               // daemonize|owned|ephemeral
     method: string;                // none|cloudimg|iso|imported
@@ -296,7 +298,7 @@ const defaultLogs = (): LogsState => ({
 
 const defaultCreate = (): CreateForm => ({
     name: "", cpus: 4, memMiB: 8192, diskGiB: 100, nestedVirt: false,
-    gpu: "venus", headMode: "virtual-desktop", persist: "daemonize",
+    gpu: "venus", swVk: false, headMode: "virtual-desktop", persist: "daemonize",
     method: "cloudimg", distro: "ubuntu", release: "26.04", desktop: "gnome",
     browser: "none", snap: false, extraFonts: false, autologin: true,
     preset: "standard", devtools: [],

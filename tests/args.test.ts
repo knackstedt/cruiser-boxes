@@ -49,6 +49,19 @@ describe("buildArgs", () => {
         expect(a).not.toContain('"venus"');
     });
 
+    test("venus hides lavapipe from the guest (VK_LOADER_DRIVERS_DISABLE)", () => {
+        const v = buildArgs(defaultSpec("t4"), vmPaths("t4"), {}, env);
+        expect(v.env.VK_LOADER_DRIVERS_DISABLE).toBe("*lvp*");
+        const sw = defaultSpec("t5");
+        sw.gpu.mode = "software";
+        const b = buildArgs(sw, vmPaths("t5"), {}, env);
+        expect(b.env.VK_LOADER_DRIVERS_DISABLE).toBeUndefined();
+        const lv = defaultSpec("t6");
+        lv.gpu.softwareVk = true;
+        const c = buildArgs(lv, vmPaths("t6"), {}, env);
+        expect(c.env.VK_LOADER_DRIVERS_DISABLE).toBeUndefined();
+    });
+
     test("rendernode lands on -spice when set", () => {
         const a = build((s) => { s.gpu.renderNode = "/dev/dri/renderD129"; });
         expect(a).toContain("rendernode=/dev/dri/renderD129");

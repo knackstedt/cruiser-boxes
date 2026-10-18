@@ -189,7 +189,7 @@ describe("bootRelevantChanges", () => {
         // canonical key order; the live spec keeps runtime-append order
         // (registry's sshPort/rdpPort, buildArgv's renderNode). Same values.
         const a = parseVmSpec(JSON.parse(JSON.stringify(spec())));
-        a.gpu = { mode: a.gpu.mode, renderNode: "/dev/dri/renderD129", hostmemMiB: a.gpu.hostmemMiB };
+        a.gpu = { mode: a.gpu.mode, renderNode: "/dev/dri/renderD129", hostmemMiB: a.gpu.hostmemMiB, softwareVk: a.gpu.softwareVk };
         const b = spec();
         b.gpu.renderNode = "/dev/dri/renderD129";
         expect(bootRelevantChanges(a, b)).toEqual([]);

@@ -269,5 +269,16 @@ export function buildArgs(
     push("-pidfile", paths.pidFile, "-D", paths.log);
     if (opts.extraArgs) a.push(...opts.extraArgs);
 
-    return { argv: a, env: { LD_LIBRARY_PATH: env.ldLibraryPath }, virtiofsd };
+    const outEnv: Record<string, string> = { LD_LIBRARY_PATH: env.ldLibraryPath };
+    if (spec.gpu.mode === "venus" && !spec.gpu.softwareVk) {
+        // Venus exposes every host VkPhysicalDevice to the guest — including
+        // lavapipe. A guest app that asks wgpu for the software/fallback
+        // adapter (DOWNDRAFT_GPU=swiftshader, test harnesses) then rasterizes
+        // on host CPU inside virgl_render_server (~2 cores of sustained burn)
+        // and starves real work. Hide the lvp driver from enumeration; a true
+        // software fallback still exists via the guest's own lavapipe ICD.
+        // Ignored silently by Vulkan loaders older than 1.3.234.
+        outEnv.VK_LOADER_DRIVERS_DISABLE = "*lvp*";
+    }
+    return { argv: a, env: outEnv, virtiofsd };
 }

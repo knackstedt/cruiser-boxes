@@ -762,6 +762,27 @@ Ubuntu 24.04) — applies to any dual-GPU host:
   (NVIDIA's EGL dmabuf path is excluded by design). So on a broken-i915
   hybrid box the split is: dGPU for the app window's Vulkan, i915 GL for
   guest display — both have to be healthy for their own API.
+- Venus exposes EVERY host VkPhysicalDevice to the guest — including
+  lavapipe. A guest app asking wgpu for the fallback adapter
+  (`DOWNDRAFT_GPU=swiftshader` on the dd native runtime) rasterizes on host
+  CPU inside a `virgl-<ctx>-gpu_re` fork of virgl_render_server (llvmpip*
+  threads, ~1-2 cores each). spec.gpu.softwareVk controls it: off
+  (default) → buildArgs sets `VK_LOADER_DRIVERS_DISABLE=*lvp*` so host
+  lvp is hidden; the guest's own lavapipe ICD still exists as a fallback.
+  Diagnose from the host: `top -H` on the render server — busy llvmpip*
+  threads = lavapipe, `[vkps]`/`[vkrt]` = NVIDIA driver threads. Guest
+  override without a VM restart: relaunch the app without DOWNDRAFT_GPU /
+  with `DOWNDRAFT_GPU=hardware` (+ `MESA_VK_DEVICE_SELECT=<ven:dev>` to pin).
+- NVIDIA Venus CAN kill QEMU: devinbox (RTX 3090 + Raphael iGPU host)
+  SEGV'd QEMU 11.1.1 after a guest wgpu app flooded `ctrl 0x208 error
+  0x1200` submit failures — ~15k `virtio_gpu_virgl_process_cmd` rejects
+  then a hard SEGV (coredumpctl). A lighter guest app ran clean on the
+  same NVIDIA context, so it's load/pattern-dependent — treat
+  NVIDIA-under-venus as flaky, RADV (renderD129) as the reliable device.
+  The matching pre-crash symptom in run/qemu.log is a repeating
+  `vkr: failed to look up object → vkFreeMemory CS error → fatal decoder
+  state → destroying context N (wgpu)` loop (the 0x1200 = ERR_UNSPEC and
+  also fires on lavapipe contexts — the destroy loop predates this).
 - Qt6-only hosts: noble has no `qdbus` binary — `qt6-tools-dev-tools`
   ships `qdbus6`. Doctor and `host-int/kde.ts` probe `qdbus6` first, then
   `qdbus`; don't gate on the Qt5 name.

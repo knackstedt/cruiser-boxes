@@ -43,6 +43,7 @@ usage: cruiser <area> <command> [args]
                    [--snap] [--xfonts] [--no-autologin] [--devtools toolchain,python,rust,…]
                    [--nested]                          expose vmx/svm to the guest (VMs in the VM —
                                                         needs the host kvm module's nested=1, see doctor)
+                   [--sw-vk]                           venus: also expose host lavapipe (CPU Vulkan)
                    [--sync a,b,c] [--no-sync x,y]     host→guest sync channels (see vm sync)
                    [--viewer rdp|dmabuf]              dmabuf = direct QEMU dma-buf display (virgl+)
                    [--encrypt off|full|home]          qcow2 LUKS — full = whole system image,
@@ -256,6 +257,7 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const desktop = flagVal("--desktop"); if (desktop) spec.os.desktop = desktop as VmSpec["os"]["desktop"];
             const browser = flagVal("--browser"); if (browser) spec.os.browser = browser as VmSpec["os"]["browser"];
             if (has("--nested")) spec.resources.nestedVirt = true;
+            if (has("--sw-vk")) spec.gpu.softwareVk = true;
             if (has("--snap")) spec.os.snap = true;
             if (has("--xfonts")) spec.os.extraFonts = true;
             if (has("--no-autologin")) spec.os.autologin = false;
