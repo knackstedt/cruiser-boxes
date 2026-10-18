@@ -75,6 +75,8 @@ usage: cruiser <area> <command> [args]
   vm screenshot <name> [out.png]        PNG screendump of the guest console
                                       [--guest]  capture via the guest DE instead
                                       (needed for dmabuf viewers — no QEMU surface)
+  vm mem <name> [MiB]                   show/resize guest-visible memory live
+                                      (virtio-balloon; session only, can't exceed boot)
   vm snapshots <name>                   vm snapshot <name> <snapname>
   vm restore <name> <snapname>          vm snapshot-rm <name> <snapname>
   vm backup <name> <dest.qcow2>         vm resize <name> <newGiB>
@@ -383,6 +385,22 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
         case "suspend": { const h = await needVm(args[0]); await h.suspend(); console.log("suspended (vcpus paused)"); break; }
         case "resume": { const h = await needVm(args[0]); await h.resume(); console.log("resumed"); break; }
         case "status": { const h = await needVm(args[0]); console.log(await h.probe()); break; }
+        case "mem": {
+            const h = await needVm(args[0]);
+            if (!h.isRunning()) { console.error(`'${h.spec.name}' is not running`); process.exit(1); }
+            const target = args[1] ? Number(args[1]) : null;
+            try {
+                if (target === null) {
+                    const b = await h.balloonInfo();
+                    console.log(`guest-visible: ${Math.round(b.actual / (1 << 20))} MiB (boot ${h.spec.resources.memoryMiB} MiB)`);
+                } else {
+                    if (!Number.isInteger(target) || target < 256) { console.error("expected an integer MiB >= 256"); process.exit(2); }
+                    const applied = await h.setMemory(target);
+                    console.log(`guest-visible memory → ${applied} MiB${applied < target ? ` (clamped to boot ${h.spec.resources.memoryMiB} MiB)` : ""} — session only, not persisted`);
+                }
+            } catch (e) { console.error(`mem failed: ${e instanceof Error ? e.message : e}`); process.exit(1); }
+            break;
+        }
         case "screenshot": {
             const h = await needVm(args[0]);
             if (!h.isRunning()) { console.error(`'${h.spec.name}' is not running`); process.exit(1); }

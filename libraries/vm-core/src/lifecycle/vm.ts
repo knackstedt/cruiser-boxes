@@ -498,6 +498,25 @@ export class VmHandle {
         return out;
     }
 
+    /** Live guest-visible memory target via virtio-balloon (MiB, clamped to
+     *  the boot allocation — the balloon can only reclaim, never add).
+     *  Session-level; spec.resources.memoryMiB stays the boot value. */
+    async setMemory(mib: number): Promise<number> {
+        const target = Math.min(mib, this.spec.resources.memoryMiB);
+        try {
+            await this.withQmp((q) => q.balloon(target * (1 << 20)));
+        } catch (e) {
+            throw new Error(`balloon failed — this boot predates the virtio-balloon device; restart the VM (${e instanceof Error ? e.message : e})`);
+        }
+        return target;
+    }
+    /** query-balloon: actual = guest-visible memory in bytes. */
+    balloonInfo(): Promise<{ actual: number }> {
+        return this.withQmp((q) => q.queryBalloon()).catch((e) => {
+            throw new Error(`no balloon device — this boot predates virtio-balloon; restart the VM (${e instanceof Error ? e.message : e})`);
+        });
+    }
+
     /** Reboot: graceful guest-initiated restart via QGA guest-shutdown
      *  (mode=reboot), falling back to a hard QMP system_reset when the
      *  agent is absent — same escalation shape as stop(). */

@@ -44,6 +44,9 @@ export class QmpClient extends JsonSocket {
         return this.execute("device_add", { driver, ...props });
     }
     deviceDel(id: string): Promise<any> { return this.execute("device_del", { id }); }
+    /** virtio-balloon target (bytes — guest-visible memory shrinks/grows). */
+    balloon(bytes: number): Promise<any> { return this.execute("balloon", { value: bytes }); }
+    queryBalloon(): Promise<{ actual: number }> { return this.execute("query-balloon"); }
     queryPci(): Promise<any> { return this.execute("query-pci"); }
     /** Dump a console framebuffer. format:"png" needs QEMU ≥7.1; omit for ppm. */
     screendump(file: string, opts: { device?: string; head?: number; format?: "png" | "ppm" } = {}): Promise<any> {

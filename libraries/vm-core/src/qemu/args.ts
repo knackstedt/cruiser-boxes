@@ -196,6 +196,9 @@ export function buildArgs(
 
     push("-device", "virtio-keyboard-pci", "-device", "virtio-tablet-pci");
     push("-object", "rng-random,filename=/dev/urandom,id=rng0", "-device", "virtio-rng-pci,rng=rng0");
+    // virtio-balloon — live guest-visible memory resize (`vm mem`, QMP
+    // balloon) + query-balloon gives real in-guest free mem for metrics.
+    push("-device", "virtio-balloon-pci,id=balloon0");
 
     // vsock for waypipe app-mode (and general host↔guest channels)
     if (spec.network.vsock) push("-device", `vhost-vsock-pci,guest-cid=${guestCid(spec.name)}`);
