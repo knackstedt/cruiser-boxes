@@ -28,11 +28,11 @@ const nmScope = join(root, "node_modules", "@downdraft");
 
 // Every @downdraft/* dep, mapped to its packages/<dir> in the engine repo.
 const wanted = new Map();
-for (const sec of ["dependencies", "devDependencies"]) {
+["dependencies", "devDependencies"].forEach((sec) => {
     for (const name of Object.keys(pkg[sec] ?? {})) {
         if (name.startsWith("@downdraft/")) wanted.set(name, name.slice("@downdraft/".length));
     }
-}
+});
 
 function ensureLink(linkPath, target) {
     const rel = relative(dirname(linkPath), target);
@@ -51,7 +51,7 @@ function ensureLink(linkPath, target) {
 if (process.argv.includes("--prune")) {
     // Checkout gone (or never present): dead symlinks would shadow the npm
     // packages bun is about to install — remove them first.
-    for (const [name] of wanted) {
+    for (const [name] of wanted.entries()) {
         const linkPath = join(nmScope, name.slice("@downdraft/".length));
         const st = lstatSync(linkPath, { throwIfNoEntry: false });
         // existsSync follows links — false on a symlink whose target is gone.
@@ -68,7 +68,7 @@ const candidates = [process.env.CRUISER_ENGINE_DIR, "../downdraft-engine", "../d
     .map((p) => resolve(root, p));
 
 let engineRoot = null;
-for (const cand of candidates) {
+for (const cand of candidates.values()) {
     if (existsSync(join(cand, "package.json")) && existsSync(join(cand, "packages"))) {
         engineRoot = cand;
         break;
@@ -83,7 +83,7 @@ if (!engineRoot) {
 let created = 0;
 let existing = 0;
 const missing = [];
-for (const [name, dir] of wanted) {
+for (const [name, dir] of wanted.entries()) {
     const target = join(engineRoot, "packages", dir);
     if (!existsSync(join(target, "package.json"))) {
         missing.push(name);
@@ -93,7 +93,7 @@ for (const [name, dir] of wanted) {
     if (r === "linked") created++;
     else existing++;
 }
-for (const m of missing) console.warn(`link-engine: ${m} not found under ${engineRoot}/packages`);
+missing.forEach((m) => console.warn(`link-engine: ${m} not found under ${engineRoot}/packages`));
 console.log(`link-engine: ${engineRoot} — ${created} linked, ${existing} already correct`);
 
 // Runtime imports resolve the "default" export condition -> dist/. Build it
