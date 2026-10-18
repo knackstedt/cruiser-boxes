@@ -44,9 +44,20 @@ struct Heads {
 
 /// GL-worker job — one shared channel for every console, so Fd carries
 /// the console index.
+struct ScanFd {
+    ci: usize,
+    fd: std::os::fd::OwnedFd,
+    /// scanout subrect within the backing dmabuf (usually 0,0,w,h)
+    x: u32, y: u32, w: u32, h: u32,
+    /// plane-0 byte offset + pitch + backing dims
+    poff: u32, stride: u32, bw: u32, bh: u32,
+    fourcc: u32, modifier: u64, y0_top: bool,
+}
 enum XJob {
-    Fd(usize, std::os::fd::OwnedFd, u32, u32, u32, u32, u64, bool),
-    Nudge,
+    Fd(ScanFd),
+    /// Damage rect on a console (scanout px) — QEMU emits one UpdateDMABUF
+    /// per damaged region, so a frame's damage arrives as a serialized burst.
+    Nudge(usize, i32, i32, i32, i32),
 }
 
 /// Guest hardware cursor pushed by QEMU over the listener — CursorDefine
@@ -120,10 +131,10 @@ impl Listener {
     fn scanout_dmabuf(&mut self, _fd: ZOwnedFd, _w: u32, _h: u32, _stride: u32,
                       _fourcc: u32, _modifier: u64, _y0_top: bool) {}
     #[zbus(name = "UpdateDMABUF")]
-    fn update_dmabuf(&mut self, _x: i32, _y: i32, _w: i32, _h: i32) {
+    fn update_dmabuf(&mut self, x: i32, y: i32, w: i32, h: i32) {
         UPDATES.fetch_add(1, Ordering::Relaxed);
         // reply fast — QEMU gl-blocks the guest until this returns
-        let _ = self.tx.send(XJob::Nudge);
+        let _ = self.tx.send(XJob::Nudge(self.idx, x, y, w, h));
     }
     fn disable(&mut self) { eprintln!("[listener] Disable"); }
     fn mouse_set(&mut self, x: i32, y: i32, on: i32) {
@@ -161,7 +172,7 @@ struct UnixDmabuf2 { tx: std::sync::mpsc::Sender<XJob>, dims: std::sync::Arc<Dim
 impl UnixDmabuf2 {
     #[zbus(name = "ScanoutDMABUF2")]
     #[allow(clippy::too_many_arguments)]
-    fn scanout_dmabuf2(&mut self, dmabufs: Vec<ZOwnedFd>, _x: u32, _y: u32, width: u32, height: u32,
+    fn scanout_dmabuf2(&mut self, dmabufs: Vec<ZOwnedFd>, x: u32, y: u32, width: u32, height: u32,
                        offsets: Vec<u32>, strides: Vec<u32>, num_planes: u32, fourcc: u32,
                        backing_width: u32, backing_height: u32, modifier: u64, y0_top: bool) {
         let n = DM_BUFS.fetch_add(1, Ordering::Relaxed) + 1;
@@ -172,12 +183,17 @@ impl UnixDmabuf2 {
                 self.id, fourcc_str(fourcc));
         }
         if dmabufs.is_empty() || num_planes == 0 { return; }
+        if num_planes > 1 { return; } // multi-plane not supported
         // hand the fd to the GL worker while it's live — QEMU fds can lose
         // their GEM backing within ~ms of the callback
         let d = unsafe { std::os::fd::OwnedFd::from_raw_fd(libc::dup(dmabufs[0].as_raw_fd())) };
-        let off = offsets.first().copied().unwrap_or(0);
-        if off != 0 && num_planes > 1 { return; } // multi-plane not supported
-        let _ = self.tx.send(XJob::Fd(self.idx, d, width, height, strides[0], fourcc, modifier, y0_top));
+        let _ = self.tx.send(XJob::Fd(ScanFd {
+            ci: self.idx, fd: d, x, y, w: width, h: height,
+            poff: offsets.first().copied().unwrap_or(0),
+            stride: strides.first().copied().unwrap_or(0),
+            bw: backing_width.max(width), bh: backing_height.max(height),
+            fourcc, modifier, y0_top,
+        }));
     }
 }
 
@@ -795,6 +811,28 @@ fn qemu_boot_id(pidfile: &std::path::Path) -> Option<(u64, u64)> {
 
 // ── head layout: consoles → rects inside the single window ──
 
+/// (x, y, w, h) rect — damage bookkeeping uses it in both scanout and
+/// window space.
+type WRect = (i32, i32, i32, i32);
+
+/// Push a damage rect, collapsing the list to its bounding union past 8
+/// entries — QEMU already merges damage coarsely, so beyond a handful of
+/// rects the extra scissoring isn't worth it.
+fn add_rect(list: &mut Vec<WRect>, r: WRect) {
+    if r.2 <= 0 || r.3 <= 0 { return; }
+    if list.len() < 8 { list.push(r); return; }
+    let mut u = r;
+    for &q in list.iter() {
+        let x0 = u.0.min(q.0);
+        let y0 = u.1.min(q.1);
+        let x1 = (u.0 + u.2).max(q.0 + q.2);
+        let y1 = (u.1 + u.3).max(q.1 + q.3);
+        u = (x0, y0, x1 - x0, y1 - y0);
+    }
+    list.clear();
+    list.push(u);
+}
+
 /// Fullscreen-span geometry built from --rects (picked host monitors,
 /// absolute px, console order): the union rect the window covers plus the
 /// same rects normalized to the union origin for the draw/input maps.
@@ -1076,7 +1114,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
         h = sp.union.3.max(1) as usize;
     }
     let mut win = Window::new(title, w, h, WindowOptions { resize: true, ..WindowOptions::default() })?;
-    win.limit_update_rate(Some(std::time::Duration::from_micros(2000)));
+    win.set_target_fps(500);
 
     // persistent X conn: EWMH identity sets at init, then polled for the
     // host's NumLock state in the event loop (see below)
@@ -1085,6 +1123,11 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     let mut wm_state_atom = 0u64;
     // _NET_WM_FULLSCREEN_MONITORS payload, written once the WM manages us
     let mut fsm_pending: Option<[u32; 4]> = None;
+    // _NET_WM_BYPASS_COMPOSITOR — lets KWin unredirect the span window and
+    // scan it out directly, skipping a compositor pass. Only meaningful in
+    // --rects span mode; written with the same WM_STATE gating as the
+    // fullscreen-monitors hint.
+    let mut bypass_pending = span.is_some();
     let xwin_id;
 
     // GL worker owns the EGL context — all device calls are single-threaded
@@ -1162,9 +1205,55 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                 let mut fps_t = std::time::Instant::now();
                 // newest fd per console — coalescing collapses nudges and
                 // supersedes stale scanouts so one redraw+swap serves all heads
-                type ScanFd = (std::os::fd::OwnedFd, u32, u32, u32, u32, u64, bool);
                 let mut latest: Vec<Option<ScanFd>> = (0..nheads).map(|_| None).collect();
+                // per-console damage queue in scanout px — merged/capped by add_rect
+                let mut damage: Vec<Vec<WRect>> = (0..nheads).map(|_| Vec::new()).collect();
                 let mut last_ext: Option<(i64, i64)> = None;
+                let mut last_geom = (0i32, 0i32);
+                let mut last_swap = std::time::Instant::now() - std::time::Duration::from_secs(1);
+                // window-space damage of recent swaps — buffer-age partial repaints
+                let mut hist: std::collections::VecDeque<Vec<WRect>> =
+                    std::collections::VecDeque::new();
+                let pump = |first: Option<XJob>,
+                                latest: &mut Vec<Option<ScanFd>>,
+                                damage: &mut Vec<Vec<WRect>>| {
+                    for j in first.into_iter().chain(std::iter::from_fn(|| jrx.try_recv().ok())) {
+                        match j {
+                            XJob::Fd(s) => {
+                                if s.ci < nheads {
+                                    // the whole image is replaced
+                                    let iw = gh.dims[s.ci].w.load(Ordering::Relaxed)
+                                        .min(i32::MAX as u64).max(1) as i32;
+                                    let ih = gh.dims[s.ci].h.load(Ordering::Relaxed)
+                                        .min(i32::MAX as u64).max(1) as i32;
+                                    add_rect(&mut damage[s.ci], (0, 0, iw, ih));
+                                    let ci = s.ci;
+                                    latest[ci] = Some(s);
+                                }
+                            }
+                            XJob::Nudge(ci, x, y, w, h) => {
+                                if ci < nheads { add_rect(&mut damage[ci], (x, y, w, h)); }
+                            }
+                        }
+                    }
+                };
+                let import_all = |latest: &mut Vec<Option<ScanFd>>,
+                                      xegl: &mut egl::XEgl| -> bool {
+                    let mut imported = false;
+                    for (ci, slot) in latest.iter_mut().enumerate() {
+                        if let Some(s) = slot.take() {
+                            if let Err(e) = egl::x11_import(xegl, ci, s.fd.as_raw_fd(),
+                                s.x, s.y, s.w, s.h, s.poff, s.stride, s.fourcc,
+                                s.bw, s.bh, s.modifier, s.y0_top) {
+                                static XF: AtomicU64 = AtomicU64::new(0);
+                                let n = XF.fetch_add(1, Ordering::Relaxed) + 1;
+                                if n % 120 == 1 { eprintln!("[xegl] import failed x{n}: {e:#}"); }
+                            }
+                            imported = true;
+                        }
+                    }
+                    imported
+                };
                 while let Ok(first) = jrx.recv() {
                     fps_n += 1;
                     if fps_t.elapsed().as_secs() >= 5 {
@@ -1182,26 +1271,10 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                             fps_n, fps_t.elapsed().as_secs_f32());
                         fps_n = 0; fps_t = std::time::Instant::now();
                     }
-                    let mut dirty = false;
-                    for j in std::iter::once(first).chain(std::iter::from_fn(|| jrx.try_recv().ok())) {
-                        match j {
-                            XJob::Fd(ci, fd, w2, h2, s, f, m, y) => {
-                                if ci < nheads { latest[ci] = Some((fd, w2, h2, s, f, m, y)); dirty = true; }
-                            }
-                            XJob::Nudge => { dirty = true; }
-                        }
-                    }
-                    let mut imported = false;
-                    for (ci, slot) in latest.iter_mut().enumerate() {
-                        if let Some((fd, w2, h2, stride, fourcc, modifier, y0)) = slot.take() {
-                            if let Err(e) = egl::x11_import(&mut xegl, ci, fd.as_raw_fd(), w2, h2, stride, fourcc, modifier, y0) {
-                                static XF: AtomicU64 = AtomicU64::new(0);
-                                let n = XF.fetch_add(1, Ordering::Relaxed) + 1;
-                                if n % 120 == 1 { eprintln!("[xegl] import failed x{n}: {e:#}"); }
-                            }
-                            imported = true;
-                        }
-                    }
+                    // drain the burst — QEMU emits one UpdateDMABUF call per
+                    // damage rect, serialized by its guest-side gl-block
+                    pump(Some(first), &mut latest, &mut damage);
+                    let mut imported = import_all(&mut latest, &mut xegl);
                     // windowed single-head: track the guest resolution like
                     // the old per-console windows did — spans are
                     // monitor-locked and multi-head windowed letterboxes.
@@ -1212,14 +1285,78 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                             egl::x11_resize(&xegl, ext.0.max(1) as u32, ext.1.max(1) as u32);
                         }
                     }
+                    let dirty = damage.iter().any(|d| !d.is_empty());
                     if dirty {
+                        // ~166Hz present cap: QEMU serializes a frame's damage
+                        // rects over separate calls — absorbing stragglers here
+                        // turns the burst into one present and bounds the swap
+                        // rate. Imports stay eager; only the swap is paced.
+                        const PACE: std::time::Duration = std::time::Duration::from_millis(6);
+                        if let Some(rem) = PACE.checked_sub(last_swap.elapsed()) {
+                            if !rem.is_zero() {
+                                std::thread::sleep(rem);
+                                pump(None, &mut latest, &mut damage);
+                                imported = import_all(&mut latest, &mut xegl) || imported;
+                            }
+                        }
                         let (ww, wh) = egl::x11_geom(&xegl);
+                        let resized = (ww, wh) != last_geom;
+                        last_geom = (ww, wh);
                         let rects = head_rects(&gh, gspan.as_deref(), ww, wh);
-                        if let Err(e) = egl::x11_redraw(&xegl, &rects) {
+                        // scanout-px damage → window px through the same
+                        // letterbox math the draw/input map use
+                        let mut dmg: Vec<WRect> = Vec::new();
+                        if !resized {
+                            for (ci, ds) in damage.iter_mut().enumerate() {
+                                let Some(&(rx, ry, rw, rh)) = rects.get(ci) else { continue };
+                                let iw = (gh.dims[ci].w.load(Ordering::Relaxed) as i32).max(1);
+                                let ih = (gh.dims[ci].h.load(Ordering::Relaxed) as i32).max(1);
+                                let (vx, vy, vw, vh) = egl::fit_viewport(
+                                    rw.max(1) as u32, rh.max(1) as u32, iw, ih);
+                                for &(x, y, w, h) in ds.iter() {
+                                    let x = x.clamp(0, iw); let y = y.clamp(0, ih);
+                                    let w = w.min(iw); let h = h.min(ih);
+                                    let dx0 = rx + vx - 1 + (x as i64 * vw as i64 / iw as i64) as i32;
+                                    let dy0 = ry + vy - 1 + (y as i64 * vh as i64 / ih as i64) as i32;
+                                    let dx1 = rx + vx + 1 + (((x as i64 + w as i64) * vw as i64
+                                        + iw as i64 - 1) / iw as i64) as i32;
+                                    let dy1 = ry + vy + 1 + (((y as i64 + h as i64) * vh as i64
+                                        + ih as i64 - 1) / ih as i64) as i32;
+                                    let (cx0, cy0) = (dx0.max(0), dy0.max(0));
+                                    let (cx1, cy1) = (dx1.min(ww), dy1.min(wh));
+                                    if cx1 > cx0 && cy1 > cy0 {
+                                        dmg.push((cx0, cy0, cx1 - cx0, cy1 - cy0));
+                                    }
+                                }
+                            }
+                        }
+                        for ds in damage.iter_mut() { ds.clear(); }
+                        if dmg.is_empty() { dmg.push((0, 0, ww, wh)); }
+                        // buffer-age partial repaint: the back buffer is `age`
+                        // swaps old, so it needs the union of that many
+                        // frames' damage re-rasterized. Unsupported/unknown
+                        // age or a resize → full repaint.
+                        let need: Vec<WRect> = if resized { Vec::new() } else {
+                            match egl::x11_buffer_age(&xegl) {
+                                Some(age) if age >= 1
+                                    && (age as usize) <= hist.len() + 1 => {
+                                    let mut need = dmg.clone();
+                                    for past in hist.iter().rev().take(age as usize - 1) {
+                                        for &r in past { add_rect(&mut need, r); }
+                                    }
+                                    need
+                                }
+                                _ => Vec::new(),
+                            }
+                        };
+                        if let Err(e) = egl::x11_redraw(&mut xegl, &rects, (ww, wh), &need, &dmg) {
                             static XF2: AtomicU64 = AtomicU64::new(0);
                             let n = XF2.fetch_add(1, Ordering::Relaxed) + 1;
                             if n % 120 == 1 { eprintln!("[xegl] redraw failed x{n}: {e:#}"); }
                         }
+                        hist.push_back(dmg);
+                        if hist.len() > 4 { hist.pop_front(); }
+                        last_swap = std::time::Instant::now();
                     }
                 }
             });
@@ -1450,18 +1587,31 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                 unsafe { XIconifyWindow(xdpy, xwin_id, 0); XFlush(xdpy); }
                 eprintln!("[+{}s][grab] abort — iconified ({title})", ts());
             }
-            if let Some(fsm) = fsm_pending {
-                // Write the monitors hint only once managed — KWin reads it
-                // at the session's setFullscreen transition, same as freerdp.
-                // Give up after ~10s of WM_STATE absence (no WM → hint is
-                // useless anyway and the X roundtrip per loop is waste).
-                if wm_managed(xdpy, xwin_id, wm_state_atom) {
+            // Write the monitors/bypass hints only once managed — KWin reads
+            // them at the session's setFullscreen transition, same as freerdp.
+            // Give up after ~10s of WM_STATE absence (no WM → the hints are
+            // useless anyway and the X roundtrip per loop is waste).
+            if (fsm_pending.is_some() || bypass_pending)
+                && wm_managed(xdpy, xwin_id, wm_state_atom) {
+                if let Some(fsm) = fsm_pending.take() {
                     set_fullscreen_monitors(xdpy, xwin_id, &fsm);
                     eprintln!("[+{}s][xegl] fullscreen-monitors hint set ({title})", ts());
-                    fsm_pending = None;
-                } else if ts() > 10 {
-                    fsm_pending = None;
                 }
+                if bypass_pending {
+                    bypass_pending = false;
+                    unsafe {
+                        const XA_CARDINAL: u64 = 6;
+                        let bypass = 1u32;
+                        XChangeProperty(xdpy, xwin_id,
+                            XInternAtom(xdpy, c"_NET_WM_BYPASS_COMPOSITOR".as_ptr().cast(), 0),
+                            XA_CARDINAL, 32, 0, &bypass as *const u32 as *const u8, 1);
+                        XFlush(xdpy);
+                    }
+                    eprintln!("[+{}s][xegl] bypass-compositor hint set ({title})", ts());
+                }
+            } else if (fsm_pending.is_some() || bypass_pending) && ts() > 10 {
+                fsm_pending = None;
+                bypass_pending = false;
             }
         }
         if esc.enabled && !xdpy.is_null() {

@@ -215,6 +215,16 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   composite fraction × console dims (the virtio tablet's range covers the
   whole composite; --offsets carries the normalized composite layout).
   Consoles with no scanout yet draw black (HeadSlot.img None is skipped).
+  Damage plumbing: QEMU emits ONE UpdateDMABUF call per damage rect,
+  serialized by its guest-side gl-block (vendored dbus-listener.c has a
+  TODO for a batched UpdateList) — the listener must reply fast and the
+  GL worker coalesces the burst into a single paced (~166Hz) present via
+  eglSwapBuffersWithDamageKHR (rects are BOTTOM-left surface coords per
+  the KHR spec — flip y) + EGL_EXT_buffer_age-scissored partial repaints.
+  ScanoutDMABUF2's y0_top is COUNTERINTUITIVE: buffers arriving
+  y0_top=false sample upright ONLY with the v-flip (v_bottom=(y+h)/bh);
+  treating the flag literally renders every head upside-down (observed on
+  NVIDIA EGL). Imports dedupe on fstat (dev,ino) + full attrib tuple.
   Clipboard (dmabuf): `-chardev qemu-vdagent,clipboard=on,mouse=off` +
   virtserialport `com.redhat.spice.0` (args.ts, gated on display.clipboard +
   a `-chardev help` probe — backend needs CONFIG_SPICE_PROTOCOL). Guest side
