@@ -268,6 +268,12 @@ export function buildArgs(
         : paths.serialLog;
     push("-serial", `file:${serialLog}`);
 
+    // Second serial port (guest ttyS1) on a host unix socket — `vm serial`
+    // bridges it to stdio for an interactive console when ssh/QGA are dead.
+    // guest-setup enables serial-getty@ttyS1 so it presents a login.
+    push("-chardev", `socket,id=sercon,path=${paths.serialSock},server=on,wait=off`);
+    push("-serial", "chardev:sercon");
+
     if (spec.persist === "daemonize" && opts.daemonize !== false) push("-daemonize");
     push("-pidfile", paths.pidFile, "-D", paths.log);
     if (opts.extraArgs) a.push(...opts.extraArgs);

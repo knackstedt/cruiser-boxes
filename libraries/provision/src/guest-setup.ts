@@ -112,6 +112,10 @@ systemctl enable --now qemu-guest-agent 2>/dev/null || true
 # this is a no-op on distros where the unit is static.
 systemctl enable --now spice-vdagentd.service 2>/dev/null || true
 systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd 2>/dev/null || true
+# ttyS1 is the interactive console port (unix socket on the host side —
+# 'vm serial'). enable --now starts a getty on this boot too when the
+# port exists (already-booted VMs re-running guest-setup get it live).
+systemctl enable --now serial-getty@ttyS1.service 2>/dev/null || true
 # firewalld blocks the RDP/ssh inbound on distros that ship it (fedora wkst)
 command -v firewall-cmd >/dev/null && {
     firewall-cmd --permanent --add-service=ssh >/dev/null 2>&1 || true

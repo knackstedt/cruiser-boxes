@@ -87,6 +87,8 @@ usage: cruiser <area> <command> [args]
   vm rename <name> <newname>            rename a stopped VM (moves the vm dir, keeps everything)
   vm rm <name> [--disk]                vm view <name>   launch freerdp viewer + place window
   vm ssh <name> [cmd...]               interactive guest shell (or run cmd) over the cruiser key
+  vm serial <name>                     interactive serial console on ttyS1 (ctrl+] to detach) —
+                                       works when ssh/QGA are dead; needs one restart to add the port
   vm cp <name>:<path> <local>          pull a file from the guest (QGA, ssh fallback)
   vm cp <local> <name>:<path>          push a file into the guest (~ expands)
   vm term <name>                       open the guest shell in a host terminal emulator window
@@ -741,6 +743,21 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             if (!args[1]) console.log(`${sshTarget(h.spec)} — interactive shell (ctrl+d / 'exit' to leave)`);
             const { spawnSync } = await import("node:child_process");
             const r = spawnSync("ssh", a, { stdio: "inherit" });
+            process.exit(r.status ?? (r.signal ? 1 : 0));
+        }
+        case "serial": {
+            const h = await needVm(args[0]);
+            if (!existsSync(h.paths.serialSock)) {
+                console.error(`no serial socket — start '${h.spec.name}' (VMs booted before this feature need one restart)`);
+                process.exit(1);
+            }
+            // Ctrl-] detaches (socat escape 0x1d). raw+echo=0 hands the
+            // tty straight to the guest getty — dropped when stdin is a
+            // pipe (tcgetattr would fail) so scripted probes still work.
+            const local = process.stdin.isTTY ? "-,raw,echo=0,escape=0x1d" : "-";
+            const { spawnSync } = await import("node:child_process");
+            const r = spawnSync("socat", [local, `UNIX-CONNECT:${h.paths.serialSock}`], { stdio: "inherit" });
+            if (r.error) { console.error(`serial failed: ${r.error.message} (is socat installed?)`); process.exit(1); }
             process.exit(r.status ?? (r.signal ? 1 : 0));
         }
         case "cp": {
