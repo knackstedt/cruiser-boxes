@@ -83,6 +83,9 @@ usage: cruiser <area> <command> [args]
   vm snapshots <name>                   vm snapshot <name> <snapname>
   vm restore <name> <snapname>          vm snapshot-rm <name> <snapname>
   vm backup <name> <dest.qcow2>         vm resize <name> <newGiB>
+  vm fstrim <name>                      discard free blocks in the guest (running VM)
+  vm compact <name> [--force]           sparse-rewrite the disk in place (stopped VM;
+                                       drops internal snapshots — --force accepts that)
   vm clone <name> <newname>             clone a stopped VM — fresh ports, disk copied without snapshots
   vm rename <name> <newname>            rename a stopped VM (moves the vm dir, keeps everything)
   vm rm <name> [--disk]                vm view <name>   launch freerdp viewer + place window
@@ -481,6 +484,20 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
         case "snapshot": { const h = await needVm(args[0]); await withDiskKey(h, () => h.snapshot(args[1] ?? `snap-${Date.now()}`)); console.log("snapshotted"); break; }
         case "restore": { const h = await needVm(args[0]); await withDiskKey(h, () => h.restoreSnapshot(args[1]!)); console.log("restored"); break; }
         case "snapshot-rm": { const h = await needVm(args[0]); await withDiskKey(h, () => h.deleteSnapshot(args[1]!)); console.log("deleted"); break; }
+        case "fstrim": {
+            const h = await needVm(args[0]);
+            try { console.log(await h.fstrim()); }
+            catch (e) { console.error(`fstrim failed: ${e instanceof Error ? e.message : e}`); process.exit(1); }
+            break;
+        }
+        case "compact": {
+            const h = await needVm(args[0]);
+            try {
+                const { before, after } = await h.compact({ force: args.includes("--force") });
+                console.log(`compacted ${h.spec.name}: ${(before / (1 << 30)).toFixed(1)} GiB → ${(after / (1 << 30)).toFixed(1)} GiB`);
+            } catch (e) { console.error(`compact failed: ${e instanceof Error ? e.message : e}`); process.exit(1); }
+            break;
+        }
         case "backup": { const h = await needVm(args[0]); if (!args[1]) usage(); await withDiskKey(h, () => h.backup(args[1]!)); console.log(`backed up -> ${args[1]}`); break; }
         case "resize": { const h = await needVm(args[0]); await withDiskKey(h, () => h.resizeDisk(Number(args[1]))); console.log(`resized to ${args[1]}G`); break; }
         case "rm": { await needVm(args[0]); await registry.remove(args[0]!, { deleteDisk: has("--disk") }); console.log("removed"); break; }

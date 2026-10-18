@@ -571,6 +571,34 @@ export class VmHandle {
         return disk.backupOffline((await this.tc()).qemuImg, this.diskPath(), destPath, "qcow2", this.needDiskKey());
     }
 
+    /** FITRIM all guest mounts so the host qcow2 can deallocate the freed
+     *  clusters. QGA guest-fstrim first; confined agents fall back to
+     *  `sudo fstrim -av` over the ssh forward. */
+    async fstrim(): Promise<string> {
+        if (!this.isRunning()) throw new Error("start the VM to fstrim it");
+        try {
+            await this.withQga((g) => g.fstrim(), 310_000);
+            return "fstrim issued on all guest mounts";
+        } catch {
+            const { sshArgv } = await import("../ssh");
+            const a = await sshArgv(this.spec, { remoteCmd: ["sudo", "fstrim", "-av"] });
+            const r = await run("ssh", a, { timeoutMs: 300_000 });
+            return r.stdout.trim() || "fstrim done (ssh)";
+        }
+    }
+
+    /** Sparse-rewrite the disk in place (stopped VM only) — qemu-img
+     *  convert sheds the qcow2's dead clusters. Refuses while the image
+     *  holds internal snapshots (convert drops them); `force` accepts
+     *  that loss. Pair with fstrim first for real reclamation. */
+    async compact({ force = false } = {}): Promise<{ before: number; after: number }> {
+        if (this.isRunning()) throw new Error("stop the VM before compacting the disk");
+        const snaps = await this.snapshots();
+        if (snaps.length && !force)
+            throw new Error(`'${this.spec.name}' has ${snaps.length} internal snapshot(s) — compact drops them (pass --force to proceed)`);
+        return disk.compactDisk((await this.tc()).qemuImg, this.diskPath(), this.needDiskKey());
+    }
+
     // ── port forwards ──
 
     /** Apply hostfwd deltas to the running QEMU via HMP and persist the

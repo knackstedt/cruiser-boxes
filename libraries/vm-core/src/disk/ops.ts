@@ -150,6 +150,31 @@ export async function liveSnapshot(qmp: QmpClient, vmstateFile: string): Promise
     // completion arrives as JOB_STATUS_CHANGE events; caller polls/waits
 }
 
+/** Sparse-rewrite a stopped VM's image in place: qemu-img convert drops
+ *  the qcow2's accumulated dead clusters so the file shrinks to live
+ *  data. LUKS sources convert back to LUKS with the same key (a
+ *  plaintext output would defeat the encryption). The swap is
+ *  rename-based so a failed convert leaves the original untouched.
+ *  CAVEAT: like clone, convert drops internal snapshots — callers must
+ *  refuse or confirm when snapshotList() is non-empty. */
+export async function compactDisk(qemuImg: string, path: string, keyFile?: string): Promise<{ before: number; after: number }> {
+    const before = (await diskInfo(qemuImg, path, keyFile)).actualSize;
+    const tmp = `${path}.compact`;
+    await run(qemuImg, ["convert",
+        ...(keyFile ? [...imgSecretObject(keyFile), "-o", `encrypt.format=luks,encrypt.key-secret=${DISK_SECRET_ID}`] : []),
+        "-O", "qcow2",
+        keyFile ? imgJsonTarget(path) : path, tmp], { timeoutMs: 3_600_000 });
+    // Reading the new image's headers (with the key for LUKS) is the
+    // sanity gate before the original goes away.
+    const after = (await diskInfo(qemuImg, tmp, keyFile)).actualSize;
+    const { rename: mv, rm } = await import("node:fs/promises");
+    await mv(path, `${path}.old`);
+    try { await mv(tmp, path); }
+    catch (e) { await mv(`${path}.old`, path).catch(() => {}); await rm(tmp, { force: true }).catch(() => {}); throw e; }
+    await rm(`${path}.old`, { force: true });
+    return { before, after };
+}
+
 // ── resize: grow only (shrink needs fs-first ordering — separate tool) ──
 
 export async function resizeDisk(qemuImg: string, path: string, newSizeGiB: number, keyFile?: string): Promise<void> {

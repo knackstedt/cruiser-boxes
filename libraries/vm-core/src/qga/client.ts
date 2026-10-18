@@ -98,6 +98,12 @@ export class QgaClient extends JsonSocket {
         }
     }
 
+    /** guest-fstrim — issue FITRIM on all mounted filesystems so the host
+     *  qcow2 can deallocate their free clusters. Needs CAP_SYS_ADMIN in
+     *  the agent; confined agents fail and callers fall back to ssh. */
+    fstrim(timeoutMs = 300_000): Promise<any> {
+        return this.send("guest-fstrim", undefined, timeoutMs);
+    }
     networkInterfaces(): Promise<any[]> { return this.send("guest-network-get-interfaces"); }
     getFsInfo(timeoutMs?: number): Promise<any[]> { return this.send("guest-get-fsinfo", undefined, timeoutMs); }
     getOsInfo(): Promise<any> { return this.send("guest-get-osinfo"); }
