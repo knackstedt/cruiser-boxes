@@ -252,6 +252,7 @@ export class CruiserShell {
         this.host.onAction("vm-term-reconnect", (d) => { if (d.vm) this.termMgr.reconnect(d.vm); });
         this.host.onAction("vm-term-host", (d) => { if (d.vm) void svc.termHost(d.vm); });
         this.host.onAction("vm-snap", (d) => { if (d.vm) svc.snapshot(d.vm); });
+        this.host.onAction("vm-shot", (d) => { if (d.vm) void svc.screenshot(d.vm); });
         this.host.onAction("vm-restore", (d) => {
             if (d.vm && d.snap && this.armed(`vm-restore:${d.vm}:${d.snap}`)) svc.restoreSnapshot(d.vm, d.snap);
         });

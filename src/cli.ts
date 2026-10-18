@@ -72,6 +72,9 @@ usage: cruiser <area> <command> [args]
   vm stop <name>                        vm kill <name>
   vm reboot <name>                      vm suspend|resume <name>   (QGA reboot / QMP pause+cont)
   vm status <name>                      vm args <name>   (print QEMU argv)
+  vm screenshot <name> [out.png]        PNG screendump of the guest console
+                                      [--guest]  capture via the guest DE instead
+                                      (needed for dmabuf viewers — no QEMU surface)
   vm snapshots <name>                   vm snapshot <name> <snapname>
   vm restore <name> <snapname>          vm snapshot-rm <name> <snapname>
   vm backup <name> <dest.qcow2>         vm resize <name> <newGiB>
@@ -378,6 +381,25 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
         case "suspend": { const h = await needVm(args[0]); await h.suspend(); console.log("suspended (vcpus paused)"); break; }
         case "resume": { const h = await needVm(args[0]); await h.resume(); console.log("resumed"); break; }
         case "status": { const h = await needVm(args[0]); console.log(await h.probe()); break; }
+        case "screenshot": {
+            const h = await needVm(args[0]);
+            if (!h.isRunning()) { console.error(`'${h.spec.name}' is not running`); process.exit(1); }
+            const out = args.slice(1).find((a) => !a.startsWith("-"));
+            try {
+                if (has("--guest")) {
+                    const { guestScreenshot } = await import("../libraries/vm-core/src/screen");
+                    await writeFile(out ?? join(h.paths.run, "screenshot.png"), await guestScreenshot(h));
+                    console.log(out ?? join(h.paths.run, "screenshot.png"));
+                } else {
+                    console.log(await h.screenshot(out));
+                }
+            } catch (e) {
+                const m = e instanceof Error ? e.message : String(e);
+                console.error(`screenshot failed: ${m}${m.includes("surface") ? " — try --guest (captures via the guest DE, works with dmabuf viewers)" : ""}`);
+                process.exit(1);
+            }
+            break;
+        }
         case "args": {
             const h = await needVm(args[0]);
             const { hostMirroredGuestMonitors } = await import("../libraries/provision/src/monitors");

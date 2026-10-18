@@ -490,6 +490,14 @@ export class VmHandle {
     async suspend(): Promise<void> { await this.withQmp((q) => q.stop()); }
     async resume(): Promise<void> { await this.withQmp((q) => q.cont()); }
 
+    /** PNG screendump of the primary console — writes `file` (default
+     *  run/screenshot.png) and returns the path. Running VM required. */
+    async screenshot(file?: string): Promise<string> {
+        const out = file ?? join(this.paths.run, "screenshot.png");
+        await this.withQmp((q) => q.screendump(out, { format: "png" }));
+        return out;
+    }
+
     /** Reboot: graceful guest-initiated restart via QGA guest-shutdown
      *  (mode=reboot), falling back to a hard QMP system_reset when the
      *  agent is absent — same escalation shape as stop(). */

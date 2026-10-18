@@ -45,6 +45,10 @@ export class QmpClient extends JsonSocket {
     }
     deviceDel(id: string): Promise<any> { return this.execute("device_del", { id }); }
     queryPci(): Promise<any> { return this.execute("query-pci"); }
+    /** Dump a console framebuffer. format:"png" needs QEMU ≥7.1; omit for ppm. */
+    screendump(file: string, opts: { device?: string; head?: number; format?: "png" | "ppm" } = {}): Promise<any> {
+        return this.execute("screendump", { filename: file, ...opts });
+    }
     /** Human Monitor Protocol passthrough (e.g. `info usb`, savevm). */
     hmp(cmd: string): Promise<string> {
         return this.execute("human-monitor-command", { "command-line": cmd }).then((r) => String(r ?? ""));

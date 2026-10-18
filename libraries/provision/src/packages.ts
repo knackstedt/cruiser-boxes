@@ -251,8 +251,11 @@ export const PACKAGES: PkgEntry[] = [
                                             "xdg-desktop-portal-kde"] } },
     { id: "kde-applets",   desktops: ["kde"], pkgs: ["plasma-nm", "plasma-pa", "powerdevil", "kinfocenter"] },
     { id: "kde-apps",      desktops: ["kde"],
-                           pkgs: { ...deb(["dolphin", "konsole", "systemsettings", "ark", "kwrite"]),
-                                   fedora: ["dolphin", "konsole", "plasma-systemsettings", "ark", "kwrite"] } },
+                           // spectacle doubles as the headless screenshot path
+                           // for `vm screenshot --guest` (KWin blesses it —
+                           // its ScreenShot2 dbus iface denies other callers).
+                           pkgs: { ...deb(["dolphin", "konsole", "systemsettings", "ark", "kwrite", "kde-spectacle"]),
+                                   fedora: ["dolphin", "konsole", "plasma-systemsettings", "ark", "kwrite", "spectacle"] } },
     { id: "kde-store",     desktops: ["kde"],
                            pkgs: { ...deb(["plasma-discover", "plasma-discover-backend-flatpak"]),
                                    fedora: ["plasma-discover", "plasma-discover-flatpak"] } },

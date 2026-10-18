@@ -906,6 +906,22 @@ export class CruiserService {
         this.invalidateSnaps(name);
     }
 
+    /** Console capture — QMP screendump when the console has a surface
+     *  (rdp/virgl viewers), guest-DE screenshot as fallback (dmabuf
+     *  viewers never materialize one — "no surface"). */
+    async screenshot(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        if (!h.isRunning()) { this.store.getState().setStatus(`start ${name} before taking a screenshot`, "warn"); return; }
+        await this.run(`screenshot ${name}`, async () => {
+            const out = join(h.paths.run, `screenshot-${Date.now()}.png`);
+            try { return await h.screenshot(out); } catch { /* fall through to the guest path */ }
+            const { guestScreenshot } = await import("../../vm-core/src/screen");
+            const { writeFile } = await import("node:fs/promises");
+            await writeFile(out, await guestScreenshot(h));
+            return out;
+        }, { done: (p) => `screenshot → ${p}`, vm: name, verb: "capturing" });
+    }
+
     /** Clone a stopped VM — auto-names '<name>-copy' ('-copy-2'…). The disk
      *  is reflinked/converted without its snapshots; ports re-allocate. */
     async cloneVm(name: string): Promise<void> {

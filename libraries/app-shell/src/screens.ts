@@ -278,6 +278,7 @@ function vmBtns(vm: VmSummary, s: CruiserState, detail = false): string {
     // "app" head mode has no freerdp viewer — waypipe apps are launched via CLI.
     if (up && vm.headMode !== "app") parts.push(b("View", "vm-view"));
     if (up) parts.push(b("Term", "vm-term"));
+    if (up) parts.push(b("Screenshot", "vm-shot", "btn sm dim"));
     if (paused) parts.push(b("Resume", "vm-resume"));
     if (up || paused) parts.push(b("Stop", "vm-stop", "btn sm dim"));
     if (stopped) parts.push(b("Start", "vm-start"));
