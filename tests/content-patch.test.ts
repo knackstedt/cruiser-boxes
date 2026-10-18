@@ -14,7 +14,7 @@ function mkVm(name: string, over: Partial<VmSummary> = {}): VmSummary {
         persist: "daemonize", username: "cruiser", hasPassword: false,
         encrypt: "off", keyStorage: "store", diskLocked: false,
         description: "", shares: [], snapshots: [], snapAuto: "off",
-        snapTrigger: "stop", snapKeep: 5, vd: 0, usbKeys: [],
+        snapTrigger: "stop", snapKeep: 5, vd: 0, usbKeys: [], swVk: false, forwards: [],
         cpu: [], mem: [], disk: [], net: [], gpu: [],
         ...over,
     };
