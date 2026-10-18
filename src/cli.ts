@@ -17,7 +17,7 @@
 
 import { z } from "zod";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { VmRegistry, VmSpec, VmHandle, HeadMode, DevTool, defaultSpec, type ShareSpec } from "../libraries/vm-core/src/index";
 import { makeShare } from "../libraries/vm-core/src/config/shares";
@@ -81,6 +81,8 @@ usage: cruiser <area> <command> [args]
   vm clone <name> <newname>             clone a stopped VM — fresh ports, disk copied without snapshots
   vm rm <name> [--disk]                vm view <name>   launch freerdp viewer + place window
   vm ssh <name> [cmd...]               interactive guest shell (or run cmd) over the cruiser key
+  vm cp <name>:<path> <local>          pull a file from the guest (QGA, ssh fallback)
+  vm cp <local> <name>:<path>          push a file into the guest (~ expands)
   vm term <name>                       open the guest shell in a host terminal emulator window
   vm wallpaper <name> [--source PATH|--no-source] [--position POS] [--managed|--no-managed]
                                       [--apply]         guest wallpaper + watermark (POS: top-left|top-right|
@@ -674,6 +676,38 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const { spawnSync } = await import("node:child_process");
             const r = spawnSync("ssh", a, { stdio: "inherit" });
             process.exit(r.status ?? (r.signal ? 1 : 0));
+        }
+        case "cp": {
+            // `vm cp <name>:<guestpath> <local>` pulls; `<local> <name>:<guestpath>` pushes.
+            const [src, dst] = args.filter((a) => !a.startsWith("-"));
+            if (!src || !dst) usage();
+            const ref = (s: string) => {
+                const m = s.match(/^([a-z0-9][a-z0-9-]*):(.+)$/);
+                const h = m ? registry.get(m[1]!) : null;
+                return h ? { h, path: m![2]! } : null;
+            };
+            const s = ref(src), d = ref(dst);
+            const X = await import("../libraries/vm-core/src/xfer");
+            try {
+                if (s && !d) {
+                    if (!s.h.isRunning()) { console.error(`'${s.h.spec.name}' is not running`); process.exit(1); }
+                    const via = await X.pullFile(s.h, s.path, dst);
+                    console.log(`pulled ${s.h.spec.name}:${s.path} → ${dst} (via ${via})`);
+                } else if (d && !s) {
+                    if (!existsSync(src)) { console.error(`no such local file: ${src}`); process.exit(1); }
+                    if (statSync(src).isDirectory()) { console.error("directories aren't supported — tar it first"); process.exit(1); }
+                    if (!d.h.isRunning()) { console.error(`'${d.h.spec.name}' is not running`); process.exit(1); }
+                    await X.pushFile(d.h, src, d.path);
+                    console.log(`pushed ${src} → ${d.h.spec.name}:${d.path}`);
+                } else {
+                    console.error("exactly one side must be <vm>:<path>");
+                    usage();
+                }
+            } catch (e) {
+                console.error(`cp failed: ${e instanceof Error ? e.message : e}`);
+                process.exit(1);
+            }
+            break;
         }
         case "term": {
             const h = await needVm(args[0]);

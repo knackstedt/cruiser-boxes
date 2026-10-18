@@ -63,7 +63,7 @@ export async function guestScreenshot(h: VmHandle, timeoutMs = 45_000): Promise<
             return await h.withQga((g) => g.readFile(out));
         } catch {
             const a = await sshArgv(h.spec, { remoteCmd: ["base64", out] });
-            const res = await run(a[0]!, a.slice(1), { timeoutMs });
+            const res = await run("ssh", a, { timeoutMs });
             if (res.code !== 0) throw new Error(`couldn't pull ${out} from the guest: ${res.stderr.trim()}`);
             return Buffer.from(res.stdout.trim(), "base64");
         }
