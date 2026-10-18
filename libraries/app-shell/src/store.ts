@@ -55,6 +55,7 @@ export interface VmSummary {
     snapKeep: number;              // spec.snapshots.keep
     vd: number;                    // display.virtualDesktop (edit form)
     usbKeys: string[];             // spec.usb.autoAttach as "vid:pid:serial" keys
+    forwards: FwdRow[];            // spec.network.hostfwd (auto = the ssh/rdp pair)
     sync?: Record<string, boolean>; // spec.sync.* — feeds the edit form
     /** Spec sections changed while running that only apply at next boot
      *  (VmHandle.pendingRestart) — drives the "restart pending" marker. */
@@ -242,6 +243,8 @@ export interface CruiserState {
     termLine: string;
     /** The share-add form on the vm detail screen. */
     shareForm: ShareForm;
+    /** The port-forward-add form on the vm detail screen. */
+    fwdForm: FwdForm;
     /** Parked auto-snapshot low-space decision (null = none pending). */
     autoSnapPrompt: AutoSnapPrompt | null;
     /** Parked LUKS unlock — a prompt-mode VM waiting on its passphrase. */
@@ -259,6 +262,23 @@ export interface ShareForm {
     mode: "mount" | "copy";
     direction: "both" | "host-to-guest";
     open: boolean;               // the add form is collapsed behind "+ Add share"
+}
+
+/** A spec.network.hostfwd entry as rendered on the vm detail screen. */
+export interface FwdRow {
+    proto: "tcp" | "udp";
+    hostPort: number;
+    guestPort: number;
+    /** true for the create()-injected ssh/rdp pair — shown as labels, not
+     *  removable (dropping them kills vm ssh / the rdp viewer). */
+    auto: boolean;
+}
+
+export interface FwdForm {
+    hostPort: string;
+    guestPort: string;
+    proto: "tcp" | "udp";
+    open: boolean;
 }
 
 export interface CruiserActions {
@@ -283,6 +303,7 @@ export interface CruiserActions {
     setVmDesc(d: string): void;
     setTermLine(s: string): void;
     setShareForm(p: Partial<ShareForm>): void;
+    setFwdForm(p: Partial<FwdForm>): void;
     setAutoSnapPrompt(p: AutoSnapPrompt | null): void;
     setUnlockPrompt(p: UnlockPrompt | null): void;
     setPwReveal(r: { vm: string; pw: string } | null): void;
@@ -334,6 +355,7 @@ export function createCruiserStore() {
         vmDesc: "",
         termLine: "",
         shareForm: { hostPath: "", guestPath: "", mode: "mount", direction: "both", open: false },
+        fwdForm: { hostPort: "", guestPort: "", proto: "tcp", open: false },
         autoSnapPrompt: null,
         unlockPrompt: null,
         unlockPw: "",
@@ -357,6 +379,7 @@ export function createCruiserStore() {
         setVmDesc: (vmDesc) => set({ vmDesc }),
         setTermLine: (termLine) => set({ termLine }),
         setShareForm: (p) => set((s) => ({ shareForm: { ...s.shareForm, ...p } })),
+        setFwdForm: (p) => set((s) => ({ fwdForm: { ...s.fwdForm, ...p } })),
         setAutoSnapPrompt: (autoSnapPrompt) => set({ autoSnapPrompt }),
         setUnlockPrompt: (unlockPrompt) => set({ unlockPrompt }),
         setPwReveal: (pwReveal) => set({ pwReveal }),

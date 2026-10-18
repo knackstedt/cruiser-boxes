@@ -77,6 +77,9 @@ usage: cruiser <area> <command> [args]
                                       (needed for dmabuf viewers — no QEMU surface)
   vm mem <name> [MiB]                   show/resize guest-visible memory live
                                       (virtio-balloon; session only, can't exceed boot)
+  vm forward ls <name>                  vm forward add <name> <hostPort>:<guestPort> [udp]
+  vm forward rm <name> <hostPort> [udp]   live slirp forwards — persist to the spec
+                                        (--force also drops the auto ssh/rdp pair)
   vm snapshots <name>                   vm snapshot <name> <snapname>
   vm restore <name> <snapname>          vm snapshot-rm <name> <snapname>
   vm backup <name> <dest.qcow2>         vm resize <name> <newGiB>
@@ -218,8 +221,12 @@ async function configPull(h: VmHandle): Promise<void> {
         console.error(e instanceof Error ? e.message : e);
         process.exit(1);
     }
+    // hostfwd is live — converge the running QEMU's slirp rules with the
+    // pulled spec (deltas against the launch-time applied set).
+    const fwdDelta = await h.reconcileForwards().catch(() => [] as string[]);
     console.log(`pulled config for ${h.spec.name}` +
-        (needsRestart.length ? ` — changed: ${needsRestart.join(", ")}` : " — nothing boot-relevant changed"));
+        (needsRestart.length ? ` — changed: ${needsRestart.join(", ")}` : " — nothing boot-relevant changed") +
+        (fwdDelta.length ? ` — forwards applied live: ${fwdDelta.join(", ")}` : ""));
     if (h.isRunning() && needsRestart.length)
         console.log("note: the VM is running — those sections apply at next boot");
 }
@@ -385,6 +392,37 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
         case "suspend": { const h = await needVm(args[0]); await h.suspend(); console.log("suspended (vcpus paused)"); break; }
         case "resume": { const h = await needVm(args[0]); await h.resume(); console.log("resumed"); break; }
         case "status": { const h = await needVm(args[0]); console.log(await h.probe()); break; }
+        case "forward": {
+            const sub = args[0] ?? "ls";
+            const h = await needVm(args[1]);
+            if (sub === "ls") {
+                const auto = new Set([h.spec.network.sshPort, h.spec.network.rdpPort].filter(Boolean));
+                h.spec.network.hostfwd.forEach((f) =>
+                    console.log(`${f.proto} 127.0.0.1:${f.hostPort} → guest:${f.guestPort}${auto.has(f.hostPort) ? "  (auto)" : ""}`));
+                if (!h.spec.network.hostfwd.length) console.log("(none)");
+            } else if (sub === "add") {
+                const m = (args[2] ?? "").match(/^(\d+):(\d+)$/);
+                if (!m) { console.error("expected <hostPort>:<guestPort>"); usage(); }
+                const proto = args[3] === "udp" ? "udp" as const : "tcp" as const;
+                const f = { hostPort: Number(m[1]), guestPort: Number(m[2]), proto };
+                if (h.spec.network.hostfwd.some((x) => x.proto === proto && x.hostPort === f.hostPort)) {
+                    console.error(`127.0.0.1:${f.hostPort} (${proto}) is already forwarded`); process.exit(1);
+                }
+                await h.applyForwards([...h.spec.network.hostfwd, f]);
+                console.log(`forwarding ${proto} 127.0.0.1:${f.hostPort} → :${f.guestPort}${h.isRunning() ? " (live)" : " (next boot)"}`);
+            } else if (sub === "rm") {
+                const hp = Number(args[2]);
+                if (!hp) { console.error("expected a host port"); usage(); }
+                const proto = args[3] === "udp" ? "udp" : "tcp";
+                const next = h.spec.network.hostfwd.filter((f) => !(f.proto === proto && f.hostPort === hp));
+                if (next.length === h.spec.network.hostfwd.length) { console.error(`no ${proto} forward on host port ${hp}`); process.exit(1); }
+                try {
+                    await h.applyForwards(next, { allowEssential: has("--force") });
+                    console.log("removed");
+                } catch (e) { console.error(`${e instanceof Error ? e.message : e} — --force overrides`); process.exit(1); }
+            } else usage();
+            break;
+        }
         case "mem": {
             const h = await needVm(args[0]);
             if (!h.isRunning()) { console.error(`'${h.spec.name}' is not running`); process.exit(1); }

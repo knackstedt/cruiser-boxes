@@ -215,6 +215,11 @@ export class CruiserService {
             snapAuto: s.snapshots.auto, snapTrigger: s.snapshots.trigger, snapKeep: s.snapshots.keep,
             vd: s.display.virtualDesktop,
             usbKeys: s.usb.autoAttach.map((u) => [u.vendorId, u.productId, u.serial].filter(Boolean).join(":")),
+            forwards: s.network.hostfwd.map((f) => ({
+                proto: f.proto, hostPort: f.hostPort, guestPort: f.guestPort,
+                auto: (f.guestPort === 22 && f.hostPort === s.network.sshPort)
+                    || (f.guestPort === 3389 && f.hostPort === s.network.rdpPort),
+            })),
             sync: { ...s.sync },
             pendingRestart: h.pendingRestart(),
             cpu: [], mem: [], disk: [], net: [], gpu: [],
@@ -920,6 +925,34 @@ export class CruiserService {
             await writeFile(out, await guestScreenshot(h));
             return out;
         }, { done: (p) => `screenshot → ${p}`, vm: name, verb: "capturing" });
+    }
+
+    // ── port forwards (live — slirp hostfwd_add/remove + spec save) ──
+
+    async fwdAdd(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        const f = this.store.getState().fwdForm;
+        const hostPort = Number(f.hostPort), guestPort = Number(f.guestPort);
+        if (!Number.isInteger(hostPort) || !Number.isInteger(guestPort)
+            || hostPort < 1 || hostPort > 65535 || guestPort < 1 || guestPort > 65535) {
+            this.store.getState().setStatus("both ports must be 1–65535", "warn");
+            return;
+        }
+        if (h.spec.network.hostfwd.some((x) => x.proto === f.proto && x.hostPort === hostPort)) {
+            this.store.getState().setStatus(`127.0.0.1:${hostPort} (${f.proto}) is already forwarded`, "warn");
+            return;
+        }
+        await this.run(`forward :${hostPort}→${guestPort}`, async () => {
+            await h.applyForwards([...h.spec.network.hostfwd, { proto: f.proto, hostPort, guestPort }]);
+            this.store.getState().setFwdForm({ hostPort: "", guestPort: "", open: false });
+        }, { done: () => `forwarding ${f.proto} 127.0.0.1:${hostPort} → :${guestPort}${h.isRunning() ? " (live)" : ""}`, vm: name, verb: "forwarding" });
+    }
+
+    async fwdRm(name: string, hostPort: number, proto: "tcp" | "udp"): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        await this.run(`remove forward :${hostPort}`, () =>
+            h.applyForwards(h.spec.network.hostfwd.filter((f) => !(f.proto === proto && f.hostPort === hostPort))),
+            { vm: name, verb: "removing forward" });
     }
 
     /** Clone a stopped VM — auto-names '<name>-copy' ('-copy-2'…). The disk

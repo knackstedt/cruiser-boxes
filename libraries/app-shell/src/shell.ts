@@ -282,6 +282,15 @@ export class CruiserShell {
             st().setShareForm({ [d.field]: d.field === "open" ? d.value === "true" : d.value } as never);
         });
         this.host.onAction("filesync-now", (d) => { if (d.vm) void svc.filesyncNow(d.vm); });
+        this.host.onAction("fwd-form", (d) => {
+            if (!d.field) return;
+            st().setFwdForm({ [d.field]: d.field === "open" ? d.value === "true" : d.value } as never);
+        });
+        this.host.onAction("fwd-add", (d) => { if (d.vm) void svc.fwdAdd(d.vm); });
+        this.host.onAction("fwd-rm", (d) => {
+            if (d.vm && this.armed(`fwd-rm:${d.vm}:${d.proto}:${d.port}`))
+                void svc.fwdRm(d.vm, Number(d.port), String(d.proto ?? "tcp") as "tcp" | "udp");
+        });
         this.host.onAction("log-set", (d) => {
             const f = d.field;
             if (!f) return;
@@ -331,6 +340,10 @@ export class CruiserShell {
             if (field === "unlock-pw") { this.store.setState({ unlockPw: String(ev.v) }); return; }
             if (field.startsWith("share-")) {
                 this.store.getState().setShareForm({ [field.slice(6)]: ev.v } as never);
+                return;
+            }
+            if (field.startsWith("fwd-")) {
+                this.store.getState().setFwdForm({ [field.slice(4)]: ev.v } as never);
                 return;
             }
             const cur = this.store.getState().create;

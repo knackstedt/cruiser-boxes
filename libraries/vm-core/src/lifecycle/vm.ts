@@ -571,6 +571,54 @@ export class VmHandle {
         return disk.backupOffline((await this.tc()).qemuImg, this.diskPath(), destPath, "qcow2", this.needDiskKey());
     }
 
+    // ── port forwards ──
+
+    /** Apply hostfwd deltas to the running QEMU via HMP and persist the
+     *  spec — the diff key is proto+hostPort+guestPort, so removing one
+     *  entry and adding an identical one is a no-op. Stopped VMs just take
+     *  the spec change (it lands in argv at the next boot). The forwards
+     *  backing sshPort/rdpPort are only removable with allowEssential. */
+    private fwdKey = (f: { proto: string; hostPort: number; guestPort: number }) => `${f.proto}:${f.hostPort}:${f.guestPort}`;
+
+    async applyForwards(next: VmSpec["network"]["hostfwd"], opts: { prev?: VmSpec["network"]["hostfwd"]; allowEssential?: boolean } = {}): Promise<void> {
+        const prev = opts.prev ?? this.spec.network.hostfwd;
+        const essential = new Set([22, 3389].map((g) => this.fwdKey(
+            { proto: "tcp", hostPort: g === 22 ? this.spec.network.sshPort! : this.spec.network.rdpPort!, guestPort: g })));
+        const drop = prev.filter((f) => !next.some((n) => this.fwdKey(n) === this.fwdKey(f)));
+        const add = next.filter((f) => !prev.some((p) => this.fwdKey(p) === this.fwdKey(f)));
+        if (!opts.allowEssential && drop.some((f) => essential.has(this.fwdKey(f))))
+            throw new Error("that forward carries guest ssh/rdp — refusing to drop it");
+        if (this.isRunning() && (drop.length || add.length)) {
+            await this.withQmp(async (q) => {
+                for (let i = 0; i < drop.length; i++)
+                    await q.hmp(`hostfwd_remove n0 ${drop[i]!.proto}:127.0.0.1:${drop[i]!.hostPort}`);
+                for (let i = 0; i < add.length; i++)
+                    await q.hmp(`hostfwd_add n0 ${add[i]!.proto}:127.0.0.1:${add[i]!.hostPort}-:${add[i]!.guestPort}`);
+            });
+        }
+        this.spec.network.hostfwd = next;
+        await this.saveSpec();
+    }
+
+    /** Bring the running QEMU's slirp forwards in line with the spec —
+     *  used after a config pull changes hostfwd under a live VM (the
+     *  applied set is the launch-time spec's, snapshotted at start()). */
+    async reconcileForwards(): Promise<string[]> {
+        if (!this.isRunning()) return [];
+        let booted: VmSpec["network"]["hostfwd"] = [];
+        try { booted = parseVmSpec(JSON.parse(readFileSync(this.paths.launchSpec, "utf-8"))).network.hostfwd; } catch { /* no launch snapshot — nothing to diff against */ }
+        const changed = this.fwdKeyDiff(booted, this.spec.network.hostfwd);
+        if (!changed.length) return [];
+        await this.applyForwards(this.spec.network.hostfwd, { prev: booted, allowEssential: false });
+        return changed;
+    }
+
+    private fwdKeyDiff(a: VmSpec["network"]["hostfwd"], b: VmSpec["network"]["hostfwd"]): string[] {
+        const gone = a.filter((f) => !b.some((n) => this.fwdKey(n) === this.fwdKey(f))).map((f) => `-${this.fwdKey(f)}`);
+        const came = b.filter((f) => !a.some((p) => this.fwdKey(p) === this.fwdKey(f))).map((f) => `+${this.fwdKey(f)}`);
+        return [...gone, ...came];
+    }
+
     // ── usb ──
 
     listUsb() { return usb.listUsbDevices(); }

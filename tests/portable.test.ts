@@ -170,6 +170,15 @@ describe("bootRelevantChanges", () => {
         b.network.vsock = false;
         expect(bootRelevantChanges(a, b)).toEqual(["resources", "gpu", "display", "network"]);
     });
+    test("hostfwd is live — edits don't flag; ports/vsock do", () => {
+        const a = spec();
+        const b = spec();
+        b.network.hostfwd.push({ hostPort: 18080, guestPort: 80, proto: "tcp" });
+        expect(bootRelevantChanges(a, b)).toEqual([]);
+        b.network.hostfwd.pop();
+        b.network.sshPort = 2301;
+        expect(bootRelevantChanges(a, b)).toEqual(["network"]);
+    });
     test("mount shares flag on hostPath/tag/membership only", () => {
         const a = spec();   // one mount share: /home/u/src, tag "src", ro
         const b = spec();

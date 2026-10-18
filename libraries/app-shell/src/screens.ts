@@ -650,6 +650,7 @@ function vmDetail(s: CruiserState): RouteBody {
             <div class="meta">${vm.origin ? esc(vm.origin) : "gist/file origin set on push or import"}</div></div>
         <div class="hint">a *.cruiser.{yaml,toml,json} doc captures the whole spec — import one from the New VM screen</div>
         ${shareSection(vm, s, up)}
+        ${fwdSection(vm, s)}
         <div class="h2">Snapshots</div>
         ${snapSection}`;
     return {
@@ -711,6 +712,38 @@ function shareSection(vm: VmSummary, s: CruiserState, up: boolean): string {
         ${sf.open ? form
             : `<div style="margin-top:10px">${btn("+ Add share", "share-form", attr("field", "open") + attr("value", "true"), "btn sm")}</div>`}
         ${syncNow ? `<div style="margin-top:8px">${syncNow}</div>` : ""}`;
+}
+
+/** Port forwards — spec.network.hostfwd, applied live via slirp
+ *  hostfwd_add/remove on a running VM and persisted for the next boot. */
+function fwdSection(vm: VmSummary, s: CruiserState): string {
+    const ff = s.fwdForm;
+    const rows = vm.forwards.length ? vm.forwards.map((f) => {
+        const armed = s.confirm === `fwd-rm:${vm.name}:${f.proto}:${f.hostPort}`;
+        return `<div class="vmrow">
+            <div class="grow"><code>${esc(f.proto)}</code> 127.0.0.1:${f.hostPort} → guest:${f.guestPort}
+                <div class="vmmode">${f.auto ? "built-in — carries vm ssh / the rdp viewer" : "custom"}</div></div>
+            ${f.auto ? "" : `<div class="opt sm${armed ? " on" : ""}" data-action="fwd-rm" data-vm="${esc(vm.name)}" data-port="${f.hostPort}" data-proto="${esc(f.proto)}">${armed ? "remove?" : "✕"}</div>`}
+        </div>`;
+    }).join("") : `<div class="meta">no forwards</div>`;
+    const form = `<div class="sharebox">
+        <div class="row"><div class="lbl">Host port</div>
+            <input data-field="fwd-hostPort" value="${esc(ff.hostPort)}" style="width:110px" placeholder="8080">
+            <div class="lbl" style="width:auto">→ guest port</div>
+            <input data-field="fwd-guestPort" value="${esc(ff.guestPort)}" style="width:110px" placeholder="80"></div>
+        <div class="row"><div class="lbl">Protocol</div><div class="opts">
+            <div class="opt${ff.proto === "tcp" ? " on" : ""}" data-action="fwd-form" data-field="proto" data-value="tcp">tcp</div>
+            <div class="opt${ff.proto === "udp" ? " on" : ""}" data-action="fwd-form" data-field="proto" data-value="udp">udp</div></div>
+            <div class="meta">guests reach the host as 10.0.2.2 on the slirp net</div></div>
+        <div class="row"><div class="lbl"></div>
+            ${btn("Add forward", "fwd-add", attr("vm", vm.name), "btn sm")}
+            ${btn("Cancel", "fwd-form", attr("field", "open") + attr("value", "false"), "btn sm dim")}</div>
+    </div>`;
+    return `<div class="h2">Port forwards</div>
+        <div class="hint" style="margin-left:0">host 127.0.0.1:port → a guest port — added/removed live on a running VM, no restart needed.</div>
+        ${rows}
+        ${ff.open ? form
+            : `<div style="margin-top:10px">${btn("+ Add forward", "fwd-form", attr("field", "open") + attr("value", "true"), "btn sm")}</div>`}`;
 }
 
 // ── logs ──
