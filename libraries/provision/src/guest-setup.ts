@@ -349,6 +349,34 @@ ${p.snap ? `# classic snaps need /snap -> /var/lib/snapd/snap (fedora; deb distr
 ln -sfn /var/lib/snapd/snap /snap 2>/dev/null || true
 systemctl enable --now snapd.socket 2>/dev/null || true` : ""}`;
 
+    // guest → host URL open: the virtserialport org.cruiser.urlopen.0 lands
+    // as /dev/virtio-ports/… (root:root) — relax it for the session user,
+    // then shadow xdg-open from /usr/local/bin (first in every default PATH;
+    // the stock one stays callable at /usr/bin|/bin). http(s) goes through
+    // cruiser-open → the host's real xdg-open; everything else defers.
+    const urlSection = !spec.display.urlOpen ? "" : `# guest → host url open channel
+cat > /etc/udev/rules.d/99-cruiser-urlopen.rules <<'EOF'
+SUBSYSTEM=="virtio-ports", ATTR{name}=="org.cruiser.urlopen.0", MODE="0666"
+EOF
+cat > /usr/local/bin/cruiser-open <<'EOF'
+#!/bin/sh
+PORT=/dev/virtio-ports/org.cruiser.urlopen.0
+[ -c "$PORT" ] || { echo "cruiser-open: host url channel not present" >&2; exit 1; }
+printf '%s\n' "$1" > "$PORT"
+EOF
+chmod 755 /usr/local/bin/cruiser-open
+cat > /usr/local/bin/xdg-open <<'EOF'
+#!/bin/sh
+case "$1" in
+    http://*|https://*) exec /usr/local/bin/cruiser-open "$1" ;;
+esac
+REAL=/usr/bin/xdg-open; [ -x "$REAL" ] || REAL=/bin/xdg-open
+exec "$REAL" "$@"
+EOF
+chmod 755 /usr/local/bin/xdg-open
+udevadm control --reload-rules 2>/dev/null || true
+udevadm trigger --subsystem-match=virtio-ports 2>/dev/null || true`;
+
     // NOTE: runs as root via QGA — user-context steps are explicitly `runuser`'d.
     // PATH is set explicitly: QGA exec on Fedora gets /usr/local/bin:/usr/bin.
     return `set -eu
@@ -373,6 +401,8 @@ ${walletSection}
 ${lockSection}
 
 ${appSection}
+
+${urlSection}
 
 ${guestDevtoolsScript(p)}
 

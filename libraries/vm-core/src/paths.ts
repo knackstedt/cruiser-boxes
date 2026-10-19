@@ -81,6 +81,8 @@ export interface VmPaths {
     serialLog: string;
     /** Second serial port (guest ttyS1) — interactive console socket. */
     serialSock: string;
+    /** virtserialport org.cruiser.urlopen.0 — guest → host URL forwarding. */
+    urlOpenSock: string;
     snapshotsDir: string;
     backupsDir: string;
 }
@@ -103,6 +105,7 @@ export function vmPaths(name: string): VmPaths {
         launchSpec: join(run, "launch-spec.json"),
         serialLog: join(run, "serial.log"),
         serialSock: join(run, "serial.sock"),
+        urlOpenSock: join(run, "urlopen.sock"),
         snapshotsDir: join(dir, "snapshots"),
         backupsDir: join(dir, "backups"),
     };

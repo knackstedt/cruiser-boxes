@@ -293,6 +293,10 @@ export const VmSpec = z.object({
         /** guest clipboard sync: freerdp +clipboard on the rdp viewer,
          *  qemu-vdagent ↔ viewer-dd D-Bus bridge on the dmabuf viewer. */
         clipboard: z.boolean().default(true),
+        /** guest → host URL forwarding: a virtserialport
+         *  (org.cruiser.urlopen.0) a guest-side xdg-open shim writes http(s)
+         *  URLs into; a host listener runs real xdg-open on them. */
+        urlOpen: z.boolean().default(true),
         /** guest → host notification forwarding: a busctl --user monitor over
          *  the ssh forward snoops org.freedesktop.Notifications (session-bus
          *  eavesdrop needs no guest-side install); host pops them via

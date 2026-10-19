@@ -240,6 +240,13 @@ export function buildArgs(
         push("-chardev", "qemu-vdagent,id=vda,clipboard=on,mouse=off");
         push("-device", "virtserialport,chardev=vda,name=com.redhat.spice.0");
     }
+    // guest → host URL channel: the guest's xdg-open shim writes URLs into
+    // org.cruiser.urlopen.0; a host listener socat'd onto urlopen.sock runs
+    // real xdg-open on http(s) targets only.
+    if (spec.display.urlOpen) {
+        push("-chardev", `socket,id=urlop,path=${paths.urlOpenSock},server=on,wait=off`);
+        push("-device", `virtserialport,chardev=urlop,name=org.cruiser.urlopen.0`);
+    }
     // QMP monitor directly on a unix socket (the "-mon chardev=" form is deprecated in QEMU 11).
     push("-qmp", `unix:path=${paths.monitorSock},server=on,wait=off`);
 

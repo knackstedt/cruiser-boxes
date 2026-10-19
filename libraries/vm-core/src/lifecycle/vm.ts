@@ -3,7 +3,7 @@
 // or owned), reattaches over monitor/QGA sockets, and exposes disk/usb ops.
 // ============================================================================
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, writeFile, readFile, copyFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ChildProcess } from "node:child_process";
@@ -359,6 +359,7 @@ export class VmHandle {
                         await writeFile(this.launchMonitorsPath(),
                             JSON.stringify(opts.guestMonitors ?? [])).catch(() => {});
                         this.watchVfsd();
+                        this.startUrlListener();
                         return;
                     } catch { /* not ready */ }
                 }
@@ -488,6 +489,32 @@ export class VmHandle {
         ], { detached: true, logFile: join(this.paths.run, `virtiofsd-${v.tag}.log`) });
         this.vfsChildren.push(c);
         this.vfsdSpawned.set(v.socket, Date.now());
+    }
+
+    /** org.cruiser.urlopen.0 bridge: the guest writes one URL per line to the
+     *  virtserialport and real xdg-open runs on the host — scheme-filtered to
+     *  http(s) so a guest can't drive arbitrary xdg-open handlers. The socat
+     *  client dies with QEMU's socket (EOF → SYSTEM loop ends) so it needs no
+     *  lifecycle tracking; absent socat just disables the feature. */
+    private startUrlListener(): void {
+        if (!this.spec.display.urlOpen) return;
+        // socat's SYSTEM: address splits its command on spaces — the loop
+        // lives in a script file so the address arg stays a single token.
+        const script = join(this.paths.run, "urlopen-listen.sh");
+        writeFileSync(script, `#!/bin/sh
+while IFS= read -r u; do
+    case "$u" in
+        http://*|https://*) xdg-open "$u" ;;
+    esac
+done
+`, { mode: 0o755 });
+        try {
+            const c = spawnChild("socat", [
+                `UNIX-CONNECT:${this.paths.urlOpenSock},retry=30,interval=1`,
+                `SYSTEM:${script}`,
+            ], { detached: true, logFile: join(this.paths.run, "urlopen.log") });
+            c.unref();
+        } catch { /* no socat — feature disabled */ }
     }
 
     /** Mount-mode shares expecting a virtiofsd backend — the same
