@@ -73,6 +73,10 @@ usage: cruiser <area> <command> [args]
   vm stop <name>                        vm kill <name>
   vm reboot <name>                      vm suspend|resume <name>   (QGA reboot / QMP pause+cont)
   vm status <name>                      vm args <name>   (print QEMU argv)
+  vm stats <name>                       point-in-time summary — state, guest OS, memory
+                                       (incl. balloon), host+guest disk usage, ifaces
+  vm upgrade <name>                     run the guest's package-manager upgrade
+                                       (apt dist-upgrade / dnf upgrade / zypper update)
   vm screenshot <name> [out.png]        PNG screendump of the guest console
                                       [--guest]  capture via the guest DE instead
                                       (needed for dmabuf viewers — no QEMU surface)
@@ -411,6 +415,64 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
         case "suspend": { const h = await needVm(args[0]); await h.suspend(); console.log("suspended (vcpus paused)"); break; }
         case "resume": { const h = await needVm(args[0]); await h.resume(); console.log("resumed"); break; }
         case "status": { const h = await needVm(args[0]); console.log(await h.probe()); break; }
+        case "stats": {
+            const h = await needVm(args[0]);
+            const s = h.spec;
+            const gib = (n: number) => `${(n / 2 ** 30).toFixed(1)} GiB`;
+            const running = h.isRunning();
+            const out = [`${s.name} — ${running ? "running" : "stopped"}${h.pid() ? ` (qemu pid ${h.pid()})` : ""}`];
+            out.push(`  cpu     ${s.resources.cpus} vcpus · mem ${s.resources.memoryMiB} MiB · gpu ${s.gpu.mode} · head ${s.display.headMode}`);
+            const di = await h.diskInfo().catch(() => null);
+            if (di) out.push(`  disk    ${gib(di.actualSize)} of ${gib(di.virtualSize)} virtual used (${s.disk.file})` +
+                `${di.snapshots.length ? ` · ${di.snapshots.length} snapshot(s)` : ""}`);
+            const fwd = s.network.hostfwd.map((f) => `${f.hostPort}→${f.guestPort}/${f.proto}`).join("  ");
+            out.push(`  fwd     ${fwd || "none"}`);
+            if (running) {
+                const q = await h.withQga(async (g) => ({
+                    os: await g.getOsInfo().catch(() => null),
+                    fs: await g.getFsInfo(5_000).catch(() => []),
+                    mi: await g.readFile("/proc/meminfo", 64 * 1024, 4_000).catch(() => null),
+                    ifs: await g.networkInterfaces().catch(() => []),
+                })).catch(() => null);
+                if (q?.os) out.push(`  guest   ${q.os.name ?? ""} ${q.os.version ?? ""} (kernel ${q.os["kernel-release"] ?? "?"})`);
+                if (q?.mi) {
+                    const kb = (k: string) => Number(q.mi!.toString().match(new RegExp(`${k}:\\s*(\\d+)`))?.[1] ?? 0) * 1024;
+                    const total = kb("MemTotal"), avail = kb("MemAvailable");
+                    out.push(`  mem     ${gib(total)} total · ${gib(avail)} available`);
+                }
+                const root = q?.fs?.find((f: any) => f.mountpoint === "/") ?? q?.fs?.[0];
+                if (root?.["total-bytes"]) out.push(`  guestfs ${gib(Number(root["used-bytes"]))} used of ${gib(Number(root["total-bytes"]))} on ${root.mountpoint}`);
+                const addrs = (q?.ifs ?? []).filter((i: any) => i.name !== "lo")
+                    .flatMap((i: any) => (i["ip-addresses"] ?? [])
+                        .filter((a: any) => a["ip-address-type"] === "ipv4")
+                        .map((a: any) => `${i.name} ${a["ip-address"]}`));
+                if (addrs.length) out.push(`  net     ${addrs.join("  ")}`);
+                const bal = await h.withQmp((qq) => qq.execute("query-balloon"), 3_000).catch(() => null);
+                if (bal?.actual && Number(bal.actual) !== s.resources.memoryMiB * (1 << 20))
+                    out.push(`  balloon guest-visible ${gib(Number(bal.actual))} (boot ${s.resources.memoryMiB} MiB)`);
+            }
+            console.log(out.join("\n"));
+            break;
+        }
+        case "upgrade": {
+            const h = await needVm(args[0]);
+            if (!h.isRunning()) { console.error(`'${h.spec.name}' is not running`); process.exit(1); }
+            // pick the guest's package manager, then stream a dist-upgrade
+            // over the ssh forward (tty so sudo prompts work when needed).
+            const probe = await h.guestSh("command -v apt-get || command -v dnf || command -v zypper || true").catch(() => null);
+            const pm = probe?.stdout.toString().trim().split("/").pop();
+            if (!pm) { console.error("no apt-get/dnf/zypper found in the guest"); process.exit(1); }
+            const cmd = pm === "apt-get" ? "sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y"
+                : pm === "dnf" ? "sudo dnf upgrade -y" : "sudo zypper --non-interactive update -y";
+            const { sshArgv } = await import("../libraries/vm-core/src/ssh");
+            // one string: ssh concatenates remote args for the login
+            // shell's -c — a bare ["sh","-c",cmd] would only feed `sh`
+            // the first word.
+            const a = await sshArgv(h.spec, { tty: true, remoteCmd: [cmd] });
+            const { spawnSync } = await import("node:child_process");
+            const r = spawnSync("ssh", a, { stdio: "inherit" });
+            process.exit(r.status ?? (r.signal ? 1 : 0));
+        }
         case "forward": {
             const sub = args[0] ?? "ls";
             const h = await needVm(args[1]);
