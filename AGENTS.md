@@ -319,7 +319,13 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   the host. Focus loss
   replays key-ups for every qnum the guest still sees held plus button
   releases — the release half of a WM-consumed combo otherwise leaves
-  modifiers stuck down guest-side. Escape combos fire three ways:
+  modifiers stuck down guest-side. The drain is UNCONDITIONAL while
+  !active, not edge-triggered: a focus cycle that opens and closes
+  inside one win.update() batch never shows a true→false transition,
+  but a press delivered in that window (autorepeat of a held Super
+  mid VD-switch pass-through) still lands on xdpy → edge-triggering
+  left it in `pressed` forever, guest-side stuck Super until a later
+  full focus cycle. Escape combos fire three ways:
   daemon-installed `command:` actions (kglobalaccel/gsettings — the
   only kind installed host-side for dmabuf; the others are viewer
   dispatches), root-window XGrabKey passive grabs (Async modes, 4

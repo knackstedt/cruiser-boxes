@@ -1450,7 +1450,6 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     // its host target (focus move, WM passive grabs) as if we never held
     // it. Focus loss ungrabs both; `ungrab`/`abort` escapes hold the
     // grabs off until the focus cycles (abort also iconifies the window).
-    let mut was_active = false;
     let mut grabbed = false;
     let mut pgrabbed = false;
     let mut grab_hold_off = false;
@@ -1836,13 +1835,17 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
             }
             unsafe { XFlush(xdpy); }
         }
-        if was_active && !active {
+        // Drain while unfocused, not just on the observed true→false edge:
+        // a focus cycle that opens AND closes inside one `win.update()`
+        // batch never shows the edge, yet a press delivered in that window
+        // still lands on xdpy (autorepeat of a held mod mid VD-switch) and
+        // would sit in `pressed` forever — the guest sees it held until a
+        // later full focus cycle happens to drain it.
+        if !active {
             swallowed.clear();
-            let ups: Vec<u32> = pressed.drain().collect();
-            for q in ups { let _ = itx.send(In::Key(q, false)); }
+            for q in pressed.drain() { let _ = itx.send(In::Key(q, false)); }
             for (b, ci) in btns_down.drain() { let _ = itx.send(In::Btn(ci, b, false)); }
         }
-        was_active = active;
         // Pointer position. While the pointer grab is held minifb's
         // event-fed state is stale (motion isn't in the grab mask), so
         // sample via XQueryPointer — a REQUEST, immune to grabs. Ungrabbed,
