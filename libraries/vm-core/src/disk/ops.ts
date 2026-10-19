@@ -144,10 +144,36 @@ export async function snapshotList(qemuImg: string, disk: string, keyFile?: stri
     return (await diskInfo(qemuImg, disk, keyFile)).snapshots;
 }
 
-/** Live snapshot via QMP snapshot-save (QEMU ≥6). Needs a vmstate qcow2 target. */
-export async function liveSnapshot(qmp: QmpClient, vmstateFile: string): Promise<void> {
-    await qmp.snapshotSave(vmstateFile);
-    // completion arrives as JOB_STATUS_CHANGE events; caller polls/waits
+/** Wait for a QMP job (snapshot-save/load/delete, backup) to conclude.
+ *  JOB_STATUS_CHANGE carries no error — the failure string lives in
+ *  query-jobs; the job is dismissed either way. On timeout the job is
+ *  cancelled and the call rejects. */
+export async function waitJob(qmp: QmpClient, jobId: string, timeoutMs = 10 * 60_000): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+        const onEv = (e: any) => {
+            if (e.event !== "JOB_STATUS_CHANGE" || e.data?.id !== jobId
+                || e.data?.status !== "concluded") return;
+            void (async () => {
+                const jobs = await qmp.execute("query-jobs").catch(() => [] as any[]);
+                const err = (jobs ?? []).find((j: any) => j?.id === jobId)?.error;
+                await qmp.jobDismiss(jobId).catch(() => {});
+                finish(() => err ? reject(new Error(String(err))) : resolve());
+            })();
+        };
+        const timer = setTimeout(() => {
+            void (async () => {
+                await qmp.execute("job-cancel", { id: jobId }).catch(() => {});
+                await qmp.jobDismiss(jobId).catch(() => {});
+                finish(() => reject(new Error("job timed out")));
+            })();
+        }, timeoutMs);
+        function finish(fn: () => void) {
+            clearTimeout(timer);
+            qmp.off("event", onEv);
+            fn();
+        }
+        qmp.on("event", onEv);
+    });
 }
 
 /** Sparse-rewrite a stopped VM's image in place: qemu-img convert drops
@@ -219,7 +245,9 @@ export async function backupLive(qmp: QmpClient, diskNode: string, destPath: str
     let ok = false;
     try {
         await qmp.execute("blockdev-add", {
-            node_name: targetNode,
+            // QAPI spells it "node-name" — a node_name key here just
+            // errors "Parameter 'node_name' is unexpected".
+            "node-name": targetNode,
             driver: "qcow2",
             file: { driver: "file", filename: destPath },
             ...(encrypted ? { encrypt: { format: "luks", "key-secret": DISK_SECRET_ID } } : {}),
@@ -273,7 +301,7 @@ export async function backupLive(qmp: QmpClient, diskNode: string, destPath: str
         // The target node keeps an open fd on the destination — drop it on
         // every path. A failed run also drops the partial backup file so it
         // can't masquerade as a valid backup.
-        await qmp.execute("blockdev-del", { node_name: targetNode }).catch(() => {});
+        await qmp.execute("blockdev-del", { "node-name": targetNode }).catch(() => {});
         if (!ok) await rm(destPath, { force: true }).catch(() => {});
     }
 }
@@ -295,7 +323,9 @@ export async function diskNodeName(qmp: QmpClient, diskPath: string): Promise<st
     const suffixHits: string[] = [];
     for (let i = 0; i < (blocks ?? []).length; i++) {
         const ins = blocks[i]?.inserted;
-        const node = ins?.node_name ?? blocks[i]?.device;
+        // QMP spells it "node-name" — a frontend-only drive (no blockdev
+        // node) falls back to its device name, which backup ops accept.
+        const node = ins?.["node-name"] ?? ins?.node_name ?? blocks[i]?.device;
         if (!node) continue;
         const f = fileName(ins?.file) ?? fileName(ins?.image?.filename);
         if (f === diskPath) return node;

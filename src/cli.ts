@@ -75,6 +75,8 @@ usage: cruiser <area> <command> [args]
   vm start <name> [--mode <headmode>] [--no-view]         (auto-opens the viewer like the UI)
   vm stop <name>                        vm kill <name>
   vm reboot <name>                      vm suspend|resume <name>   (QGA reboot / QMP pause+cont)
+  vm hibernate <name>                   save RAM+disk state and power off — 'vm start'
+                                       resumes it (≈ guest-RAM-sized vmstate file)
   vm status <name>                      vm args <name>   (print QEMU argv)
   vm stats <name>                       point-in-time summary — state, guest OS, memory
                                        (incl. balloon), host+guest disk usage, ifaces
@@ -89,6 +91,8 @@ usage: cruiser <area> <command> [args]
   vm forward rm <name> <hostPort> [udp]   live slirp forwards — persist to the spec
                                         (--force also drops the auto ssh/rdp pair)
   vm snapshots <name>                   vm snapshot <name> <snapname>
+                                       (running VMs get a LIVE snapshot — RAM state
+                                       included; restore boots straight back into it)
   vm restore <name> <snapname>          vm snapshot-rm <name> <snapname>
   vm backup <name> <dest.qcow2>         vm resize <name> <newGiB>
   vm fstrim <name>                      discard free blocks in the guest (running VM)
@@ -457,6 +461,14 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
         case "kill": { const h = await needVm(args[0]); await h.kill(); console.log("killed"); break; }
         case "reboot": { const h = await needVm(args[0]); await h.reboot(); console.log("reboot requested"); break; }
         case "suspend": { const h = await needVm(args[0]); await h.suspend(); console.log("suspended (vcpus paused)"); break; }
+        case "hibernate": {
+            const h = await needVm(args[0]);
+            try {
+                await h.hibernate();
+                console.log(`${h.spec.name} hibernated — memory + disk state saved; next 'vm start' resumes it`);
+            } catch (e) { console.error(`hibernate failed: ${e instanceof Error ? e.message : e}`); process.exit(1); }
+            break;
+        }
         case "resume": { const h = await needVm(args[0]); await h.resume(); console.log("resumed"); break; }
         case "status": { const h = await needVm(args[0]); console.log(await h.probe()); break; }
         case "stats": {

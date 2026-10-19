@@ -266,7 +266,24 @@ export class VmHandle {
         if (this.spec.disk.encrypt !== "off") await this.ensureAuxDisks();
         if (!existsSync(this.paths.ovmfVars)) await copyFile(ovmfVarsTemplate(), this.paths.ovmfVars);
 
-        const built = await this.buildArgv(opts);
+        // Hibernate resume: a run/hibernate.vmstate from hibernate() means
+        // this boot is a state-load, not a cold boot — -S freezes the cpus
+        // at startup and snapshot-load drops in RAM + rolls the disks.
+        const resumeVs = join(this.paths.run, "hibernate.vmstate");
+        const resuming = existsSync(resumeVs);
+        // The GPU device's max_outputs must match the SAVE-time argv or
+        // virtio-gpu's vmstate refuses to load — the launch-time monitor
+        // list is persisted next to launch-spec for exactly this.
+        let savedMons: BuildOpts["guestMonitors"] | undefined;
+        if (resuming) {
+            try { savedMons = JSON.parse(readFileSync(this.launchMonitorsPath(), "utf-8")); } catch { /* fall back to caller's */ }
+        }
+
+        const built = await this.buildArgv({
+            ...opts,
+            guestMonitors: resuming ? (savedMons ?? opts.guestMonitors) : opts.guestMonitors,
+            extraArgs: [...(opts.extraArgs ?? []), ...(resuming ? ["-S"] : [])],
+        });
         void appendVmLog(this.paths, `start: mode=${opts.mode ?? "run"} persist=${this.spec.persist} gpu=${this.spec.gpu.mode}`);
 
         // virtiofsd daemons must be up before QEMU opens the sockets —
@@ -298,11 +315,18 @@ export class VmHandle {
                 if (existsSync(this.paths.monitorSock)) {
                     try {
                         await this.withQmp((q) => q.queryStatus());
-                        void appendVmLog(this.paths, `started: pid ${this.pid()}`);
+                        void appendVmLog(this.paths, `started: pid ${this.pid()}${resuming ? " (hibernate resume)" : ""}`);
+                        if (resuming)
+                            await this.loadVmstate(resumeVs, "hibernate", { dropAfter: true });
                         // Snapshot the spec QEMU actually launched with —
                         // pendingRestart() diffs later saves against it.
                         await writeFile(this.paths.launchSpec,
                             JSON.stringify(this.spec)).catch(() => {});
+                        // …and the monitor list that shaped the GPU device —
+                        // a live-snapshot/hibernate restore must reproduce
+                        // that exact max_outputs.
+                        await writeFile(this.launchMonitorsPath(),
+                            JSON.stringify(opts.guestMonitors ?? [])).catch(() => {});
                         this.watchVfsd();
                         return;
                     } catch { /* not ready */ }
@@ -535,17 +559,146 @@ export class VmHandle {
 
     async diskInfo() { return disk.diskInfo((await this.tc()).qemuImg, this.diskPath(), this.diskKeyRead()); }
     async snapshots() { return disk.snapshotList((await this.tc()).qemuImg, this.diskPath(), this.diskKeyRead()); }
+    /** run/launch-monitors.json — the guestMonitors BuildOpts a live boot
+     *  used; a snapshot-load must reproduce the same GPU device shape. */
+    private launchMonitorsPath(): string {
+        return join(this.paths.run, "launch-monitors.json");
+    }
+
+    /** snapshots/<name>.vmstate — RAM+device state for live snapshots. */
+    private snapVmstate(name: string): string {
+        return join(this.paths.snapshotsDir, `${name}.vmstate`);
+    }
+
+    /** Block nodes a live snapshot must cover — the system disk plus the
+     *  encrypt=home volume when it exists. */
+    private async snapNodes(q: QmpClient): Promise<string[]> {
+        const nodes = [await disk.diskNodeName(q, this.diskPath())];
+        const hp = this.homeDiskPath();
+        if (this.spec.disk.encrypt === "home" && hp && existsSync(hp))
+            nodes.push(await disk.diskNodeName(q, hp));
+        return nodes;
+    }
+
+    /** snapshot-save/load's `vmstate` arg is a blockdev NODE name, not a
+     *  filename — register the qcow2 first, drop the node after. */
+    private static async addVmstateNode(q: QmpClient, file: string): Promise<string> {
+        const node = `vmstate-${Date.now()}`;
+        await q.execute("blockdev-add", {
+            "node-name": node, driver: "qcow2",
+            file: { driver: "file", filename: file },
+        });
+        return node;
+    }
+
+    /** QMP snapshot-load into a paused QEMU — brings back RAM + device
+     *  state and rolls every device to the tag's internal snapshot in one
+     *  job. dropAfter also drops the tag + vmstate file (hibernate is a
+     *  one-shot state). */
+    private async loadVmstate(vmstate: string, tag: string, { dropAfter = false } = {}): Promise<void> {
+        await this.withQmp(async (q) => {
+            const nodes = await this.snapNodes(q);
+            const vsNode = await VmHandle.addVmstateNode(q, vmstate);
+            try {
+                const jobId = `snapload-${Date.now()}`;
+                // devices must INCLUDE the vmstate node — QEMU looks the
+                // vmstate name up among them, not globally.
+                await q.execute("snapshot-load", { "job-id": jobId, tag, vmstate: vsNode, devices: [...nodes, vsNode] });
+                await disk.waitJob(q, jobId);
+                if (dropAfter) {
+                    const dj = `snapdel-${Date.now()}`;
+                    await q.execute("snapshot-delete", { "job-id": dj, tag, vmstate: vsNode, devices: [...nodes, vsNode] }).catch(() => {});
+                    await disk.waitJob(q, dj).catch(() => {});
+                    await rm(vmstate, { force: true }).catch(() => {});
+                }
+            } finally {
+                await q.execute("blockdev-del", { "node-name": vsNode }).catch(() => {});
+            }
+            // -S boots stay paused after the load — resume explicitly
+            // (a no-op when the state already runs).
+            await q.cont().catch(() => {});
+        });
+    }
+
     async snapshot(name: string) {
-        if (this.isRunning()) throw new Error("stop the VM before taking a snapshot (qemu-img needs the disk offline)");
+        if (this.isRunning()) {
+            // Live snapshot: QMP snapshot-save writes RAM+device state to a
+            // vmstate file and tags an internal snapshot on every covered
+            // disk — `vm snapshots` shows it like any other. GL devices
+            // (virgl/venus) go through the migration path and QEMU refuses
+            // them — software GPUs are the only migratable display.
+            if (this.spec.gpu.mode !== "software")
+                throw new Error("live snapshots need gpu.mode=software — virgl/venus devices aren't migratable; stop the VM for an offline snapshot");
+            await mkdir(this.paths.snapshotsDir, { recursive: true });
+            // vmstate must be a pre-created qcow2 (RAM-sized + slack).
+            await disk.createDisk((await this.tc()).qemuImg, this.snapVmstate(name),
+                Math.ceil(this.spec.resources.memoryMiB / 1024) + 1);
+            return this.withQmp(async (q) => {
+                const nodes = await this.snapNodes(q);
+                const vsNode = await VmHandle.addVmstateNode(q, this.snapVmstate(name));
+                try {
+                    const jobId = `snap-${Date.now()}`;
+                    await q.execute("snapshot-save", {
+                        "job-id": jobId, tag: name, vmstate: vsNode,
+                        devices: [...nodes, vsNode],   // vmstate must be listed too
+                    });
+                    await disk.waitJob(q, jobId);
+                } finally {
+                    await q.execute("blockdev-del", { "node-name": vsNode }).catch(() => {});
+                }
+            });
+        }
         return disk.snapshotCreate((await this.tc()).qemuImg, this.diskPath(), name, this.needDiskKey());
     }
     async restoreSnapshot(name: string) {
         if (this.isRunning()) throw new Error("stop the VM before restoring a snapshot");
+        const vs = this.snapVmstate(name);
+        if (existsSync(vs)) {
+            // A live snapshot carries RAM state — boot paused, then
+            // snapshot-load rolls disk + drops in the memory image. The
+            // launch-time monitor list reproduces the GPU shape the state
+            // was saved under.
+            let mons: BuildOpts["guestMonitors"] | undefined;
+            try { mons = JSON.parse(readFileSync(this.launchMonitorsPath(), "utf-8")); } catch { /* no snapshot — undefined is fine */ }
+            await this.start({ guestMonitors: mons, extraArgs: ["-S"] });
+            await this.loadVmstate(vs, name);
+            return;
+        }
         return disk.snapshotApply((await this.tc()).qemuImg, this.diskPath(), name, this.needDiskKey());
     }
     async deleteSnapshot(name: string) {
         if (this.isRunning()) throw new Error("stop the VM before deleting a snapshot");
+        await rm(this.snapVmstate(name), { force: true }).catch(() => {});
         return disk.snapshotDelete((await this.tc()).qemuImg, this.diskPath(), name, this.needDiskKey());
+    }
+
+    /** Suspend-to-disk: live snapshot tagged "hibernate" with vmstate in
+     *  run/, then QEMU quits. The next start() detects the file, boots
+     *  paused (-S), snapshot-loads, and drops the state. Memory-hungry —
+     *  the vmstate file is roughly guest-RAM sized. */
+    async hibernate(): Promise<void> {
+        if (!this.isRunning()) throw new Error("start the VM to hibernate it");
+        if (this.spec.gpu.mode !== "software")
+            throw new Error("hibernate needs gpu.mode=software — virgl/venus devices aren't migratable");
+        const vs = join(this.paths.run, "hibernate.vmstate");
+        await disk.createDisk((await this.tc()).qemuImg, vs,
+            Math.ceil(this.spec.resources.memoryMiB / 1024) + 1);
+        await this.withQmp(async (q) => {
+            const nodes = await this.snapNodes(q);
+            const vsNode = await VmHandle.addVmstateNode(q, vs);
+            const jobId = `hib-${Date.now()}`;
+            await q.execute("snapshot-save", {
+                "job-id": jobId, tag: "hibernate", vmstate: vsNode,
+                devices: [...nodes, vsNode],   // vmstate must be listed too
+            });
+            await disk.waitJob(q, jobId);
+            await q.quit();
+        });
+    }
+
+    /** A hibernate image is pending — start() will resume it. */
+    hibernated(): boolean {
+        return existsSync(join(this.paths.run, "hibernate.vmstate"));
     }
     async resizeDisk(newSizeGiB: number) {
         if (this.isRunning()) throw new Error("stop the VM before resizing the disk (guest growfs happens next boot)");
