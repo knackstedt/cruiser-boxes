@@ -75,8 +75,8 @@ usage: cruiser <area> <command> [args]
                                    [--mode mount|copy] [--delete] [--disabled]
   vm share rm <name> <tag|hostPath>
   vm filesync <name> [--watch]     run copy-mode shares now (--watch keeps syncing live)
-  vm start <name> [--mode <headmode>] [--no-view]         (auto-opens the viewer like the UI)
-  vm stop <name>                        vm kill <name>
+  vm start <name...> [--all] [--mode <headmode>] [--no-view]   (1 name → auto-opens the viewer like the UI)
+  vm stop <name...> [--all]             vm kill <name>
   vm reboot <name>                      vm suspend|resume <name>   (QGA reboot / QMP pause+cont)
   vm hibernate <name>                   save RAM+disk state and power off — 'vm start'
                                        resumes it (≈ guest-RAM-sized vmstate file)
@@ -376,48 +376,63 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             break;
         }
         case "start": {
-            const h = await needVm(args[0]);
-            // Encrypted VMs need the passphrase materialized before QEMU —
-            // flag/env, then a tty prompt for key-storage=prompt VMs.
-            await ensureDiskKey(h);
-            if (!existsSync(h.diskPath())) {
-                await mkdir(h.paths.dir, { recursive: true });
-                console.log(`creating disk ${h.diskPath()} (${h.spec.disk.sizeGiB}G sparse)`);
-                await createDisk((await resolveToolchain()).qemuImg, h.diskPath(), h.spec.disk.sizeGiB,
-                    h.spec.disk.encrypt === "full" ? h.diskKeyFile() ?? undefined : undefined);
-            }
-            const mode = flagVal("--mode");
-            if (mode) {
-                const m = HeadMode.safeParse(mode);
-                if (!m.success) { console.error(`bad --mode '${mode}' — expected ${HeadMode.options.join("|")}`); process.exit(2); }
-                h.spec.display.headMode = m.data;
-            }
-            const { hostMirroredGuestMonitors } = await import("../libraries/provision/src/monitors");
-            await cliAutoSnap(h, "start");
-            await h.start({ guestMonitors: await hostMirroredGuestMonitors(h.spec) });
-            console.log(`${h.spec.name} started (pid ${h.pid()})`);
-            // Match the UI's Start button: poll for guest login, then launch the
-            // viewer and place its window per headMode. headMode "app" has no
-            // freerdp viewer (waypipe is explicit).
-            if (!has("--no-view") && h.spec.display.headMode !== "app") {
-                console.log(`waiting for ${h.spec.name} guest login (rdp :${h.spec.network.rdpPort ?? "–"})…`);
-                try {
-                    const { openVmSession } = await import("../libraries/provision/src/session");
-                    const sess = await openVmSession(h, {
-                        rdpWaitMs: 180_000,
-                        log: (m) => console.log(`${h.spec.name}: ${m}`),
-                    });
-                    console.log("viewer opened — close the window or ctrl+c to end the session");
-                    await holdViewer(sess.viewer);
-                } catch (e) { console.error(`viewer: ${e instanceof Error ? e.message : e}`); }
+            // bulk: `vm start a b c` or `--all` — start() early-returns on
+            // already-running VMs, and multi-target starts never open viewers.
+            const names = has("--all")
+                ? (await registry.list()).map((h) => h.spec.name)
+                : args;
+            if (!names.length) usage();
+            const view = !has("--no-view") && names.length === 1;
+            for (let i = 0; i < names.length; i++) {
+                const h = await needVm(names[i]);
+                // Encrypted VMs need the passphrase materialized before QEMU —
+                // flag/env, then a tty prompt for key-storage=prompt VMs.
+                await ensureDiskKey(h);
+                if (!existsSync(h.diskPath())) {
+                    await mkdir(h.paths.dir, { recursive: true });
+                    console.log(`creating disk ${h.diskPath()} (${h.spec.disk.sizeGiB}G sparse)`);
+                    await createDisk((await resolveToolchain()).qemuImg, h.diskPath(), h.spec.disk.sizeGiB,
+                        h.spec.disk.encrypt === "full" ? h.diskKeyFile() ?? undefined : undefined);
+                }
+                const mode = flagVal("--mode");
+                if (mode) {
+                    const m = HeadMode.safeParse(mode);
+                    if (!m.success) { console.error(`bad --mode '${mode}' — expected ${HeadMode.options.join("|")}`); process.exit(2); }
+                    h.spec.display.headMode = m.data;
+                }
+                const { hostMirroredGuestMonitors } = await import("../libraries/provision/src/monitors");
+                await cliAutoSnap(h, "start");
+                await h.start({ guestMonitors: await hostMirroredGuestMonitors(h.spec) });
+                console.log(`${h.spec.name} started (pid ${h.pid()})`);
+                // Match the UI's Start button: poll for guest login, then launch the
+                // viewer and place its window per headMode. headMode "app" has no
+                // freerdp viewer (waypipe is explicit).
+                if (view && h.spec.display.headMode !== "app") {
+                    console.log(`waiting for ${h.spec.name} guest login (rdp :${h.spec.network.rdpPort ?? "–"})…`);
+                    try {
+                        const { openVmSession } = await import("../libraries/provision/src/session");
+                        const sess = await openVmSession(h, {
+                            rdpWaitMs: 180_000,
+                            log: (m) => console.log(`${h.spec.name}: ${m}`),
+                        });
+                        console.log("viewer opened — close the window or ctrl+c to end the session");
+                        await holdViewer(sess.viewer);
+                    } catch (e) { console.error(`viewer: ${e instanceof Error ? e.message : e}`); }
+                }
             }
             break;
         }
         case "stop": {
-            const h = await needVm(args[0]);
-            const out = await h.stop();
-            console.log(out === "stopped" ? "stopped" : "still running — guest ignored shutdown; use kill");
-            if (out === "stopped") await cliAutoSnap(h, "stop");
+            const names = has("--all")
+                ? (await registry.list()).filter((h) => h.isRunning()).map((h) => h.spec.name)
+                : args;
+            if (!names.length) usage();
+            for (let i = 0; i < names.length; i++) {
+                const h = await needVm(names[i]);
+                const out = await h.stop();
+                console.log(`${h.spec.name}: ${out === "stopped" ? "stopped" : "still running — guest ignored shutdown; use kill"}`);
+                if (out === "stopped") await cliAutoSnap(h, "stop");
+            }
             break;
         }
         case "rename": {

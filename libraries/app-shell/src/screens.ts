@@ -659,6 +659,7 @@ function vmDetail(s: CruiserState): RouteBody {
         <div class="hint">a *.cruiser.{yaml,toml,json} doc captures the whole spec — import one from the New VM screen</div>
         ${shareSection(vm, s, up)}
         ${fwdSection(vm, s)}
+        ${mountSection(vm)}
         <div class="h2">Snapshots</div>
         ${snapSection}`;
     return {
@@ -752,6 +753,23 @@ function fwdSection(vm: VmSummary, s: CruiserState): string {
         ${rows}
         ${ff.open ? form
             : `<div style="margin-top:10px">${btn("+ Add forward", "fwd-form", attr("field", "open") + attr("value", "true"), "btn sm")}</div>`}`;
+}
+
+/** Guest→host sshfs mount — mounts the guest home at
+ *  ~/.local/share/cruiser/mounts/<vm> (same as `vm mount`). */
+function mountSection(vm: VmSummary): string {
+    const row = vm.mount
+        ? `<div class="vmrow">
+            <div class="grow"><code>${esc(vm.mount)}</code>
+                <div class="vmmode">guest /home/${esc(vm.username)} via sshfs</div></div>
+            ${btn("Open", "vm-open-mount", attr("vm", vm.name), "btn sm")}
+            ${btn("Unmount", "vm-umount", attr("vm", vm.name), "btn sm")}
+        </div>`
+        : `<div class="meta">not mounted — mounts the guest's home dir on the host via sshfs (cli: vm mount)</div>
+           <div style="margin-top:10px">${btn("Mount guest files", "vm-mount", attr("vm", vm.name), "btn sm")}</div>`;
+    return `<div class="h2">Guest files</div>
+        <div class="hint" style="margin-left:0">sshfs over the VM's forwarded ssh port — the guest must be running.</div>
+        ${row}`;
 }
 
 // ── logs ──

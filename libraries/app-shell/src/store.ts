@@ -58,6 +58,9 @@ export interface VmSummary {
     vd: number;                    // display.virtualDesktop (edit form)
     usbKeys: string[];             // spec.usb.autoAttach as "vid:pid:serial" keys
     forwards: FwdRow[];            // spec.network.hostfwd (auto = the ssh/rdp pair)
+    /** host mountpoint when the guest home is sshfs-mounted (default
+     *  ~/.local/share/cruiser/mounts/<vm>), null when unmounted. */
+    mount?: string | null;
     sync?: Record<string, boolean>; // spec.sync.* — feeds the edit form
     /** Spec sections changed while running that only apply at next boot
      *  (VmHandle.pendingRestart) — drives the "restart pending" marker. */

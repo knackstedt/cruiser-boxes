@@ -10,6 +10,7 @@ import { defaultSpec, DevTool, VmSpec } from "../../vm-core/src/config/schema";
 import { makeShare } from "../../vm-core/src/config/shares";
 import { CACHE_DIR, CLOUDIMG_DIR, CONFIG_DIR, DATA_DIR, ISO_DIR, VMS_DIR } from "../../vm-core/src/paths";
 import { detectAdapter, detectSession } from "../../host-int/src/detect";
+import { defaultMountpoint, isMounted } from "../../host-int/src/mount";
 import type { VmSession } from "../../provision/src/session";
 import { ViewerSession } from "../../host-int/src/session";
 import { listUsbDevices } from "../../vm-core/src/usb/usb";
@@ -243,6 +244,7 @@ export class CruiserService {
                 auto: (f.guestPort === 22 && f.hostPort === s.network.sshPort)
                     || (f.guestPort === 3389 && f.hostPort === s.network.rdpPort),
             })),
+            mount: isMounted(defaultMountpoint(s.name)) ? defaultMountpoint(s.name) : null,
             sync: { ...s.sync },
             pendingRestart: h.pendingRestart(),
             cpu: [], mem: [], disk: [], net: [], gpu: [],
@@ -985,6 +987,34 @@ export class CruiserService {
         await this.run(`remove forward :${hostPort}`, () =>
             h.applyForwards(h.spec.network.hostfwd.filter((f) => !(f.proto === proto && f.hostPort === hostPort))),
             { vm: name, verb: "removing forward" });
+    }
+
+    // ── guest→host sshfs mount (cli: vm mount/umount) ──
+
+    async mountVm(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        await this.run(`mount ${name}`, async () => {
+            const { mountGuest } = await import("../../host-int/src/mount");
+            const m = await mountGuest(h);
+            this.paintFast();
+            return m.mountpoint;
+        }, { done: (mp) => `mounted ${name} → ${mp}`, vm: name, verb: "mounting" });
+    }
+
+    async umountVm(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        await this.run(`unmount ${name}`, async () => {
+            const { umountGuest } = await import("../../host-int/src/mount");
+            await umountGuest(name);
+            this.paintFast();
+        }, { vm: name, verb: "unmounting" });
+    }
+
+    async openMount(name: string): Promise<void> {
+        const mp = this.store.getState().vms.find((v) => v.name === name)?.mount;
+        if (!mp) return;
+        const { spawnChild } = await import("../../sys/src/exec");
+        spawnChild("xdg-open", [mp], { detached: true }).unref();
     }
 
     /** Clone a stopped VM — auto-names '<name>-copy' ('-copy-2'…). The disk

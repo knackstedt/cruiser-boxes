@@ -292,6 +292,9 @@ export class CruiserShell {
             if (d.vm && this.armed(`fwd-rm:${d.vm}:${d.proto}:${d.port}`))
                 void svc.fwdRm(d.vm, Number(d.port), String(d.proto ?? "tcp") as "tcp" | "udp");
         });
+        this.host.onAction("vm-mount", (d) => { if (d.vm) void svc.mountVm(d.vm); });
+        this.host.onAction("vm-umount", (d) => { if (d.vm) void svc.umountVm(d.vm); });
+        this.host.onAction("vm-open-mount", (d) => { if (d.vm) void svc.openMount(d.vm); });
         this.host.onAction("log-set", (d) => {
             const f = d.field;
             if (!f) return;

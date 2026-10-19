@@ -11,7 +11,7 @@
 // ============================================================================
 
 import { mkdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DATA_DIR } from "../../vm-core/src/paths";
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
@@ -76,6 +76,15 @@ export async function mountGuest(h: VmHandle, guestPath?: string, mountpoint?: s
         });
     }
     return { vm: spec.name, guestPath: gp, mountpoint: mp };
+}
+
+/** Is `mountpoint` a live mount right now? /proc/self/mounts parse — no
+ *  statfs/mountpoint fork for a UI refresh that runs per VM per tick. */
+export function isMounted(mountpoint: string): boolean {
+    try {
+        return readFileSync("/proc/self/mounts", "utf-8").split("\n")
+            .some((l) => l.split(" ")[1] === mountpoint);
+    } catch { return false; }
 }
 
 /** Unmount a guest mount (default mountpoint if not given); idempotent. */
