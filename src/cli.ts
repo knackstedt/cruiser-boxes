@@ -93,6 +93,8 @@ usage: cruiser <area> <command> [args]
                                        drops internal snapshots — --force accepts that)
   vm clone <name> <newname>             clone a stopped VM — fresh ports, disk copied without snapshots
   vm rename <name> <newname>            rename a stopped VM (moves the vm dir, keeps everything)
+  vm autostart <name> [on|off]          start this VM with the app + at login (systemd
+                                       --user unit, headless — opens no console)
   vm rm <name> [--disk]                vm view <name>   launch freerdp viewer + place window
   vm ssh <name> [cmd...]               interactive guest shell (or run cmd) over the cruiser key
   vm serial <name>                     interactive serial console on ttyS1 (ctrl+] to detach) —
@@ -399,6 +401,43 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
                 const nh = await registry.rename(args[0]!, args[1]);
                 console.log(`renamed ${args[0]} → ${nh.spec.name}`);
             } catch (e) { console.error(`rename failed: ${e instanceof Error ? e.message : e}`); process.exit(1); }
+            break;
+        }
+        case "autostart": {
+            const h = await needVm(args[0]);
+            const v = args[1];
+            if (v === undefined) { console.log(`${h.spec.name} autostart: ${h.spec.autostart ? "on" : "off"}`); break; }
+            if (v !== "on" && v !== "off") usage();
+            h.spec.autostart = v === "on";
+            await h.saveSpec();
+            const { syncAutostartUnit, autostartNames } = await import("../libraries/vm-core/src/lifecycle/autostart");
+            const installed = await syncAutostartUnit(autostartNames(registry.list()));
+            console.log(`${h.spec.name} autostart ${v}` +
+                (installed ? " — boot unit enabled (starts headless at login)" : ""));
+            break;
+        }
+        case "autostart-run": {
+            // systemd --user oneshot (and usable manually): start every
+            // flagged VM headless — a viewer never opens from this edge.
+            // Prompt-locked disks can't unblock here (no tty) — flag/env
+            // only, then skip.
+            const { autostartNames } = await import("../libraries/vm-core/src/lifecycle/autostart");
+            const names = autostartNames(registry.list());
+            for (const name of names) {
+                const h = registry.get(name)!;
+                if (h.isRunning()) continue;
+                try {
+                    if (h.spec.disk.encrypt !== "off" && !h.diskKeyFile()) {
+                        const pw = flagVal("--disk-password") ?? process.env.CRUISER_DISK_PASSWORD;
+                        if (!pw) throw new Error("disk passphrase needed — store-mode keys autostart, prompt-mode can't");
+                        await h.provideDiskKey(pw);
+                    }
+                    await h.start({});
+                    console.log(`autostart: ${name} started`);
+                } catch (e) {
+                    console.error(`autostart: ${name} failed — ${e instanceof Error ? e.message : e}`);
+                } finally { await h.clearDiskKey().catch(() => {}); }
+            }
             break;
         }
         case "clone": {

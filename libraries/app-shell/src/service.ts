@@ -5,6 +5,7 @@
 
 import { VmRegistry } from "../../vm-core/src/lifecycle/registry";
 import { VmHandle } from "../../vm-core/src/lifecycle/vm";
+import { syncAutostartUnit, autostartNames } from "../../vm-core/src/lifecycle/autostart";
 import { defaultSpec, DevTool, VmSpec } from "../../vm-core/src/config/schema";
 import { makeShare } from "../../vm-core/src/config/shares";
 import { CACHE_DIR, CLOUDIMG_DIR, CONFIG_DIR, DATA_DIR, ISO_DIR, VMS_DIR } from "../../vm-core/src/paths";
@@ -75,6 +76,11 @@ export class CruiserService {
             this.refreshSettings().catch(() => {}),
         ]);
         this.pollTimer = setInterval(() => this.refresh().catch(() => {}), 3000);
+        // spec.autostart edge: flagged VMs start with the app, headless —
+        // the boot edge (systemd --user unit) runs the same set via
+        // `vm autostart-run`. Prompt-locked disks park on the unlock
+        // banner; low-space autosnap parks on the space prompt.
+        this.autostartVms().catch(() => {});
         // "follow" on the logs screen — re-fetch while it's open; a slow
         // journal fetch just overlaps the next tick (loading flag guards).
         this.logTimer = setInterval(() => {
@@ -104,6 +110,22 @@ export class CruiserService {
                 const { rm } = await import("node:fs/promises");
                 await rm(h.paths.dir, { recursive: true, force: true }).catch(() => {});
             }
+        }
+    }
+
+    /** App-launch autostart — flagged stopped VMs boot headless (no
+     *  viewer: autostart readies the guest, an explicit start/view opens
+     *  the console). Serialized so a slow first boot doesn't fan out
+     *  parallel QEMU starts. */
+    private async autostartVms(): Promise<void> {
+        for (const h of this.handles.values()) {
+            if (!h.spec.autostart || h.isRunning()) continue;
+            if (!this.diskKeyReady(h, "start")) continue;
+            if (!(await this.autoSnapEdge(h, "start"))) continue;
+            await this.run(`start ${h.spec.name}`, async () => {
+                const { hostMirroredGuestMonitors } = await import("../../provision/src/monitors");
+                return h.start({ guestMonitors: await hostMirroredGuestMonitors(h.spec) });
+            }, { vm: h.spec.name, verb: "starting" });
         }
     }
 
@@ -201,7 +223,7 @@ export class CruiserService {
             cpus: s.resources.cpus, memMiB: s.resources.memoryMiB,
             diskGiB: s.disk.sizeGiB, nestedVirt: s.resources.nestedVirt,
             sshPort: s.network.sshPort, rdpPort: s.network.rdpPort,
-            provisioned: s.provisioned.method, persist: s.persist,
+            provisioned: s.provisioned.method, persist: s.persist, autostart: s.autostart,
             username: s.credentials.username, hasPassword: !!s.credentials.passwordFile,
             encrypt: s.disk.encrypt, keyStorage: s.disk.keyStorage,
             diskLocked: s.disk.encrypt !== "off" && h.diskKeyFile() === null,
@@ -465,6 +487,7 @@ export class CruiserService {
             spec.gpu.softwareVk = f.swVk;
             spec.display.headMode = f.headMode as VmSpec["display"]["headMode"];
             spec.persist = f.persist as VmSpec["persist"];
+            spec.autostart = f.autostart;
             spec.snapshots.auto = f.snapAuto as VmSpec["snapshots"]["auto"];
             spec.snapshots.trigger = f.snapTrigger as VmSpec["snapshots"]["trigger"];
             spec.snapshots.keep = f.snapKeep;
@@ -516,6 +539,8 @@ export class CruiserService {
             this.validateSpec(spec);
             const h = await this.registry.create(spec);
             this.handles.set(spec.name, h);
+            if (spec.autostart)
+                syncAutostartUnit(autostartNames(this.registry.list())).catch(() => {});
             // Hand the LUKS passphrase to the VM before any keyed disk op —
             // secrets/disk-key for "store" (boots unattended), transient
             // run/disk-key for "prompt" (provision/start clear it after
@@ -775,6 +800,7 @@ export class CruiserService {
             spec.display.headMode = f.headMode as VmSpec["display"]["headMode"];
             if (f.vd > 0) spec.display.virtualDesktop = f.vd;
             spec.persist = f.persist as VmSpec["persist"];
+            spec.autostart = f.autostart;
             spec.snapshots.auto = f.snapAuto as VmSpec["snapshots"]["auto"];
             spec.snapshots.trigger = f.snapTrigger as VmSpec["snapshots"]["trigger"];
             spec.snapshots.keep = f.snapKeep;
@@ -788,6 +814,9 @@ export class CruiserService {
             if (f.diskGiB !== h.spec.disk.sizeGiB) await h.resizeDisk(f.diskGiB);
             h.spec = spec;
             await h.saveSpec();
+            // autostart is live — the boot unit follows the flagged set.
+            if (prev.autostart !== spec.autostart)
+                syncAutostartUnit(autostartNames(this.registry.list())).catch(() => {});
             // headMode/virtualDesktop are live fields — a running viewer
             // re-places its window + retargets the KWin map rule right now.
             if (prev.display.headMode !== spec.display.headMode

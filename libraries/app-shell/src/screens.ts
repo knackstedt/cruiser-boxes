@@ -543,6 +543,7 @@ function create(s: CruiserState): string {
         ${vdPicker}
         ${optRow("Persist", "persist", f.persist, [["daemonize", "survives app"], ["owned", "stops with app"], ["ephemeral", "deleted on exit"]], "set-field", aptag("live"))}
         <div class="hint">${PERSIST_HINT[f.persist] ?? ""}</div>
+        ${checkRow("Start on boot", "autostart", f.autostart, "start with the app and at login — headless (open a console yourself); a systemd --user unit is installed while any VM is flagged", aptag("live"))}
         <div class="h2">Snapshots ${aptag("live")}</div>
         ${optRow("Auto snapshot", "snapAuto", f.snapAuto, [["off", "off"], ["daily", "daily"], ["weekly", "weekly"], ["monthly", "monthly"]])}
         ${f.snapAuto === "off" ? "" : `

@@ -17,5 +17,6 @@ export * from "./disk/ops";
 export * from "./usb/usb";
 export * from "./lifecycle/vm";
 export * from "./lifecycle/registry";
+export * from "./lifecycle/autostart";
 export * from "./sshkey";
 export * from "./logs";
