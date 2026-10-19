@@ -18,7 +18,8 @@
 import { z } from "zod";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { homedir } from "node:os";
 import { VmRegistry, VmSpec, VmHandle, HeadMode, DevTool, defaultSpec, type ShareSpec } from "../libraries/vm-core/src/index";
 import { makeShare } from "../libraries/vm-core/src/config/shares";
 import type { ViewerSession } from "../libraries/host-int/src/session";
@@ -92,6 +93,9 @@ usage: cruiser <area> <command> [args]
   vm ssh <name> [cmd...]               interactive guest shell (or run cmd) over the cruiser key
   vm serial <name>                     interactive serial console on ttyS1 (ctrl+] to detach) —
                                        works when ssh/QGA are dead; needs one restart to add the port
+  vm ssh-config <name>                 print an OpenSSH Host block for the VM
+          [--install|--remove]         manage it inside ~/.ssh/config (marked cruiser block) —
+                                       makes 'ssh <name>' and Remote-SSH just work
   vm cp <name>:<path> <local>          pull a file from the guest (QGA, ssh fallback)
   vm cp <local> <name>:<path>          push a file into the guest (~ expands)
   vm term <name>                       open the guest shell in a host terminal emulator window
@@ -493,7 +497,7 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
         case "compact": {
             const h = await needVm(args[0]);
             try {
-                const { before, after } = await h.compact({ force: args.includes("--force") });
+                const { before, after } = await h.compact({ force: has("--force") });
                 console.log(`compacted ${h.spec.name}: ${(before / (1 << 30)).toFixed(1)} GiB → ${(after / (1 << 30)).toFixed(1)} GiB`);
             } catch (e) { console.error(`compact failed: ${e instanceof Error ? e.message : e}`); process.exit(1); }
             break;
@@ -761,6 +765,44 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const { spawnSync } = await import("node:child_process");
             const r = spawnSync("ssh", a, { stdio: "inherit" });
             process.exit(r.status ?? (r.signal ? 1 : 0));
+        }
+        case "ssh-config": {
+            const h = await needVm(args[0]);
+            const port = h.spec.network.sshPort;
+            if (!port) { console.error(`'${h.spec.name}' has no ssh forward — provision it first`); process.exit(1); }
+            const { ensureKeypair } = await import("../libraries/vm-core/src/sshkey");
+            const { priv } = await ensureKeypair();
+            const name = h.spec.name;
+            const block = [
+                `# >>> cruiser ${name}`,
+                `Host ${name} cruiser-${name}`,
+                "    HostName 127.0.0.1",
+                `    Port ${port}`,
+                `    User ${h.spec.credentials.username}`,
+                `    IdentityFile ${priv}`,
+                "    IdentitiesOnly yes",
+                // localhost hostfwd — the host key changes whenever the VM
+                // is reprovisioned/cloned, so checking buys nothing.
+                "    StrictHostKeyChecking no",
+                "    UserKnownHostsFile /dev/null",
+                `# <<< cruiser ${name}`,
+            ].join("\n");
+            if (has("--install") || has("--remove")) {
+                const cfg = join(homedir(), ".ssh", "config");
+                let cur = "";
+                try { cur = await readFile(cfg, "utf-8"); } catch { /* no config yet */ }
+                const re = new RegExp(`\\n?# >>> cruiser ${name}\\n[\\s\\S]*?# <<< cruiser ${name}\\n?`);
+                cur = cur.replace(re, "");
+                if (has("--install")) cur = `${cur.trimEnd()}\n\n${block}\n`;
+                await mkdir(dirname(cfg), { recursive: true, mode: 0o700 });
+                await writeFile(cfg, cur, { mode: 0o600 });
+                console.log(has("--remove")
+                    ? `removed the cruiser ${name} block from ~/.ssh/config`
+                    : `installed — 'ssh ${name}' (and VS Code Remote-SSH → '${name}') works now`);
+                break;
+            }
+            console.log(`${block}\n\n# append to ~/.ssh/config, or re-run with --install`);
+            break;
         }
         case "serial": {
             const h = await needVm(args[0]);
