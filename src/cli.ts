@@ -45,6 +45,7 @@ usage: cruiser <area> <command> [args]
                    [--distro ubuntu|debian|fedora] [--desktop gnome|kde]
                    [--browser none|firefox|chrome|chromium|vivaldi|brave]
                    [--snap] [--xfonts] [--no-autologin] [--devtools toolchain,python,rust,…]
+                   [--provision-script <host-path>]  run at end of guest-setup (root, idempotent)
                    [--nested]                          expose vmx/svm to the guest (VMs in the VM —
                                                         needs the host kvm module's nested=1, see doctor)
                    [--sw-vk]                           venus: also expose host lavapipe (CPU Vulkan)
@@ -302,6 +303,11 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             if (has("--snap")) spec.os.snap = true;
             if (has("--xfonts")) spec.os.extraFonts = true;
             if (has("--no-autologin")) spec.os.autologin = false;
+            const hook = flagVal("--provision-script");
+            if (hook) {
+                if (!existsSync(hook)) { console.error(`--provision-script '${hook}' not found`); process.exit(2); }
+                spec.os.provisionScript = hook;
+            }
             const autosnap = flagVal("--autosnap"); if (autosnap) spec.snapshots.auto = autosnap as VmSpec["snapshots"]["auto"];
             const snapTrig = flagVal("--snap-trigger"); if (snapTrig) spec.snapshots.trigger = snapTrig as VmSpec["snapshots"]["trigger"];
             if (num("--snap-keep")) spec.snapshots.keep = num("--snap-keep")!;

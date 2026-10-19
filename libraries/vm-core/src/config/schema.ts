@@ -364,6 +364,11 @@ export const VmSpec = z.object({
         /** escape hatch: extra distro packages, installed at setup —
          *  expanded unquoted into the pkg manager line, hence strict names. */
         extraPackages: z.array(z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9.+:~_=-]*$/)).default([]),
+        /** host path to a shell script run at the END of guest-setup —
+         *  as root, with $U/$UHOME/$UUID already in scope (use `runuser
+         *  -u "$U"` for user-context steps). Re-runs on re-provision, so
+         *  the script should be idempotent. */
+        provisionScript: z.string().default(""),
     }).prefault({}),
 
     network: z.object({

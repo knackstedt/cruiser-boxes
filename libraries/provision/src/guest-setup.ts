@@ -7,6 +7,7 @@
 // service under plasma-workspace.target). Port of devvm's guest-setup.sh.
 // ============================================================================
 
+import { existsSync, readFileSync } from "node:fs";
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { appendVmLog, guestAgentContext } from "../../vm-core/src/logs";
@@ -377,6 +378,17 @@ chmod 755 /usr/local/bin/xdg-open
 udevadm control --reload-rules 2>/dev/null || true
 udevadm trigger --subsystem-match=virtio-ports 2>/dev/null || true`;
 
+    // os.provisionScript — the host file is inlined verbatim and runs LAST,
+    // as root, with $U/$UHOME/$UUID in scope; a stale path warns and skips
+    // rather than failing the whole setup. It runs under `set -eu`, so a
+    // failing hook keeps the OK marker away and surfaces as a setup error.
+    let provisionHook = "";
+    if (spec.os.provisionScript) {
+        provisionHook = existsSync(spec.os.provisionScript)
+            ? `# os.provisionScript (${spec.os.provisionScript})\n${readFileSync(spec.os.provisionScript, "utf-8")}`
+            : `echo "guest-setup: os.provisionScript ${spec.os.provisionScript} not found — skipped" >&2`;
+    }
+
     // NOTE: runs as root via QGA — user-context steps are explicitly `runuser`'d.
     // PATH is set explicitly: QGA exec on Fedora gets /usr/local/bin:/usr/bin.
     return `set -eu
@@ -409,6 +421,8 @@ ${guestDevtoolsScript(p)}
 ${!gnome || !o.monitorsXmlB64 ? "" : `mkdir -p "$UHOME/.config" && echo '${o.monitorsXmlB64}' | base64 -d > "$UHOME/.config/monitors.xml" && chown -R "$U":"$U" "$UHOME/.config"`}
 
 ${o.host ? guestSyncScript(spec, o.host) : ""}
+
+${provisionHook}
 echo CRUISER_GUEST_SETUP_OK
 `;
 }
