@@ -35,9 +35,13 @@ function bootSlice(s: VmSpec) {
         display: {
             viewer: s.display.viewer,
             clipboard: s.display.clipboard,
+            sound: s.display.sound,
+            microphone: s.display.microphone,
+            urlOpen: s.display.urlOpen,
             // guest monitor topology lands in the GPU device's outputs[].
             monitors: s.display.monitors,
         },
+        security: s.security,
         // hostfwd is LIVE: slirp accepts hostfwd_add/remove at runtime
         // (VmHandle.applyForwards) — mode/sshPort/rdpPort/vsock stay frozen.
         network: { mode: s.network.mode, sshPort: s.network.sshPort, rdpPort: s.network.rdpPort, vsock: s.network.vsock },

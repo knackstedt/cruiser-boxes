@@ -47,6 +47,7 @@ usage: cruiser <area> <command> [args]
                    [--snap] [--xfonts] [--no-autologin] [--devtools toolchain,python,rust,…]
                    [--provision-script <host-path>]  run at end of guest-setup (root, idempotent)
                    [--cpu-quota 50%] [--mem-max 8G] [--io-weight 500]  cgroup caps (user scope)
+                   [--tpm] [--secure-boot]          swtpm 2.0 + edk2 secboot firmware
                    [--nested]                          expose vmx/svm to the guest (VMs in the VM —
                                                         needs the host kvm module's nested=1, see doctor)
                    [--sw-vk]                           venus: also expose host lavapipe (CPU Vulkan)
@@ -305,6 +306,8 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const cpuQ = flagVal("--cpu-quota"); if (cpuQ) spec.resources.limits.cpuQuota = cpuQ;
             const memM = flagVal("--mem-max"); if (memM) spec.resources.limits.memoryMax = memM;
             const ioW = num("--io-weight"); if (ioW) spec.resources.limits.ioWeight = ioW;
+            if (has("--tpm")) spec.security.tpm = true;
+            if (has("--secure-boot")) spec.security.secureBoot = true;
             if (has("--sw-vk")) spec.gpu.softwareVk = true;
             if (has("--snap")) spec.os.snap = true;
             if (has("--xfonts")) spec.os.extraFonts = true;

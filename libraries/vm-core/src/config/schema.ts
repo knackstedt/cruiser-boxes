@@ -337,6 +337,18 @@ export const VmSpec = z.object({
 
     usb: z.object({ autoAttach: z.array(UsbDeviceRef).default([]) }).prefault({}),
 
+    /** Firmware security stack — create-time (the TPM state dir and the
+     *  firmware config are bound to the booted image's expectations). */
+    security: z.object({
+        /** swtpm emulator (TPM 2.0) on a unix socket — state persists at
+         *  <vm>/tpm/. Enables TPM-bound LUKS and measured boot. */
+        tpm: z.boolean().default(false),
+        /** edk2 secure-boot firmware + SMM (q35,smm=on + secure pflash).
+         *  Fresh VMs get the MS-keys vars template; toggling on an existing
+         *  VM boots in setup mode until keys are enrolled in the vars UI. */
+        secureBoot: z.boolean().default(false),
+    }).prefault({}),
+
     /**
      * Host → guest sync channels. All per-VM; every channel also honors
      * env kills (CRUISER_HOST_SYNC=0 master, CRUISER_SYNC_<ID>=0 each).

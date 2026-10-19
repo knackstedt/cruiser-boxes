@@ -21,11 +21,19 @@ const SYS_OVMF_VARS_TEMPLATE = "/usr/share/OVMF/OVMF_VARS_4M.fd";
  *  bundled edk2 images (packaged builds carry them — see stage-opt.mts).
  *  QEMU's firmware descriptors pair the x86_64 code fd with the i386 vars
  *  template (share/qemu/firmware/60-edk2-x86_64.json). */
-export function ovmfCode(): string {
+const SYS_OVMF_CODE_SEC = "/usr/share/OVMF/OVMF_CODE_4M.secboot.fd";
+const SYS_OVMF_VARS_MS = "/usr/share/OVMF/OVMF_VARS_4M.ms.fd";
+
+export function ovmfCode(secureBoot?: boolean): string {
+    if (secureBoot && existsSync(SYS_OVMF_CODE_SEC)) return SYS_OVMF_CODE_SEC;
+    if (secureBoot) return join(optDir(), "qemu-11", "share", "qemu", "edk2-x86_64-secure-code.fd");
     if (existsSync(SYS_OVMF_CODE)) return SYS_OVMF_CODE;
     return join(optDir(), "qemu-11", "share", "qemu", "edk2-x86_64-code.fd");
 }
-export function ovmfVarsTemplate(): string {
+export function ovmfVarsTemplate(secureBoot?: boolean): string {
+    // the ms template ships Microsoft's KEK/db certs — enrolled secure boot
+    // out of the box; the plain i386 vars leaves the TPM-less setup mode.
+    if (secureBoot && existsSync(SYS_OVMF_VARS_MS)) return SYS_OVMF_VARS_MS;
     if (existsSync(SYS_OVMF_VARS_TEMPLATE)) return SYS_OVMF_VARS_TEMPLATE;
     return join(optDir(), "qemu-11", "share", "qemu", "edk2-i386-vars.fd");
 }
@@ -103,14 +111,18 @@ export function buildArgs(
     const disk = diskPath(spec, paths.dir);
 
     push("-name", spec.name);
-    push("-machine", "q35,kernel_irqchip=on,memory-backend=mem0");
+    const sb = spec.security.secureBoot;
+    push("-machine", `q35,kernel_irqchip=on,memory-backend=mem0${sb ? ",smm=on" : ""}`);
     push("-object", `memory-backend-memfd,share=on,id=mem0,size=${memBytes}`);
     push("-accel", "kvm");
     const nestedFlag = spec.resources.nestedVirt ? hostVirtFlag() : null;
     push("-cpu", `host${nestedFlag ? `,+${nestedFlag}` : ""}`);
     push("-smp", `${cpus},sockets=${spec.resources.sockets},cores=${cpus},threads=${spec.resources.threads}`);
-    push("-drive", `if=pflash,format=raw,unit=0,readonly=on,file=${ovmfCode()}`);
+    push("-drive", `if=pflash,format=raw,unit=0,readonly=on,file=${ovmfCode(sb)}`);
     push("-drive", `if=pflash,format=raw,unit=1,file=${paths.ovmfVars}`);
+    // secboot firmware requires the pflash-secure property or OVMF writes
+    // vars updates through the unprotected interface.
+    if (sb) push("-global", "driver=cfi.pflash01,property=secure,value=on");
 
     // LUKS (spec.disk.encrypt): the passphrase reaches QEMU as a `-object
     // secret` file reference — never inline on argv. "full" keys the
@@ -224,6 +236,14 @@ export function buildArgs(
     // virtio-balloon — live guest-visible memory resize (`vm mem`, QMP
     // balloon) + query-balloon gives real in-guest free mem for metrics.
     push("-device", "virtio-balloon-pci,id=balloon0");
+
+    // swtpm (TPM 2.0) on a run/ unix socket — the lifecycle spawns the
+    // emulator before QEMU opens it (like the virtiofsd pattern).
+    if (spec.security.tpm) {
+        push("-chardev", `socket,id=tpm0,path=${paths.tpmSock}`);
+        push("-tpmdev", "emulator,id=tpm0,chardev=tpm0");
+        push("-device", "tpm-tis,tpmdev=tpm0");
+    }
 
     // vsock for waypipe app-mode (and general host↔guest channels)
     if (spec.network.vsock) push("-device", `vhost-vsock-pci,guest-cid=${guestCid(spec.name)}`);

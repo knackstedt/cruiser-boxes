@@ -19,7 +19,7 @@ import { QgaClient } from "../qga/client";
 import * as disk from "../disk/ops";
 import * as usb from "../usb/usb";
 import { appendVmLog } from "../logs";
-import { run, spawnChild, virtiofsdPath } from "../../../sys/src/exec";
+import { run, spawnChild, virtiofsdPath, which } from "../../../sys/src/exec";
 
 export type VmState = "stopped" | "starting" | "running" | "stopping" | "paused" | "crashed" | "unknown";
 
@@ -304,7 +304,11 @@ export class VmHandle {
         // The "home" image materializes on first boot (after run/ exists —
         // ensureAuxDisks logs into it).
         if (this.spec.disk.encrypt !== "off") await this.ensureAuxDisks();
-        if (!existsSync(this.paths.ovmfVars)) await copyFile(ovmfVarsTemplate(), this.paths.ovmfVars);
+        if (!existsSync(this.paths.ovmfVars)) await copyFile(ovmfVarsTemplate(this.spec.security.secureBoot), this.paths.ovmfVars);
+
+        // swtpm: QEMU's tpm-emulator chardev connects at machine init, so
+        // the daemon must be listening first (same shape as virtiofsd).
+        if (this.spec.security.tpm) await this.spawnSwtpm();
 
         // Hibernate resume: a run/hibernate.vmstate from hibernate() means
         // this boot is a state-load, not a cold boot — -S freezes the cpus
@@ -519,6 +523,24 @@ export class VmHandle {
         ], { detached: true, logFile: join(this.paths.run, `virtiofsd-${v.tag}.log`) });
         this.vfsChildren.push(c);
         this.vfsdSpawned.set(v.socket, Date.now());
+    }
+
+    /** swtpm daemon for security.tpm — TPM 2.0 state persists at <vm>/tpm/;
+     *  the daemon self-terminates when QEMU drops the ctrl connection (-t),
+     *  so a VM stop cleans it up without tracking. */
+    private async spawnSwtpm(): Promise<void> {
+        const bin = await which("swtpm");
+        if (!bin) throw new Error("security.tpm is set but swtpm isn't installed — apt install swtpm");
+        await mkdir(this.paths.tpmDir, { recursive: true });
+        await rm(this.paths.tpmSock, { force: true });
+        await run(bin, ["socket", "--tpm2", "--daemon",
+            "--tpmstate", `dir=${this.paths.tpmDir},mode=0600`,
+            "--ctrl", `type=unixio,path=${this.paths.tpmSock},mode=0600`,
+            "--pid", `file=${join(this.paths.run, "swtpm.pid")}`,
+            "--log", `file=${join(this.paths.run, "swtpm.log")},level=1`,
+            "--flags", "not-need-init,startup-clear",
+            "-t",
+        ]);
     }
 
     /** org.cruiser.urlopen.0 bridge: the guest writes one URL per line to the

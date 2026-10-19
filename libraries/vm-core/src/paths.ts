@@ -83,6 +83,9 @@ export interface VmPaths {
     serialSock: string;
     /** virtserialport org.cruiser.urlopen.0 — guest → host URL forwarding. */
     urlOpenSock: string;
+    /** swtpm emulator control socket (run/) + persistent state dir (<vm>/tpm). */
+    tpmSock: string;
+    tpmDir: string;
     snapshotsDir: string;
     backupsDir: string;
 }
@@ -106,6 +109,8 @@ export function vmPaths(name: string): VmPaths {
         serialLog: join(run, "serial.log"),
         serialSock: join(run, "serial.sock"),
         urlOpenSock: join(run, "urlopen.sock"),
+        tpmSock: join(run, "tpm.sock"),
+        tpmDir: join(dir, "tpm"),
         snapshotsDir: join(dir, "snapshots"),
         backupsDir: join(dir, "backups"),
     };
