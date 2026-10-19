@@ -48,7 +48,8 @@ export async function installAppLaunchers(h: VmHandle, ids?: string[]): Promise<
     await mkdir(appsDir(), { recursive: true });
     const exec = [...cruiserCliArgv(), "app", "run", h.spec.name].map(dq).join(" ");
     const written: string[] = [];
-    for (const app of picks) {
+    for (let i = 0; i < picks.length; i++) {
+        const app = picks[i];
         let icon = "";
         // Themed names can't resolve host-side; absolute files can be pulled.
         if (app.icon?.startsWith("/")) {
@@ -80,7 +81,9 @@ export async function uninstallAppLaunchers(h: VmHandle): Promise<string[]> {
     const prefix = `cruiser-${h.spec.name}-`;
     const removed: string[] = [];
     if (existsSync(appsDir())) {
-        for (const f of await readdir(appsDir())) {
+        const files = await readdir(appsDir());
+        for (let i = 0; i < files.length; i++) {
+            const f = files[i];
             if (!f.startsWith(prefix) || !f.endsWith(".desktop")) continue;
             const p = join(appsDir(), f);
             await rm(p);
