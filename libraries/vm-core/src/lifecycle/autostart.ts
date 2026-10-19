@@ -13,7 +13,7 @@
 
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { homedir } from "node:os";
 import { run } from "../../../sys/src/exec";
 

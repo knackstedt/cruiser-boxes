@@ -423,7 +423,8 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             // only, then skip.
             const { autostartNames } = await import("../libraries/vm-core/src/lifecycle/autostart");
             const names = autostartNames(registry.list());
-            for (const name of names) {
+            for (let i = 0; i < names.length; i++) {
+                const name = names[i]!;
                 const h = registry.get(name)!;
                 if (h.isRunning()) continue;
                 try {
