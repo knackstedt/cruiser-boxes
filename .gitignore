@@ -23,6 +23,10 @@ dd-assets/
 viewer-dd/target/
 native/dist/
 
+# Rust display broker + shared protocol crate builds
+ddproto/target/
+ddproxy/target/
+
 # Rust term helper build + bundle scratch (toolchain/build-term-page.mts)
 term-dd/target/
 .term-bundle-out/

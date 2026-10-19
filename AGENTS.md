@@ -73,6 +73,27 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   `libraries/app-shell/src/dev-harness.ts` — the entry only calls
   `initDevHarness`/`screenshotHostOpts`.
 - `src/cli.ts` — headless control surface (vm/usb/provision/host/doctor).
+- `ddproto/` — shared Rust protocol crate: QMP getfd/add_client channel
+  helper, qemu.pid watchdog, and the zbus skeleton structs for QEMU's
+  org.qemu.Display1 listener + clipboard peer interfaces (generic over
+  ConsoleEvents/ClipEvents sinks). Reused by viewer-dd and ddproxy.
+- `ddproxy/` — Rust per-VM display broker. QEMU's @dbus-display p2p auth
+  keeps effectively one client and can wedge permanently on viewer churn
+  (`REJECTED EXTERNAL`); ddproxy attaches ONCE per VM boot (control conn +
+  per-console RegisterListener + input conn LAST — QEMU binds its object
+  tree to the final add_client conn) and re-exports the same object tree
+  on run/ddproxy.sock. viewer-dd takes `--proxy <sock>` (spawned detached
+  by vm.ts at start for display.viewer=dmabuf — default-on — with
+  pidfile-sweep + probe()-time throttled respawn in
+  lifecycle/ddproxy.ts) and falls back to the direct QMP channel when the
+  socket is dead. The broker replies to QEMU listener calls instantly
+  (QEMU gl-blocks the guest on UpdateDMABUF, so a hung viewer can't stall
+  the guest), caches each console's last scanout/cursor/mouse for instant
+  replay on RegisterListener, and fans out to N concurrent viewers.
+  SCM_RIGHTS pass-through — never imports dmabufs, no GL dep. Clipboard
+  rides the stable proxy↔QEMU peer (Register serial resets relay to the
+  last-registered viewer conn; QEMU blocks on Request replies so that one
+  call is relayed synchronously).
 - `libraries/vm-core` — VmSpec schema, QEMU argv builder, QMP/QGA clients
   (pure TS over unix sockets), lifecycle + reattach, disk ops, USB, rendernode.
   vm-core is a LEAF: it never imports host-int/provision — guest monitor
@@ -188,9 +209,10 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   socketpair probe, so it's QEMU/GLib in-process state, not client code;
   observed after the previous viewer was SIGTERM'd ~months into uptime).
   A `-M none -display dbus,p2p=on` scratch QEMU accepts the same
-  handshake fine. Once wedged there is no reconnect — only a VM restart
-  gets the console back, so treat a dead viewer as unrecoverable on that
-  QEMU. Dead-QEMU watchdog =
+  handshake fine. REMEDIATED BY DEFAULT via ddproxy: the broker (below)
+  owns the QEMU-side conns for the VM's lifetime, so viewer churn never
+  reaches the auth surface — a VM already wedged before the proxy ran
+  still needs its restart (prevention, not cure). Dead-QEMU watchdog =
   qemu.pid pid + /proc starttime beside monitor.sock (detects restart too);
   don't ping the control conn, QEMU closes it by design. Multi-head is
   ONE window now (freerdp /multimon semantics): every console's Listener

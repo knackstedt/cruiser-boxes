@@ -418,6 +418,12 @@ describe("ddViewerArgs", () => {
         expect(a[i + 1]).toBe("ctrl+alt+delete=host-desktop:1");
         expect(a).toContain("ctrl+alt+end=command:cruiser vm kill t1");
     });
+    test("proxySock → --proxy <sock>; absent → no flag", () => {
+        const s = defaultSpec("t1");
+        expect(ddViewerArgs(s, "/run/mon.sock")).not.toContain("--proxy");
+        const a = ddViewerArgs(s, "/run/mon.sock", undefined, undefined, "/run/ddproxy.sock");
+        expect(a[a.indexOf("--proxy") + 1]).toBe("/run/ddproxy.sock");
+    });
 });
 
 // ── logs ──

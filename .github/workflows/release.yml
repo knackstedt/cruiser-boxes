@@ -66,6 +66,11 @@ jobs:
         # packager's game-native convention; ddViewerPath() probes it there.
         run: bun run viewer-dd:stage
 
+      - name: Build + stage ddproxy
+        # Same native/dist convention — vm-core's ddproxyPath() probes
+        # <execDir>/native/ddproxy.
+        run: bun run ddproxy:stage
+
       - name: Build + stage term-dd
         # Same native/dist convention — host-int's termDdPath() probes it.
         run: bun run term-dd:stage

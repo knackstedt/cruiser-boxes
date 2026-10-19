@@ -1,0 +1,15 @@
+[package]
+name = "ddproxy"
+version = "0.1.0"
+edition = "2021"
+description = "Cruiser display broker — holds QEMU's @dbus-display conns for the VM's lifetime so viewer churn never reaches QEMU's p2p auth layer"
+
+[dependencies]
+ddproto = { path = "../ddproto" }
+zbus = { version = "5", default-features = false, features = ["tokio", "p2p", "blocking-api", "async-io"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
+zvariant = "5"
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
+nix = { version = "0.30", features = ["socket", "uio"] }
+libc = "0.2"

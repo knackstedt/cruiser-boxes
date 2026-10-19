@@ -83,6 +83,11 @@ export interface VmPaths {
     serialSock: string;
     /** virtserialport org.cruiser.urlopen.0 — guest → host URL forwarding. */
     urlOpenSock: string;
+    /** ddproxy display broker: viewer-facing p2p socket, pidfile, log.
+     *  Present only while a dmabuf VM's broker is up. */
+    ddproxySock: string;
+    ddproxyPid: string;
+    ddproxyLog: string;
     /** swtpm emulator control socket (run/) + persistent state dir (<vm>/tpm). */
     tpmSock: string;
     tpmDir: string;
@@ -109,6 +114,9 @@ export function vmPaths(name: string): VmPaths {
         serialLog: join(run, "serial.log"),
         serialSock: join(run, "serial.sock"),
         urlOpenSock: join(run, "urlopen.sock"),
+        ddproxySock: join(run, "ddproxy.sock"),
+        ddproxyPid: join(run, "ddproxy.pid"),
+        ddproxyLog: join(run, "ddproxy.log"),
         tpmSock: join(run, "tpm.sock"),
         tpmDir: join(dir, "tpm"),
         snapshotsDir: join(dir, "snapshots"),

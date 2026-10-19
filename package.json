@@ -11,6 +11,7 @@
     "cli": "bun run src/cli.ts",
     "toolchain": "bun run toolchain/build.mts",
     "viewer-dd:stage": "bun run toolchain/stage-viewer-dd.mts",
+    "ddproxy:stage": "bun run toolchain/stage-ddproxy.mts",
     "term-dd:stage": "bun run toolchain/stage-term-dd.mts",
     "term:bundle": "bun run toolchain/build-term-page.mts",
     "opt:stage": "bun run toolchain/stage-opt.mts",

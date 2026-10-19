@@ -19,6 +19,7 @@ import { QgaClient } from "../qga/client";
 import * as disk from "../disk/ops";
 import * as usb from "../usb/usb";
 import { appendVmLog } from "../logs";
+import { killDdproxy, spawnDdproxy } from "./ddproxy";
 import { run, spawnChild, virtiofsdPath, which } from "../../../sys/src/exec";
 
 export type VmState = "stopped" | "starting" | "running" | "stopping" | "paused" | "crashed" | "unknown";
@@ -189,6 +190,10 @@ export class VmHandle {
         if (!this.isRunning()) return "stopped";
         this.watchVfsd();   // adopted QEMU — cover daemon crashes too
         this.watchUsb();    // …and autoAttach hot-plug
+        // Adopted QEMU whose broker died/never spawned (older build started
+        // it, proxy crashed): a throttled respawn is safe on a healthy QEMU.
+        if (this.spec.display.viewer === "dmabuf")
+            void spawnDdproxy(this.paths, { respawn: true });
         try {
             const st = await this.withQmp((q) => q.queryStatus());
             if (st.status === "paused" || st.status === "prelaunch") return "paused";
@@ -335,6 +340,7 @@ export class VmHandle {
         // Reap strays of a dead launcher first or they'd keep their
         // listeners + pidfiles.
         this.killVfsd();
+        killDdproxy(this.paths);   // same stray-reap for a stale display broker
         const vfsdBin = built.virtiofsd.length ? await virtiofsdPath() : null;
         for (let i = 0; i < built.virtiofsd.length; i++)
             if (vfsdBin) await this.spawnVfsd(built.virtiofsd[i]!, vfsdBin);
@@ -394,6 +400,16 @@ export class VmHandle {
                         this.watchVfsd();
                         this.watchUsb();
                         this.startUrlListener();
+                        // ddproxy: the dmabuf display broker holds QEMU's
+                        // @dbus-display conns for the VM's lifetime so viewer
+                        // churn never reaches QEMU's wedgable p2p auth.
+                        // Default-on for dmabuf VMs; a missing binary is not
+                        // fatal (viewer-dd falls back to the direct channel).
+                        // Awaited (it's just a detached spawn — the attach
+                        // retry runs inside the daemon) so the pidfile lands
+                        // before start() returns.
+                        if (this.spec.display.viewer === "dmabuf")
+                            await spawnDdproxy(this.paths);
                         return;
                     } catch { /* not ready */ }
                 }
@@ -476,6 +492,7 @@ export class VmHandle {
 
     private cleanupRunDir(): void {
         this.killVfsd();
+        killDdproxy(this.paths);
         if (this.vfsdTimer) { clearInterval(this.vfsdTimer); this.vfsdTimer = null; }
         void this.clearDiskKey();   // kill/crash edge — drop any leftover run/disk-key
     }

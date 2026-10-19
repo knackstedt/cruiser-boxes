@@ -40,6 +40,22 @@ jobs:
         run: cargo clippy --locked
         working-directory: viewer-dd
 
+      - name: ddproto cargo check
+        run: cargo check --locked
+        working-directory: ddproto
+
+      - name: ddproto cargo clippy
+        run: cargo clippy --locked
+        working-directory: ddproto
+
+      - name: ddproxy cargo check
+        run: cargo check --locked
+        working-directory: ddproxy
+
+      - name: ddproxy cargo clippy
+        run: cargo clippy --locked
+        working-directory: ddproxy
+
       - name: term-dd cargo check
         run: cargo check --locked
         working-directory: term-dd

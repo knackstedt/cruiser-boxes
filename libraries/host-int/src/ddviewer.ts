@@ -53,10 +53,14 @@ export interface DdViewerGeo {
 /** viewer-dd argv — pure builder (tested like freerdpArgs). `escapes` are
  *  "<keys>=<action>" pairs ({vm}/{cli} expanded by the caller) — under
  *  --grab the WM's global bindings can't fire, so the viewer recognizes
- *  the combos itself and dispatches the actions. */
-export function ddViewerArgs(spec: VmSpec, monitorSock: string, geo?: DdViewerGeo, escapes?: string[]): string[] {
+ *  the combos itself and dispatches the actions. `proxySock` attaches the
+ *  viewer to the per-VM ddproxy broker instead of minting fresh QEMU
+ *  @dbus-display channels; viewer-dd falls back to the direct channel if
+ *  the socket is dead, so passing a stale path is safe. */
+export function ddViewerArgs(spec: VmSpec, monitorSock: string, geo?: DdViewerGeo, escapes?: string[], proxySock?: string): string[] {
     const { w, h } = spec.display.windowSize;
     const argv = [monitorSock, "--title", `cruiser:${spec.name}`, "--size", `${w}x${h}`];
+    if (proxySock) argv.push("--proxy", proxySock);
     if (geo?.offsets) argv.push("--offsets", geo.offsets);
     if (geo?.rects) argv.push("--rects", geo.rects);
     if (!spec.display.clipboard) argv.push("--no-clipboard");
@@ -79,10 +83,14 @@ export function ddViewerArgs(spec: VmSpec, monitorSock: string, geo?: DdViewerGe
 export async function launchDdViewer(spec: VmSpec, geo?: DdViewerGeo, escapes?: string[]): Promise<ViewerLaunch> {
     const bin = await ddViewerPath();
     if (!bin) throw new Error("viewer-dd not found — cargo build --release in viewer-dd/ (or install it on PATH)");
-    const argv = ddViewerArgs(spec, vmPaths(spec.name).monitorSock, geo, escapes);
+    const paths = vmPaths(spec.name);
+    // ddproxy binds its socket only AFTER the QEMU-side conns are attached,
+    // so an existing socket means the broker is fully up.
+    const proxySock = existsSync(paths.ddproxySock) ? paths.ddproxySock : undefined;
+    const argv = ddViewerArgs(spec, paths.monitorSock, geo, escapes, proxySock);
     const child = spawnChild(bin, argv, {
         detached: true,
-        logFile: join(vmPaths(spec.name).run, "viewer-dd.log"),
+        logFile: join(paths.run, "viewer-dd.log"),
     });
     child.unref();
     return { child, argv };

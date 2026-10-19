@@ -17,13 +17,12 @@
 // the handlers only enqueue work — all GL happens on a dedicated worker
 // thread that owns the EGL context.
 use anyhow::{Context, Result};
-use std::io::{IoSlice, Read, Write};
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU64, Ordering};
 mod egl;
 use zbus::connection;
-use zvariant::{Fd, OwnedFd as ZOwnedFd};
+use zvariant::Fd;
 
 static DM_BUFS: AtomicU64 = AtomicU64::new(0);
 static UPDATES: AtomicU64 = AtomicU64::new(0);
@@ -82,55 +81,37 @@ fn fourcc_str(f: u32) -> String {
         ((f >> 16) & 0xFF) as u8, ((f >> 24) & 0xFF) as u8]).into_owned()
 }
 
-fn qmp(mon: &mut UnixStream, cmd: &str, fd: Option<RawFd>) -> Result<String> {
-    let msg = format!("{cmd}\n");
-    if let Some(fd) = fd {
-        let iov = [IoSlice::new(msg.as_bytes())];
-        nix::sys::socket::sendmsg::<()>(
-            mon.as_raw_fd(), &iov,
-            &[nix::sys::socket::ControlMessage::ScmRights(&[fd])],
-            nix::sys::socket::MsgFlags::empty(), None)?;
-    } else {
-        mon.write_all(msg.as_bytes())?;
+/// Open a display channel — the ddproxy socket when --proxy is live, else a
+/// direct QMP getfd/add_client "@dbus-display" channel (ddproto owns the
+/// QEMU side).
+fn open_chan(monitor: &str, proxy: Option<&str>) -> Result<UnixStream> {
+    match proxy {
+        Some(s) => UnixStream::connect(s).with_context(|| format!("proxy conn {s}")),
+        None => ddproto::open_dbus_channel(monitor),
     }
-    let mut buf = vec![0u8; 4096];
-    let n = mon.read(&mut buf)?;
-    Ok(String::from_utf8_lossy(&buf[..n]).into_owned())
 }
 
-/// Open a new p2p "@dbus-display" channel over the QMP monitor socket.
-/// Each channel needs a unique QMP fdname — getfd names live in QEMU's
-/// global monitor namespace, so concurrent opens under a shared "vdd" wire
-/// the loser onto a stale fd (EPIPE at the p2p handshake).
-fn open_dbus_channel(monitor: &str) -> Result<UnixStream> {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let fdname = format!("vdd{}", SEQ.fetch_add(1, Ordering::Relaxed));
-    let (s, p) = UnixStream::pair()?;
-    let mut mon = UnixStream::connect(monitor)?;
-    let mut g = vec![0u8; 512];
-    let _ = mon.read(&mut g); // greeting
-    qmp(&mut mon, r#"{"execute":"qmp_capabilities"}"#, None)?;
-    let r = qmp(&mut mon, &format!(
-        r#"{{"execute":"getfd","arguments":{{"fdname":"{fdname}"}}}}"#), Some(p.as_raw_fd()))?;
-    anyhow::ensure!(!r.contains("\"error\""), "qmp getfd: {r}");
-    let r = qmp(&mut mon, &format!(
-        r#"{{"execute":"add_client","arguments":{{"protocol":"@dbus-display","fdname":"{fdname}"}}}}"#), None)?;
-    anyhow::ensure!(!r.contains("\"error\""), "qmp add_client: {r}");
-    drop(mon);
-    Ok(s)
+/// open_chan + the p2p handshake — the fallback boundary covers both so a
+/// proxy that accepts and dies mid-handshake still falls back.
+async fn display_conn(monitor: &str, proxy: Option<&str>, what: &str) -> Result<zbus::Connection> {
+    let s = open_chan(monitor, proxy).with_context(|| format!("{what} channel"))?;
+    s.set_nonblocking(true)?;
+    connection::Builder::unix_stream(tokio::net::UnixStream::from_std(s)?)
+        .p2p().build().await.with_context(|| format!("{what} p2p"))
 }
 
-// ── D-Bus listener objects QEMU calls into ──
+// ── D-Bus listener events QEMU (or ddproxy) calls into ──
+// The wire skeletons live in ddproto — this sink is the viewer's side.
 
-struct Listener { tx: std::sync::mpsc::Sender<XJob>, ctx: std::sync::mpsc::Sender<CurJob>, id: u32, idx: usize }
-#[zbus::interface(name = "org.qemu.Display1.Listener")]
-impl Listener {
-    fn scanout(&mut self, _w: u32, _h: u32, _stride: u32, _fmt: u32, _data: Vec<u8>) {}
-    fn update(&mut self, _x: i32, _y: i32, _w: i32, _h: i32, _stride: u32, _fmt: u32, _data: Vec<u8>) {}
-    #[zbus(name = "ScanoutDMABUF")]
-    fn scanout_dmabuf(&mut self, _fd: ZOwnedFd, _w: u32, _h: u32, _stride: u32,
-                      _fourcc: u32, _modifier: u64, _y0_top: bool) {}
-    #[zbus(name = "UpdateDMABUF")]
+struct ViewerConsole {
+    tx: std::sync::mpsc::Sender<XJob>,
+    ctx: std::sync::mpsc::Sender<CurJob>,
+    dims: std::sync::Arc<Dims>,
+    id: u32,
+    idx: usize,
+}
+
+impl ddproto::ConsoleEvents for ViewerConsole {
     fn update_dmabuf(&mut self, x: i32, y: i32, w: i32, h: i32) {
         UPDATES.fetch_add(1, Ordering::Relaxed);
         // reply fast — QEMU gl-blocks the guest until this returns
@@ -161,18 +142,7 @@ impl Listener {
             px,
         }));
     }
-    #[zbus(property)]
-    fn interfaces(&self) -> Vec<String> {
-        vec!["org.qemu.Display1.Listener.Unix.ScanoutDMABUF2".to_string()]
-    }
-}
-
-struct UnixDmabuf2 { tx: std::sync::mpsc::Sender<XJob>, dims: std::sync::Arc<Dims>, id: u32, idx: usize }
-#[zbus::interface(name = "org.qemu.Display1.Listener.Unix.ScanoutDMABUF2")]
-impl UnixDmabuf2 {
-    #[zbus(name = "ScanoutDMABUF2")]
-    #[allow(clippy::too_many_arguments)]
-    fn scanout_dmabuf2(&mut self, dmabufs: Vec<ZOwnedFd>, x: u32, y: u32, width: u32, height: u32,
+    fn scanout_dmabuf2(&mut self, dmabufs: Vec<zvariant::OwnedFd>, x: u32, y: u32, width: u32, height: u32,
                        offsets: Vec<u32>, strides: Vec<u32>, num_planes: u32, fourcc: u32,
                        backing_width: u32, backing_height: u32, modifier: u64, y0_top: bool) {
         let n = DM_BUFS.fetch_add(1, Ordering::Relaxed) + 1;
@@ -194,6 +164,9 @@ impl UnixDmabuf2 {
             bw: backing_width.max(width), bh: backing_height.max(height),
             fourcc, modifier, y0_top,
         }));
+    }
+    fn interfaces(&self) -> Vec<String> {
+        vec![ddproto::IFACE_LISTENER_DMABUF2.to_string()]
     }
 }
 
@@ -219,14 +192,13 @@ struct ClipShared {
     serving: Option<String>,
 }
 
-struct ClipPeer {
+struct ViewerClip {
     st: std::sync::Arc<std::sync::Mutex<ClipShared>>,
     serial: std::sync::Arc<AtomicU64>,
     evtx: std::sync::mpsc::Sender<ClipEv>,
 }
 
-#[zbus::interface(name = "org.qemu.Display1.Clipboard")]
-impl ClipPeer {
+impl ddproto::ClipEvents for ViewerClip {
     /// QEMU resets the serial counter through our Register — both on our own
     /// Register call and any later session reset.
     fn register(&mut self) {
@@ -241,7 +213,6 @@ impl ClipPeer {
         st.serving = None;
         eprintln!("[clip] serial reset by qemu");
     }
-    fn unregister(&mut self) {}
     /// Guest grabbed the clipboard — fetch the text on demand (worker thread,
     /// not here: QEMU's call is fire-and-forget, our Request is not).
     fn grab(&mut self, selection: u32, serial: u32, mimes: Vec<String>) {
@@ -250,7 +221,6 @@ impl ClipPeer {
             let _ = self.evtx.send(ClipEv::GuestGrab(selection));
         }
     }
-    fn release(&mut self, _selection: u32) {}
     /// Guest paste while we own — QEMU blocks its main loop on this reply, so
     /// it must never block on the worker: just read the parked text.
     fn request(&mut self, selection: u32, mimes: Vec<String>) -> zbus::fdo::Result<(String, Vec<u8>)> {
@@ -797,18 +767,6 @@ fn host_numlock(dpy: *mut std::ffi::c_void, num_atom: u64) -> Option<bool> {
     }
 }
 
-/// (pid, /proc starttime) of the QEMU that owns this display — None when the
-/// pidfile is absent/unreadable or the process is gone.
-fn qemu_boot_id(pidfile: &std::path::Path) -> Option<(u64, u64)> {
-    let pid: u64 = std::fs::read_to_string(pidfile).ok()?.trim().parse().ok()?;
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // field 22 is starttime; comm (field 2) can contain spaces/parens — split
-    // after the last ')' instead of naive whitespace splitting.
-    let start: u64 = stat.rsplit(')').next()?.split_whitespace()
-        .nth(19)?.parse().ok()?;
-    Some((pid, start))
-}
-
 // ── head layout: consoles → rects inside the single window ──
 
 /// (x, y, w, h) rect — damage bookkeeping uses it in both scanout and
@@ -964,16 +922,6 @@ fn set_fullscreen_monitors(d: *mut std::ffi::c_void, xid: u64, fsm: &[u32; 4]) {
     }
 }
 
-/// One QMP command on a fresh monitor conn — mouse-mode flips are
-/// infrequent, so no persistent conn is kept.
-fn qmp_run(monitor: &str, cmd: &str) -> Result<String> {
-    let mut mon = UnixStream::connect(monitor)?;
-    let mut g = vec![0u8; 2048];
-    let _ = mon.read(&mut g); // greeting
-    qmp(&mut mon, r#"{"execute":"qmp_capabilities"}"#, None)?;
-    qmp(&mut mon, cmd, None)
-}
-
 /// query-mice → (relative handler index, absolute handler index). QEMU
 /// keeps ONE active pointer handler per console: absolute events route
 /// to the first ABS-masking handler (the virtio tablet), relative to
@@ -981,7 +929,7 @@ fn qmp_run(monitor: &str, cmd: &str) -> Result<String> {
 /// gated on which is "current". Field-by-field parse: the reply is a
 /// flat [{name,index,current,absolute}] — good enough without a json dep.
 fn mouse_indices(monitor: &str) -> (Option<i64>, Option<i64>) {
-    let Ok(r) = qmp_run(monitor, r#"{"execute":"query-mice"}"#) else { return (None, None) };
+    let Ok(r) = ddproto::qmp_run(monitor, r#"{"execute":"query-mice"}"#) else { return (None, None) };
     let (mut rel, mut abs) = (None, None);
     for obj in r.split('{').skip(1) {
         let idx = obj.find("\"index\":").and_then(|i| {
@@ -1004,7 +952,7 @@ fn mouse_set(monitor: &str, rel: bool) -> Result<()> {
     let (ri, ai) = mouse_indices(monitor);
     let idx = (if rel { ri } else { ai }).ok_or_else(|| anyhow::anyhow!(
         "no {} mouse handler in query-mice", if rel { "relative" } else { "absolute" }))?;
-    let r = qmp_run(monitor, &format!(
+    let r = ddproto::qmp_run(monitor, &format!(
         r#"{{"execute":"human-monitor-command","arguments":{{"command-line":"mouse_set {idx}"}}}}"#))?;
     anyhow::ensure!(!r.contains("\"error\""), "mouse_set {idx}: {r}");
     Ok(())
@@ -2181,8 +2129,13 @@ async fn main() -> Result<()> {
     let mut grab = false;
     let mut rel_mode = RelMode::Off;
     let mut escapes: Vec<EscCombo> = Vec::new();
+    // --proxy <ddproxy.sock> — attach via the per-VM display broker instead
+    // of minting QMP @dbus-display channels; a dead/absent proxy falls back
+    // to the direct channel so the viewer never regresses.
+    let mut proxy: Option<String> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--proxy" => proxy = args.next(),
             "--no-clipboard" => clipboard = false,
             // grab the keyboard while the window is focused (spec.display.grabKeyboard)
             "--grab" => grab = true,
@@ -2246,13 +2199,19 @@ async fn main() -> Result<()> {
             _ => {}
         }
     }
-    eprintln!("[*] monitor: {monitor} size={w}x{h}");
+    eprintln!("[*] monitor: {monitor} size={w}x{h} proxy={proxy:?}");
 
-    // channel #1: control conn (VM/Console objects)
-    let s1 = open_dbus_channel(&monitor).context("dbus channel")?;
-    s1.set_nonblocking(true)?;
-    let conn = connection::Builder::unix_stream(tokio::net::UnixStream::from_std(s1)?).p2p().build().await
-        .context("p2p conn to qemu")?;
+    // channel #1: control conn (VM/Console objects) — prefer the proxy; if
+    // the socket is dead, fall straight back to the direct QMP channel.
+    let conn = match display_conn(&monitor, proxy.as_deref(), "control").await {
+        Ok(c) => c,
+        Err(e) if proxy.is_some() => {
+            eprintln!("[*] proxy attach failed ({e:#}) — direct qemu channel");
+            proxy = None;
+            display_conn(&monitor, None, "control").await.context("dbus channel")?
+        }
+        Err(e) => return Err(e).context("dbus channel"),
+    };
 
     let vm = zbus::Proxy::new(&conn, "org.qemu", "/org/qemu/Display1/VM", "org.qemu.Display1.VM").await?;
     let name: String = vm.get_property("Name").await?;
@@ -2280,12 +2239,12 @@ async fn main() -> Result<()> {
     {
         let pidfile = std::path::Path::new(&monitor)
             .parent().unwrap_or(std::path::Path::new(".")).join("qemu.pid");
-        let boot = qemu_boot_id(&pidfile);
+        let boot = ddproto::qemu_boot_id(&pidfile);
         if let Some((pid, start)) = boot {
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    if qemu_boot_id(&pidfile) != Some((pid, start)) {
+                    if ddproto::qemu_boot_id(&pidfile) != Some((pid, start)) {
                         eprintln!("[*] qemu display channel lost — exiting");
                         std::process::exit(1);
                     }
@@ -2334,9 +2293,13 @@ async fn main() -> Result<()> {
         console.call::<_, _, ()>("RegisterListener", &(Fd::from(p2.as_fd()),)).await?;
         drop(p2);
         s2.set_nonblocking(true)?;
+        let ev = ddproto::shared_console(ViewerConsole {
+            tx: jtx.clone(), ctx: ctx.clone(), dims: dims.clone(), id: ci, idx,
+        });
         let lc = connection::Builder::unix_stream(tokio::net::UnixStream::from_std(s2)?)
-            .serve_at("/org/qemu/Display1/Listener", Listener { tx: jtx.clone(), ctx: ctx.clone(), id: ci, idx })?
-            .serve_at("/org/qemu/Display1/Listener", UnixDmabuf2 { tx: jtx.clone(), dims: dims.clone(), id: ci, idx })?
+            .serve_at(ddproto::LISTENER_PATH, ddproto::Listener { ev: ev.clone() })?
+            .serve_at(ddproto::LISTENER_PATH, ddproto::UnixMap { ev: ev.clone() })?
+            .serve_at(ddproto::LISTENER_PATH, ddproto::UnixDmabuf2 { ev })?
             .p2p().build().await?;
         _lconns.push(lc);
         pending.push(Pending { cpath: cpath.to_string(), dims });
@@ -2344,21 +2307,30 @@ async fn main() -> Result<()> {
 
     // One shared conn for every console's Keyboard/Mouse calls — built async
     // (blocking::build() would block_on inside the tokio runtime and panic),
-    // then wrapped for the sync input workers. This is the LAST add_client
-    // channel, so QEMU binds its object tree to it — which makes it the only
-    // place the Clipboard skeleton is reachable: the clipboard peer object
-    // rides this conn too (QEMU proxies Clipboard calls back to the conn the
-    // Register came from).
+    // then wrapped for the sync input workers. On the direct channel this is
+    // the LAST add_client, so QEMU binds its object tree to it — which makes
+    // it the only place the Clipboard skeleton is reachable; via ddproxy the
+    // peer object rides this conn the same way (the proxy relays Clipboard
+    // calls to the conn that called Register).
     let (clip_tx, clip_rx) = std::sync::mpsc::channel::<ClipEv>();
     let clip_state = std::sync::Arc::new(std::sync::Mutex::new(ClipShared::default()));
     let clip_serial = std::sync::Arc::new(AtomicU64::new(0));
-    let si = open_dbus_channel(&monitor).context("input dbus channel")?;
+    // The input conn carries the clipboard peer object — build it through
+    // the same transport, serving the skeleton before the handshake.
+    let si = match open_chan(&monitor, proxy.as_deref()) {
+        Ok(s) => s,
+        Err(e) if proxy.is_some() => {
+            eprintln!("[*] proxy input conn failed ({e:#}) — direct qemu channel");
+            open_chan(&monitor, None).context("input dbus channel")?
+        }
+        Err(e) => return Err(e).context("input dbus channel"),
+    };
     si.set_nonblocking(true)?;
     let mut ib = connection::Builder::unix_stream(tokio::net::UnixStream::from_std(si)?).p2p();
     if clipboard {
-        ib = ib.serve_at("/org/qemu/Display1/Clipboard", ClipPeer {
+        ib = ib.serve_at(ddproto::CLIP_PATH, ddproto::clip_peer(ViewerClip {
             st: clip_state.clone(), serial: clip_serial.clone(), evtx: clip_tx,
-        })?;
+        }))?;
     }
     let ia = ib.build().await.context("input p2p conn")?;
     let iconn = std::sync::Arc::new(zbus::blocking::Connection::from(ia));
