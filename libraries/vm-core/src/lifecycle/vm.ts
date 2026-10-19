@@ -39,6 +39,35 @@ function qemuHasVdagent(qemu: string, ldLibraryPath: string): Promise<boolean> {
     return p;
 }
 
+/** `-audiodev help` backend list — cached per binary like the chardev probe. */
+const audioBackendCache = new Map<string, Promise<Set<string>>>();
+
+function qemuAudioBackends(qemu: string, ldLibraryPath: string): Promise<Set<string>> {
+    let p = audioBackendCache.get(qemu);
+    if (!p) {
+        p = run(qemu, ["-audiodev", "help"], {
+            noThrow: true,
+            env: { LD_LIBRARY_PATH: ldLibraryPath },
+        }).then((r) => new Set(
+            (r.stdout + r.stderr).split("\n").map((l) => l.trim()).filter(Boolean),
+        )).catch(() => new Set<string>());
+        audioBackendCache.set(qemu, p);
+    }
+    return p;
+}
+
+/** dmabuf viewer audio: the dbus backend stays silent until viewer-dd
+ *  implements org.qemu.Display1 audio, so prefer a backend QEMU can drive
+ *  directly — pipewire when its socket exists, then PA (incl. pipewire-pulse
+ *  compat). dbus remains the fallback: the VM still gets the hda device. */
+async function pickAudioBackend(qemu: string, ldLibraryPath: string): Promise<BuildOpts["audioBackend"]> {
+    const backends = await qemuAudioBackends(qemu, ldLibraryPath);
+    const xdg = process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid!()}`;
+    if (backends.has("pipewire") && existsSync(join(xdg, "pipewire-0"))) return "pipewire";
+    if (backends.has("pa") && existsSync(join(xdg, "pulse", "native"))) return "pa";
+    return "dbus";
+}
+
 export class VmHandle {
     spec: VmSpec;
     readonly paths: VmPaths;
@@ -234,6 +263,8 @@ export class VmHandle {
                 if (!opts.vdagent)
                     void appendVmLog(this.paths, "clipboard: qemu lacks the qemu-vdagent chardev — guest clipboard sync disabled");
             }
+            if (this.spec.display.sound)
+                opts.audioBackend ??= await pickAudioBackend(this.toolchain.qemu, this.toolchain.ldLibraryPath);
         }
         return buildArgs(this.spec, this.paths, opts, { ldLibraryPath: this.toolchain.ldLibraryPath });
     }

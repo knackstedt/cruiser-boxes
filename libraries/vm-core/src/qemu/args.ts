@@ -46,6 +46,11 @@ export interface BuildOpts {
     /** Resolved by the lifecycle: display.clipboard AND the qemu binary has
      *  the qemu-vdagent chardev backend (CONFIG_SPICE_PROTOCOL). */
     vdagent?: boolean;
+    /** dmabuf-viewer audiodev backend — the lifecycle picks a real host
+     *  backend (pipewire/pa) when one's running so guest audio actually
+     *  plays; falls back to dbus (silent until viewer-dd implements the
+     *  org.qemu.Display1 audio interfaces). */
+    audioBackend?: "pipewire" | "pa" | "alsa" | "dbus";
     /** false forces a foreground QEMU even for persist=daemonize specs —
      *  the ISO install runs an owned child it waits on itself. */
     daemonize?: boolean;
@@ -174,7 +179,13 @@ export function buildArgs(
         // flows over the dbus display backend instead; the viewer side can
         // consume it when it implements the audio interfaces (silence until
         // then — same as no client attached).
-        push("-device", "intel-hda", "-device", "hda-duplex,audiodev=aud0", "-audiodev", "dbus,id=aud0");
+        // hda-duplex gives the guest a mic input too; sound without
+        // microphone is playback-only via hda-output.
+        if (spec.display.sound) {
+            const dev = spec.display.microphone ? "hda-duplex" : "hda-output";
+            push("-device", "intel-hda", "-device", `${dev},audiodev=aud0`,
+                "-audiodev", `${opts.audioBackend ?? "dbus"},id=aud0`);
+        }
     } else {
         // SPICE unix console — emergency/alternate viewer + audiodev backend.
         // gl=on only makes sense with virgl/venus; rendernode must be a mesa
@@ -185,7 +196,8 @@ export function buildArgs(
             if (spec.gpu.renderNode) spiceParts.push(`rendernode=${spec.gpu.renderNode}`);
         }
         push("-spice", spiceParts.join(","));
-        push("-device", "intel-hda", "-device", "hda-duplex,audiodev=aud0", "-audiodev", "spice,id=aud0");
+        if (spec.display.sound)
+            push("-device", "intel-hda", "-device", "hda-duplex,audiodev=aud0", "-audiodev", "spice,id=aud0");
     }
 
     // ── network ──
