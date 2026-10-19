@@ -133,7 +133,10 @@ usage: cruiser <area> <command> [args]
   vm mount <name> [guestPath] [mp]      sshfs-mount a guest dir on the host
   vm umount <name> [mp]                 unmount (default ~/.local/share/cruiser/mounts/<vm>)
   app list <vm>                         guest .desktop app catalog (via QGA)
-  app run <vm> <command...>             launch a guest app via waypipe (vsock→ssh)
+  app run <vm> <cmd...|id.desktop>      launch a guest app via waypipe (vsock→ssh);
+                                        starts the VM headless when stopped
+  app install <vm> [id.desktop...]      host .desktop launchers for guest apps
+  app uninstall <vm>                    remove the VM's host launchers
   provision cloudimg <vm> [release]   [--user u] [--password p]  (release defaults to the VM's distro default)
   provision iso <vm> <iso-or-url> [--user u] [--password p]
   provision guest-setup <vm>           re-run in-guest setup on a provisioned VM
@@ -1109,12 +1112,36 @@ switch (area) {
     case "app": {
         const h = await needVm(rest[0]);
         const { guestAppCatalog, launchApp } = await import("../libraries/app-mode/src/waypipe");
+        const { installAppLaunchers, uninstallAppLaunchers } = await import("../libraries/app-mode/src/launchers");
         if (sub === "list") {
             (await guestAppCatalog(h)).forEach((a) => console.log(`${a.id.padEnd(45)} ${a.name.padEnd(30)} ${a.exec}`));
         } else if (sub === "run") {
             if (!rest[1]) usage();
-            const l = await launchApp(h, rest.slice(1).join(" "));
+            // Stopped VM → boot headless and wait out the guest agent so a
+            // host launcher icon works from cold, WinBoat-style.
+            if (!h.isRunning()) {
+                console.log(`${h.spec.name} stopped — starting headless`);
+                await h.start();
+                for (const t = Date.now() + 90_000; Date.now() < t;) {
+                    if (await h.guestSh("true", 5_000).then(() => true).catch(() => false)) break;
+                    await new Promise((r) => setTimeout(r, 2_000));
+                }
+            }
+            // a bare <id>.desktop resolves through the guest catalog; anything
+            // else is treated as a raw guest command line.
+            let cmd = rest.slice(1).join(" ");
+            if (rest.length === 2 && rest[1].endsWith(".desktop")) {
+                const app = (await guestAppCatalog(h)).find((a) => a.id === rest[1]);
+                if (!app) { console.error(`no desktop entry ${rest[1]} in ${h.spec.name}`); process.exit(1); }
+                cmd = app.exec;
+            }
+            const l = await launchApp(h, cmd);
             console.log(`launched via ${l.transport}: ${l.command}`);
+        } else if (sub === "install") {
+            (await installAppLaunchers(h, rest.slice(1))).forEach((p) => console.log(`installed ${p}`));
+        } else if (sub === "uninstall") {
+            const rm = await uninstallAppLaunchers(h);
+            console.log(rm.length ? `removed ${rm.length} launcher(s)` : "no launchers installed");
         } else usage();
         break;
     }

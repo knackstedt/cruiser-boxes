@@ -384,12 +384,16 @@ function normKeys(keys: string): string {
  *  Shortcut daemons (gsd, kglobalaccel) exec through `sh -c` with the
  *  SESSION's PATH — which may lack ~/.bun/bin — so binaries are referenced
  *  by absolute path and single-quoted for the shell. */
-export function cruiserCliPrefix(): string {
+export function cruiserCliArgv(): string[] {
     const cli = new URL("../../../src/cli.ts", import.meta.url).pathname;
     if (!existsSync(cli)) {
         const launcher = join(dirname(process.execPath), "cruiser");
-        return existsSync(launcher) ? sq(launcher) : "cruiser";
+        return [existsSync(launcher) ? launcher : "cruiser"];
     }
-    const bun = /bun/.test(process.execPath.split("/").pop() ?? "") ? sq(process.execPath) : "bun";
-    return `${bun} run ${sq(cli)}`;
+    const bun = /bun/.test(process.execPath.split("/").pop() ?? "") ? process.execPath : "bun";
+    return [bun, "run", cli];
+}
+
+export function cruiserCliPrefix(): string {
+    return cruiserCliArgv().map(sq).join(" ");
 }

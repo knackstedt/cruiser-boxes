@@ -152,7 +152,7 @@ export async function launchApp(h: VmHandle, command: string): Promise<AppLaunch
 }
 
 /** Enumerate guest .desktop apps via QGA. */
-export interface GuestApp { id: string; name: string; exec: string; desktopFile: string }
+export interface GuestApp { id: string; name: string; exec: string; desktopFile: string; icon?: string }
 
 export async function guestAppCatalog(h: VmHandle): Promise<GuestApp[]> {
     // guestSh runs as root — enumerate the configured user's local apps dir too
@@ -163,17 +163,18 @@ export async function guestAppCatalog(h: VmHandle): Promise<GuestApp[]> {
             [ -f "$f" ] || continue
             name=$(grep -m1 '^Name=' "$f" | cut -d= -f2-)
             exec=$(grep -m1 '^Exec=' "$f" | cut -d= -f2-)
+            icon=$(grep -m1 '^Icon=' "$f" | cut -d= -f2-)
             nodisplay=$(grep -m1 '^NoDisplay=' "$f" | cut -d= -f2-)
             [ "$nodisplay" = "true" ] && continue
-            printf '%s\\t%s\\t%s\\n' "$(basename "$f")" "$name" "$exec"
+            printf '%s\\t%s\\t%s\\t%s\\n' "$(basename "$f")" "$name" "$exec" "$icon"
         done`, 30_000);
     const apps: GuestApp[] = [];
     String(r.stdout).split("\n").forEach((line) => {
-        const [id, name, exec] = line.split("\t");
+        const [id, name, exec, icon] = line.split("\t");
         if (!id || !exec) return;
         // strip .desktop field codes (%U %F etc.) — transports run the raw command
         const cmd = exec.replace(/%[a-zA-Z]/g, "").replace(/\s+/g, " ").trim();
-        apps.push({ id, name: name || id, exec: cmd, desktopFile: id });
+        apps.push({ id, name: name || id, exec: cmd, desktopFile: id, icon: icon || undefined });
     });
     return apps;
 }
