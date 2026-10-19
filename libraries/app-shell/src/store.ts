@@ -40,6 +40,7 @@ export interface VmSummary {
     provisioned?: string;          // method or undefined
     persist: string;
     autostart: boolean;            // spec.autostart — start with the app + at login
+    netMode: string;               // spec.network.mode — nat|restricted|isolated|vmnet
     username: string;              // spec.credentials.username
     hasPassword: boolean;          // spec.credentials.passwordFile set
     encrypt: string;               // spec.disk.encrypt — off|full|home
@@ -84,6 +85,7 @@ export type CreateForm = SyncFormFields & {
     headMode: string;              // fullscreen-monitor|windowed|virtual-desktop|app
     persist: string;               // daemonize|owned|ephemeral
     autostart: boolean;            // spec.autostart — boot unit + start with the app
+    netMode: string;               // spec.network.mode — nat|restricted|isolated|vmnet
     method: string;                // none|cloudimg|iso|imported
     distro: string;                // ubuntu|debian|fedora
     release: string;               // cloudimg release
@@ -322,7 +324,7 @@ const defaultLogs = (): LogsState => ({
 const defaultCreate = (): CreateForm => ({
     name: "", cpus: 4, memMiB: 8192, diskGiB: 100, nestedVirt: false,
     gpu: "venus", swVk: false, headMode: "virtual-desktop", persist: "daemonize",
-    autostart: false,
+    autostart: false, netMode: "nat",
     method: "cloudimg", distro: "ubuntu", release: "26.04", desktop: "gnome",
     browser: "none", snap: false, extraFonts: false, autologin: true,
     preset: "standard", devtools: [],

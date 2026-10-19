@@ -363,6 +363,13 @@ export const VmSpec = z.object({
     }).prefault({}),
 
     network: z.object({
+        /** nat = slirp outbound+hostfwd; restricted = slirp restrict=on
+         *  (guest↔host only — no internet/LAN egress, hostfwd still works:
+         *  the sandbox mode); isolated = no netdev at all (QGA/serial/
+         *  vsock channels still reach the guest); vmnet = nat PLUS a
+         *  second NIC on a multicast L2 shared by every vmnet VM on this
+         *  host (no DHCP — link-local or manual static IPs). */
+        mode: z.enum(["nat", "restricted", "isolated", "vmnet"]).default("nat"),
         hostfwd: z.array(HostFwd).default([]),
         sshPort: z.number().int().optional(),     // resolved+stored at create
         rdpPort: z.number().int().optional(),

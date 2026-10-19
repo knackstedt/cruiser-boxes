@@ -39,8 +39,8 @@ function bootSlice(s: VmSpec) {
             monitors: s.display.monitors,
         },
         // hostfwd is LIVE: slirp accepts hostfwd_add/remove at runtime
-        // (VmHandle.applyForwards) — sshPort/rdpPort/vsock stay frozen.
-        network: { sshPort: s.network.sshPort, rdpPort: s.network.rdpPort, vsock: s.network.vsock },
+        // (VmHandle.applyForwards) — mode/sshPort/rdpPort/vsock stay frozen.
+        network: { mode: s.network.mode, sshPort: s.network.sshPort, rdpPort: s.network.rdpPort, vsock: s.network.vsock },
         usb: s.usb.autoAttach.filter((u) => u.atBoot)
             .map((u) => ({ vendorId: u.vendorId, productId: u.productId })),
         shares: s.shares.filter((x) => x.enabled !== false && x.mode !== "copy")

@@ -544,6 +544,13 @@ function create(s: CruiserState): string {
         ${optRow("Persist", "persist", f.persist, [["daemonize", "survives app"], ["owned", "stops with app"], ["ephemeral", "deleted on exit"]], "set-field", aptag("live"))}
         <div class="hint">${PERSIST_HINT[f.persist] ?? ""}</div>
         ${checkRow("Start on boot", "autostart", f.autostart, "start with the app and at login — headless (open a console yourself); a systemd --user unit is installed while any VM is flagged", aptag("live"))}
+        ${optRow("Network", "netMode", f.netMode, [["nat", "nat"], ["restricted", "restricted"], ["isolated", "isolated"], ["vmnet", "vmnet"]], "set-field", aptag("boot"))}
+        <div class="hint">${{
+            nat: "full outbound internet + LAN via slirp, with port forwards into the guest.",
+            restricted: "sandbox: the guest can only talk to the host — no internet/LAN egress. ssh + forwards still work.",
+            isolated: "no network at all — QGA, serial console and vsock still reach the guest; ssh and app-mode don't.",
+            vmnet: "nat plus a second NIC on a layer-2 net shared by every vmnet VM on this host (multi-VM labs — no DHCP, use link-local or static IPs).",
+        }[f.netMode] ?? ""}</div>
         <div class="h2">Snapshots ${aptag("live")}</div>
         ${optRow("Auto snapshot", "snapAuto", f.snapAuto, [["off", "off"], ["daily", "daily"], ["weekly", "weekly"], ["monthly", "monthly"]])}
         ${f.snapAuto === "off" ? "" : `

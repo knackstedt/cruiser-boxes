@@ -220,7 +220,7 @@ export class CruiserShell {
                 name: vm.name, cpus: vm.cpus, memMiB: vm.memMiB, diskGiB: vm.diskGiB,
                 nestedVirt: vm.nestedVirt,
                 gpu: vm.gpuMode, swVk: vm.swVk, headMode: vm.headMode, persist: vm.persist,
-                autostart: vm.autostart,
+                autostart: vm.autostart, netMode: vm.netMode,
                 vd: vm.vd, usb: [...vm.usbKeys],
                 snapAuto: vm.snapAuto, snapTrigger: vm.snapTrigger, snapKeep: vm.snapKeep,
             });

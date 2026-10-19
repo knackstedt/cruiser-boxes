@@ -39,6 +39,9 @@ usage: cruiser <area> <command> [args]
   vm create <name> [--cpus N] [--mem MiB] [--disk GiB] [--gpu venus|virgl|software]
                    [--head-mode fullscreen-monitor|windowed|virtual-desktop|app]
                    [--share PATH[:tag]] [--persist daemonize|owned]
+                   [--net nat|restricted|isolated|vmnet]   restricted = host-only (sandbox),
+                                                        isolated = no netdev, vmnet = nat +
+                                                        shared L2 with other vmnet VMs
                    [--distro ubuntu|debian|fedora] [--desktop gnome|kde]
                    [--browser none|firefox|chrome|chromium|vivaldi|brave]
                    [--snap] [--xfonts] [--no-autologin] [--devtools toolchain,python,rust,…]
@@ -283,6 +286,7 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const hm = flagVal("--head-mode"); if (hm) spec.display.headMode = hm as VmSpec["display"]["headMode"];
             const viewer = flagVal("--viewer"); if (viewer) spec.display.viewer = viewer as VmSpec["display"]["viewer"];
             const persist = flagVal("--persist"); if (persist) spec.persist = persist as VmSpec["persist"];
+            const net = flagVal("--net"); if (net) spec.network.mode = net as VmSpec["network"]["mode"];
             const distro = flagVal("--distro"); if (distro) spec.os.family = distro as VmSpec["os"]["family"];
             const desktop = flagVal("--desktop"); if (desktop) spec.os.desktop = desktop as VmSpec["os"]["desktop"];
             const browser = flagVal("--browser"); if (browser) spec.os.browser = browser as VmSpec["os"]["browser"];

@@ -189,10 +189,23 @@ export function buildArgs(
     }
 
     // ── network ──
-    const fwd = spec.network.hostfwd
-        .map((f) => `hostfwd=${f.proto}:127.0.0.1:${f.hostPort}-:${f.guestPort}`);
-    push("-netdev", `user,id=n0${fwd.length ? "," + fwd.join(",") : ""}`);
-    push("-device", "virtio-net-pci,netdev=n0");
+    // nat: slirp outbound + hostfwd. restricted: slirp restrict=on — the
+    // guest can only reach the host-side addresses (hostfwd still maps
+    // in); the AI-sandbox mode. isolated: no netdev at all — QGA, serial
+    // and vsock still work, ssh/app-mode don't. vmnet: n0 nat PLUS a
+    // second virtio NIC on a multicast socket — every vmnet-mode VM on
+    // this host shares the L2 (no DHCP: link-local or static IPs).
+    const netMode = spec.network.mode;
+    if (netMode !== "isolated") {
+        const fwd = spec.network.hostfwd
+            .map((f) => `hostfwd=${f.proto}:127.0.0.1:${f.hostPort}-:${f.guestPort}`);
+        push("-netdev", `user,id=n0${netMode === "restricted" ? ",restrict=on" : ""}${fwd.length ? "," + fwd.join(",") : ""}`);
+        push("-device", "virtio-net-pci,netdev=n0");
+        if (netMode === "vmnet") {
+            push("-netdev", "socket,id=n1,mcast=230.0.0.1:1234");
+            push("-device", "virtio-net-pci,netdev=n1");
+        }
+    }
 
     push("-device", "virtio-keyboard-pci", "-device", "virtio-tablet-pci");
     push("-object", "rng-random,filename=/dev/urandom,id=rng0", "-device", "virtio-rng-pci,rng=rng0");

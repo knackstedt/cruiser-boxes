@@ -224,6 +224,7 @@ export class CruiserService {
             diskGiB: s.disk.sizeGiB, nestedVirt: s.resources.nestedVirt,
             sshPort: s.network.sshPort, rdpPort: s.network.rdpPort,
             provisioned: s.provisioned.method, persist: s.persist, autostart: s.autostart,
+            netMode: s.network.mode,
             username: s.credentials.username, hasPassword: !!s.credentials.passwordFile,
             encrypt: s.disk.encrypt, keyStorage: s.disk.keyStorage,
             diskLocked: s.disk.encrypt !== "off" && h.diskKeyFile() === null,
@@ -488,6 +489,7 @@ export class CruiserService {
             spec.display.headMode = f.headMode as VmSpec["display"]["headMode"];
             spec.persist = f.persist as VmSpec["persist"];
             spec.autostart = f.autostart;
+            spec.network.mode = f.netMode as VmSpec["network"]["mode"];
             spec.snapshots.auto = f.snapAuto as VmSpec["snapshots"]["auto"];
             spec.snapshots.trigger = f.snapTrigger as VmSpec["snapshots"]["trigger"];
             spec.snapshots.keep = f.snapKeep;
@@ -801,6 +803,7 @@ export class CruiserService {
             if (f.vd > 0) spec.display.virtualDesktop = f.vd;
             spec.persist = f.persist as VmSpec["persist"];
             spec.autostart = f.autostart;
+            spec.network.mode = f.netMode as VmSpec["network"]["mode"];
             spec.snapshots.auto = f.snapAuto as VmSpec["snapshots"]["auto"];
             spec.snapshots.trigger = f.snapTrigger as VmSpec["snapshots"]["trigger"];
             spec.snapshots.keep = f.snapKeep;
