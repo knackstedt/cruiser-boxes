@@ -9,6 +9,8 @@
 //                         QEMU truncates each launch — a marathon boot with
 //                         a chatty console can still grow unbounded)
 //   install-serial.log    ISO autoinstall boot console
+//   *.log                 any other run/ log (viewer-dd, freerdp, swtpm,
+//                         urlopen, virtiofsd-<tag>) — picked up when present
 //
 // Guest side: systemd journal read live. Transport is QGA guest-exec
 // normally; when the agent is SELinux-confined (Fedora's virt_qemu_ga_t
@@ -16,7 +18,7 @@
 // the hostfwd port is the fallback (cruiser key + NOPASSWD from the seed).
 // ============================================================================
 
-import { statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { appendFile, mkdir, open, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { VmHandle } from "./lifecycle/vm";
@@ -27,7 +29,7 @@ import { sshArgv } from "./ssh";
 // ── runner logs (host files) ──
 
 export interface RunnerLogFile {
-    id: string;             // "cruiser" | "qemu" | "serial" | "install-serial"
+    id: string;             // "cruiser" | "qemu" | "serial" | "install-serial" | basename of any extra run/*.log
     name: string;           // display label
     path: string;
     exists: boolean;
@@ -41,6 +43,21 @@ export function runnerLogFiles(paths: VmPaths): RunnerLogFile[] {
         { id: "serial", name: "serial console", path: paths.serialLog },
         { id: "install-serial", name: "install serial", path: join(paths.run, "install-serial.log") },
     ];
+    // Any other *.log in run/ — viewer-dd.log, freerdp.log, swtpm.log,
+    // urlopen.log, virtiofsd-<tag>.log — listed only once the file exists.
+    const labels: Record<string, string> = {
+        "viewer-dd": "viewer (dmabuf)", freerdp: "viewer (rdp)",
+    };
+    let extra: string[] = [];
+    try {
+        extra = readdirSync(paths.run)
+            .filter((f) => f.endsWith(".log") && !defs.some((d) => d.path === join(paths.run, f)))
+            .sort();
+    } catch { /* run/ may not exist yet */ }
+    defs.push(...extra.map((f) => {
+        const id = f.slice(0, -".log".length);
+        return { id, name: labels[id] ?? id, path: join(paths.run, f) };
+    }));
     return defs.map((d) => {
         let sizeBytes = 0, exists = false;
         try { sizeBytes = statSync(d.path).size; exists = true; } catch { /* not created yet */ }

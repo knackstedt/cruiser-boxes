@@ -202,7 +202,7 @@ export type Route = "home" | "create" | "vm" | "settings" | "logs" | "term";
 /** Logs screen state — source picker + journal filters + fetched text. */
 export interface LogsState {
     source: "runner" | "journal";
-    file: string;                // runner log id ("cruiser" | "qemu" | "serial" | "install-serial")
+    file: string;                // runner log id ("cruiser" | "qemu" | … | extra run/*.log stem)
     follow: boolean;             // poll the source while the screen is open
     lines: number;
     unit: string;

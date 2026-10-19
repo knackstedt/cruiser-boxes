@@ -153,6 +153,34 @@ describe("route patch surfaces", () => {
         expect(row.html).not.toContain('class="vmrow"');
         expect(row.html).not.toContain(`id="vmrow-vm-1"`);
     });
+
+    test("footer status carrying a path offers open/copy actions", async () => {
+        // the buttons are gated on the path existing — stray "/word"
+        // fragments in status text must not light them up
+        const { mkdir, writeFile, rm } = await import("node:fs/promises");
+        const dir = `/var/tmp/cruiser-test-footer-${process.pid}`;
+        const logPath = `${dir}/run/viewer-dd.log`;
+        try {
+            await mkdir(`${dir}/run`, { recursive: true });
+            await writeFile(logPath, "x\n");
+            const store = createCruiserStore();
+            store.setState({
+                vms: [mkVm("vm-1")], route: "home",
+                status: `viewer for 'vm-1' exited (code 1) before a window appeared — see ${logPath}`,
+                statusKind: "error",
+            });
+            const parts = renderRouteParts(store.getState());
+            expect(parts.footer).toContain('data-action="status-open"');
+            expect(parts.footer).toContain('data-action="status-copy"');
+            expect(parts.footer).toContain(`data-path="${logPath}"`);
+            store.setState({ status: "ready", statusKind: "info" });
+            expect(renderRouteParts(store.getState()).footer).not.toContain("status-copy");
+            store.setState({ status: "mount uses virtiofs/9p at boot" });
+            expect(renderRouteParts(store.getState()).footer).not.toContain("status-copy");
+        } finally {
+            await rm(dir, { recursive: true, force: true });
+        }
+    });
 });
 
 // ── applySameRoute against a recording panel ──

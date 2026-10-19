@@ -307,6 +307,8 @@ export class CruiserShell {
             void svc.refreshLogs();
         });
         this.host.onAction("log-refresh", () => { void svc.refreshLogs(); });
+        this.host.onAction("status-open", (d) => { if (d.path) void svc.openPath(String(d.path)); });
+        this.host.onAction("status-copy", (d) => { if (d.path) void svc.copyText(String(d.path)); });
     }
 
     /** <input data-field="x"> → store.create[x] on every input event. */

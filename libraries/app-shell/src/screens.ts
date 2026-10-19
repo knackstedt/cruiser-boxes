@@ -3,6 +3,7 @@
 // Blitz html-ui stack; interactivity via data-action + DOM input events.
 // ============================================================================
 
+import { existsSync } from "node:fs";
 import { VMS_DIR } from "../../vm-core/src/paths";
 import { DISTROS, supportsKrdp } from "../../provision/src/distros";
 import { DEVTOOLS } from "../../provision/src/packages";
@@ -149,7 +150,10 @@ input:focus { border-color:#4fc2f7; outline:none; }
 .fbar.warn .fdot { background:#f0c98a; }
 .fbar.err { color:#f0b8c8; background:#331e27; }
 .fbar.err .fdot { background:#f08aa8; }
-.fbar .ftext { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.fbar .ftext { flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.fbar .fbtn { flex-shrink:0; padding:1px 8px; border:1px solid #4a515d;
+              border-radius:3px; font-size:11px; }
+.fbar .fbtn:active { background:#2a4a63; }
 /* Term route: the .content scrollport becomes a fixed column — the head
    strip stays put and #termbox fills the rest. The embedded webui view
    composites over #termbox's rect (TermManager probes it post-layout). */
@@ -979,7 +983,15 @@ export function renderRouteParts(s: CruiserState): RouteParts {
         <div class="nav">${nav("home", "VMs", ["home", "create", "vm", "logs", "term"].includes(s.route))}${nav("settings", "Settings")}</div>
         <div style="flex:1"></div>`;
     const fcls = s.statusKind === "error" ? " err" : s.statusKind === "warn" ? " warn" : "";
-    const footer = `<div class="fbar${fcls}"><div class="fdot"></div><div class="ftext">${esc(s.status)}</div></div>`;
+    // A status carrying a real absolute path ("— see /…/viewer-dd.log")
+    // gets open/copy actions — the bar's single-line text isn't selectable.
+    // (existsSync filters stray "/word" fragments out of status text.)
+    const stPath = s.status.match(/\/\S+/g)?.pop()?.replace(/[.,;:!?'")\]]+$/, "") ?? null;
+    const pathBtns = stPath && existsSync(stPath)
+        ? `<div class="fbtn" data-action="status-open"${attr("path", stPath)}>open</div>
+           <div class="fbtn" data-action="status-copy"${attr("path", stPath)}>copy path</div>`
+        : "";
+    const footer = `<div class="fbar${fcls}"><div class="fdot"></div><div class="ftext">${esc(s.status)}</div>${pathBtns}</div>`;
     const log = s.route === "logs" ? logPaneInner(s) : null;
     return {
         topbar, content: b.html, footer, log,

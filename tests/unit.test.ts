@@ -464,6 +464,26 @@ describe("logs", () => {
         expect(files.map((f) => f.id)).toEqual(["cruiser", "qemu", "serial", "install-serial"]);
         expect(files.every((f) => !f.exists)).toBe(true);
     });
+    test("runnerLogFiles picks up extra run/*.log files that exist", async () => {
+        const dir = `/var/tmp/cruiser-test-runlogs-${process.pid}`;
+        const runDir = join(dir, "run");
+        try {
+            const { mkdir } = await import("node:fs/promises");
+            await mkdir(runDir, { recursive: true });
+            await writeFile(join(runDir, "viewer-dd.log"), "viewer says hi\n");
+            await writeFile(join(runDir, "virtiofsd-data.log"), "vfsd\n");
+            await writeFile(join(runDir, "notes.txt"), "not a log\n");
+            const paths = { run: runDir, log: join(runDir, "qemu.log"), serialLog: join(runDir, "serial.log") } as ReturnType<typeof vmPaths>;
+            const files = runnerLogFiles(paths);
+            expect(files.map((f) => f.id))
+                .toEqual(["cruiser", "qemu", "serial", "install-serial", "viewer-dd", "virtiofsd-data"]);
+            const vd = files.find((f) => f.id === "viewer-dd")!;
+            expect(vd.exists).toBe(true);
+            expect(vd.name).toBe("viewer (dmabuf)");
+        } finally {
+            await rm(dir, { recursive: true, force: true });
+        }
+    });
     test("appendVmLog trims cruiser.log once it passes the cap", async () => {
         const dir = `/var/tmp/cruiser-test-vmlog-${process.pid}`;
         const runDir = join(dir, "run");

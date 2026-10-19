@@ -660,20 +660,45 @@ export class AgentForward {
         void (async () => {
             const { priv } = await (await import("../../vm-core/src/sshkey")).ensureKeypair();
             if (this.disposed) return;
-            // clear a stale bind — sshd won't unlink a dead socket on -R
-            await guestRun(this.h, ["/bin/sh", "-c", `rm -f ${sq(this.guestSock!)}`], 10_000).catch(() => {});
+            // clear a stale bind — sshd won't unlink a dead socket on -R.
+            // Hard-raced: a wedged QGA conn can hang guestExec forever and
+            // would otherwise strand the respawn chain mid-await.
+            await Promise.race([
+                guestRun(this.h, ["/bin/sh", "-c", `rm -f ${sq(this.guestSock!)}`], 10_000),
+                new Promise<never>((_, rj) => setTimeout(() => rj(new Error("guest rm timed out")), 15_000)),
+            ]).catch(() => {});
+            if (this.disposed) return;
             const argv = AgentForward.argv(this.h.spec, this.guestSock!, this.hostSock!, priv);
             const child = spawn("ssh", argv, { stdio: "ignore" });
             this.child = child;
             this.log?.("ssh agent: forwarding host agent into the guest");
             child.on("exit", () => {
                 this.child = null;
-                if (this.disposed) return;
-                // backoff respawn — guest may just be mid-reboot
-                this.timer = setTimeout(() => this.spawn(), 5_000);
+                this.retry(); // guest may just be mid-reboot
             });
-            child.on("error", () => {});
-        })();
+            child.on("error", (e) => {
+                // spawn-level failure (ENOENT/EMFILE) — 'exit' usually still
+                // fires and drives the retry, but don't count on it
+                this.child = null;
+                this.log?.(`ssh agent: spawn failed: ${e.message}`);
+                this.retry();
+            });
+        })().catch((e) => {
+            // setup threw before a child ever landed — retry instead of
+            // dropping the channel for the rest of the session
+            this.log?.(`ssh agent: forward setup failed: ${e instanceof Error ? e.message : e}`);
+            this.retry();
+        });
+    }
+
+    /** backoff respawn — single pending timer shared by the exit/error/
+     *  setup-failure paths so a double-fire can't stack respawns. */
+    private retry(): void {
+        if (this.disposed || this.timer) return;
+        this.timer = setTimeout(() => {
+            this.timer = null;
+            this.spawn();
+        }, 5_000);
     }
 
     dispose(): void {

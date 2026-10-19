@@ -6,7 +6,9 @@
 //   - net bytes/s: QGA /proc/net/dev
 //   - disk iops: QMP query-blockstats — works without the guest agent
 //   - gpu util/mem: host-side /proc/<qemu>/fdinfo DRM client stats
-//     (drm-engine-* busy ns, drm-total-*/drm-memory-* region bytes)
+//     (drm-engine-* busy ns, drm-total-*/drm-memory-* region bytes;
+//     gpu_busy_percent sysfs fallback when the driver reports no
+//     per-client engine counters — newer amdgpu is memory-only)
 //   - fallback when the agent isn't up: QEMU process /proc/<pid> ticks + RSS
 //     expressed as a fraction of the VM's vCPU/RAM budget
 //
@@ -34,7 +36,11 @@ const CLK_TCK = 100;             // Linux USER_HZ — /proc tick rate
 interface Hist { cpu: number[]; mem: number[]; disk: number[]; net: number[]; gpu: number[] }
 interface Prev {
     cpuTotal: number; cpuIdle: number; procTicks: number;
-    blkOps: number; netBytes: number; gpuNs: number; at: number;
+    blkOps: number; netBytes: number;
+    /** last cumulative engine-busy ns — null until a baseline lands (the
+     *  truthy check used to eat a permanently-0 counter, so a driver with
+     *  no/idle engine stats never produced a single gpu sample). */
+    gpuNs: number | null; at: number;
 }
 
 export class VmMetricsSampler {
@@ -58,7 +64,7 @@ export class VmMetricsSampler {
         }
         const hh = this.hist.get(name) ?? { cpu: [], mem: [], disk: [], net: [], gpu: [] };
         this.hist.set(name, hh);
-        const pv = this.prev.get(name) ?? { cpuTotal: 0, cpuIdle: 0, procTicks: 0, blkOps: 0, netBytes: 0, gpuNs: 0, at: 0 };
+        const pv = this.prev.get(name) ?? { cpuTotal: 0, cpuIdle: 0, procTicks: 0, blkOps: 0, netBytes: 0, gpuNs: null, at: 0 };
         this.prev.set(name, pv);
         const now = Date.now();
         const wall = pv.at ? (now - pv.at) / 1000 : 0;
@@ -118,11 +124,18 @@ export class VmMetricsSampler {
             }
         }
         if (drm) {
-            if (wall && pv.gpuNs) {
-                const pct = ((drm.engineNs - pv.gpuNs) / (wall * 1e9)) * 100;
-                pushCapped(hh.gpu, Math.max(0, Math.min(100, pct)));
+            if (drm.engineNs !== null) {
+                if (pv.gpuNs !== null && wall) {
+                    const pct = ((drm.engineNs - pv.gpuNs) / (wall * 1e9)) * 100;
+                    pushCapped(hh.gpu, Math.max(0, Math.min(100, pct)));
+                }
+                pv.gpuNs = drm.engineNs;
+            } else {
+                // instantaneous whole-device reading — no delta needed
+                if (drm.busyPct !== null)
+                    pushCapped(hh.gpu, Math.max(0, Math.min(100, drm.busyPct)));
+                pv.gpuNs = null;
             }
-            pv.gpuNs = drm.engineNs;
             m.gpuMemBytes = drm.memBytes;
         }
 
@@ -215,20 +228,49 @@ function drmMemBytes(txt: string): number {
 
 /** Host-side GPU usage of the QEMU process — scans /proc/<pid>/fd for
  *  /dev/dri handles and reads their fdinfo drm-engine + drm-memory
- *  counters. Null when QEMU holds no DRM fds (software mode, no rendernode). */
-async function drmGpu(pid: number): Promise<{ engineNs: number; memBytes: number } | null> {
+ *  counters. Stats are per DRM client, and QEMU parks several dup'd fds
+ *  on the same client — identical readouts must count once, not per fd
+ *  (a 3-dup fdinfo once triple-summed to a frozen "24 MiB").
+ *  engineNs: cumulative busy-ns sum, null when the driver reports no
+ *  drm-engine-* lines at all (newer amdgpu fdinfo is memory-only) — then
+ *  busyPct carries the device's instantaneous gpu_busy_percent instead
+ *  (not per-client, but the only busy signal left). Null when QEMU holds
+ *  no DRM fds with drm-* stats (software mode, NVIDIA fds — bare fdinfo). */
+async function drmGpu(pid: number): Promise<
+    { engineNs: number | null; busyPct: number | null; memBytes: number } | null> {
     const fds = await readdir(`/proc/${pid}/fd`).catch(() => [] as string[]);
-    let engineNs = 0, memBytes = 0, found = false;
+    let engineNs = 0, memBytes = 0, sawEngine = false, found = false;
+    const clients = new Set<string>();
+    const pdevs = new Set<string>();
     await Promise.all(fds.map(async (fd) => {
         const link = await readlink(`/proc/${pid}/fd/${fd}`).catch(() => "");
         if (!link.startsWith("/dev/dri/")) return;
         const txt = await readFile(`/proc/${pid}/fdinfo/${fd}`, "utf-8").catch(() => "");
         if (!txt.includes("drm-")) return;
+        // client-id is unique per open file on a minor (link); without one
+        // (old kernels) the stats body keys the dedupe — identical output
+        // means identical (empty) contributions anyway.
+        const cid = txt.match(/^drm-client-id:\s*(\d+)/m)?.[1]
+            ?? txt.slice(txt.indexOf("drm-"));
+        if (clients.has(`${link}|${cid}`)) return;
+        clients.add(`${link}|${cid}`);
         found = true;
+        const pdev = txt.match(/^drm-pdev:\s*(\S+)/m)?.[1];
+        if (pdev) pdevs.add(pdev);
+        if (/^drm-engine-/m.test(txt)) sawEngine = true;
         for (const m of txt.matchAll(/^drm-engine-\S+:\s*(\d+)\s*ns/gm)) engineNs += Number(m[1]);
         memBytes += drmMemBytes(txt);
     }));
-    return found ? { engineNs, memBytes } : null;
+    if (!found) return null;
+    if (sawEngine) return { engineNs, busyPct: null, memBytes };
+    let busyPct: number | null = null;
+    await Promise.all([...pdevs].map(async (p) => {
+        if (!/^[\da-f:.]+$/i.test(p)) return;
+        const v = Number((await readFile(
+            `/sys/bus/pci/devices/${p}/gpu_busy_percent`, "utf-8").catch(() => "")).trim());
+        if (Number.isFinite(v)) busyPct = Math.max(busyPct ?? 0, v);
+    }));
+    return { engineNs: null, busyPct, memBytes };
 }
 
 function meminfoKb(txt: string, key: string): number {

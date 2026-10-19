@@ -1017,6 +1017,40 @@ export class CruiserService {
         spawnChild("xdg-open", [mp], { detached: true }).unref();
     }
 
+    /** Status-line path action ("open" on "— see /…log"): a runner log
+     *  routes to the Logs screen (selectable text + follow), anything
+     *  else goes to xdg-open. */
+    async openPath(p: string): Promise<void> {
+        for (const [name, h] of this.handles.entries()) {
+            const f = runnerLogFiles(h.paths).find((x) => x.path === p);
+            if (!f) continue;
+            const st = this.store.getState();
+            st.setRoute("logs", name);
+            st.setLogs({ source: "runner", file: f.id });
+            void this.refreshLogs();
+            void this.loadLogUnits();
+            return;
+        }
+        const { spawnChild } = await import("../../sys/src/exec");
+        spawnChild("xdg-open", [p], { detached: true }).unref();
+    }
+
+    /** Host clipboard write ("copy path") — the UI toolkit can't own a
+     *  selection, so shell out: wl-copy on Wayland, xclip/xsel on X11. */
+    async copyText(text: string): Promise<void> {
+        const st = this.store.getState();
+        const tool = async (bin: string, args: string[]) =>
+            !!(await which(bin)) &&
+            await run(bin, args, { input: text, timeoutMs: 8_000 }).then(() => true, () => false);
+        const x11 = () => tool("xclip", ["-selection", "clipboard"])
+            .then((ok) => ok || tool("xsel", ["--clipboard", "--input"]));
+        const ok = process.env.WAYLAND_DISPLAY
+            ? await tool("wl-copy", []) || await x11()
+            : await x11() || await tool("wl-copy", []);
+        st.setStatus(ok ? "path copied to clipboard"
+            : "no clipboard tool found (install wl-clipboard or xclip)", ok ? "info" : "warn");
+    }
+
     /** Clone a stopped VM — auto-names '<name>-copy' ('-copy-2'…). The disk
      *  is reflinked/converted without its snapshots; ports re-allocate. */
     async cloneVm(name: string): Promise<void> {
