@@ -63,9 +63,15 @@ export async function findUsb(vendorId: string, productId: string, serial?: stri
     return all.find((d) => d.vendorId === vendorId && d.productId === productId && (!serial || d.serial === serial)) ?? null;
 }
 
+/** The qmp device id usbAttach assigns — bus/addr is in it so a re-plugged
+ *  device at a different address produces a different id. */
+export function usbAttachId(d: Pick<UsbDevice, "vendorId" | "productId" | "bus" | "addr">): string {
+    return `usb-${d.vendorId}-${d.productId}-${d.bus}-${d.addr}`;
+}
+
 /** Hotplug: QMP device_add usb-host by bus/addr (most precise) or vid/pid. */
 export async function usbAttach(qmp: QmpClient, d: UsbDevice): Promise<string> {
-    const id = `usb-${d.vendorId}-${d.productId}-${d.bus}-${d.addr}`;
+    const id = usbAttachId(d);
     await qmp.deviceAdd("usb-host", { id, bus: "xhci.0", hostbus: d.bus, hostaddr: d.addr });
     return id;
 }

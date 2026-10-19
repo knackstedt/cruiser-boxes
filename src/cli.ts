@@ -131,6 +131,8 @@ usage: cruiser <area> <command> [args]
   host monitors|desktops               probe host display topology
   usb ls                                usb attach <vm> <vid:pid>
   usb detach <vm> <id>
+  usb auto <vm> <vid:pid[:serial]> [--boot]   hot-plug whenever seen (--boot = also at launch)
+  usb unauto <vm> <vid:pid[:serial]>          drop the auto-attach entry
   vm mount <name> [guestPath] [mp]      sshfs-mount a guest dir on the host
   vm umount <name> [mp]                 unmount (default ~/.local/share/cruiser/mounts/<vm>)
   app list <vm>                         guest .desktop app catalog (via QGA)
@@ -1015,6 +1017,31 @@ async function usbCmd(cmd: string | undefined, args: string[]) {
             const h = await needVm(args[0]);
             await h.usbDetach(args[1]!);
             console.log("detached");
+            break;
+        }
+        case "auto": {
+            const h = await needVm(args[0]);
+            const [vid, pid, serial] = (args[1] ?? "").split(":");
+            if (!vid || !pid) usage();
+            const i = h.spec.usb.autoAttach.findIndex((d) =>
+                d.vendorId === vid && d.productId === pid && d.serial === serial);
+            const entry = { vendorId: vid, productId: pid, ...(serial ? { serial } : {}), atBoot: has("--boot") };
+            if (i >= 0) h.spec.usb.autoAttach[i] = entry;
+            else h.spec.usb.autoAttach.push(entry);
+            await h.saveSpec();
+            console.log(`auto-attach ${vid}:${pid}${serial ? ` serial ${serial}` : ""}${entry.atBoot ? " (at boot)" : ""}` +
+                `${h.isRunning() ? " — attaches within a few seconds" : ""}`);
+            break;
+        }
+        case "unauto": {
+            const h = await needVm(args[0]);
+            const [vid, pid, serial] = (args[1] ?? "").split(":");
+            if (!vid || !pid) usage();
+            const n = h.spec.usb.autoAttach.length;
+            h.spec.usb.autoAttach = h.spec.usb.autoAttach.filter((d) =>
+                !(d.vendorId === vid && d.productId === pid && (serial === undefined || d.serial === serial)));
+            await h.saveSpec();
+            console.log(h.spec.usb.autoAttach.length < n ? "removed" : "no such auto-attach entry");
             break;
         }
         default: usage();

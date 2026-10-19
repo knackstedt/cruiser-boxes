@@ -180,6 +180,7 @@ export class VmHandle {
     async probe(): Promise<VmState> {
         if (!this.isRunning()) return "stopped";
         this.watchVfsd();   // adopted QEMU — cover daemon crashes too
+        this.watchUsb();    // …and autoAttach hot-plug
         try {
             const st = await this.withQmp((q) => q.queryStatus());
             if (st.status === "paused" || st.status === "prelaunch") return "paused";
@@ -359,6 +360,7 @@ export class VmHandle {
                         await writeFile(this.launchMonitorsPath(),
                             JSON.stringify(opts.guestMonitors ?? [])).catch(() => {});
                         this.watchVfsd();
+                        this.watchUsb();
                         this.startUrlListener();
                         return;
                     } catch { /* not ready */ }
@@ -541,6 +543,61 @@ done
     private vfsdSpawned = new Map<string, number>();
     private vfsdTimer: ReturnType<typeof setInterval> | null = null;
     private vfsdTicking = false;
+
+    // ── usb autoAttach watch ──
+    // Polls sysfs while the VM runs: an autoAttach entry that shows up on
+    // the host gets hot-attached (QMP device_add usb-host); one that
+    // vanishes gets device_del'd so a re-plug at a new bus/addr attaches
+    // cleanly instead of colliding with the stale guest-side device.
+    private usbTimer: ReturnType<typeof setInterval> | null = null;
+    private usbTicking = false;
+    /** autoAttach key → qmp id (the id embeds bus/addr — a stale id means
+     *  the device re-appeared elsewhere and needs a detach first). */
+    private usbAttached = new Map<string, string>();
+
+    private watchUsb(): void {
+        if (this.usbTimer || !this.spec.usb.autoAttach.length) return;
+        const tick = async () => {
+            if (this.usbTicking) return;
+            this.usbTicking = true;
+            try {
+                if (!this.isRunning()) {
+                    if (this.usbTimer) { clearInterval(this.usbTimer); this.usbTimer = null; }
+                    this.usbAttached.clear();
+                    return;
+                }
+                const present = await usb.listUsbDevices().catch(() => []);
+                for (let i = 0; i < this.spec.usb.autoAttach.length; i++) {
+                    const w = this.spec.usb.autoAttach[i]!;
+                    const key = `${w.vendorId}:${w.productId}${w.serial ? `:${w.serial}` : ""}`;
+                    const match = present.find((d) =>
+                        d.vendorId === w.vendorId && d.productId === w.productId
+                        && (!w.serial || d.serial === w.serial));
+                    const cur = this.usbAttached.get(key);
+                    if (!match) {
+                        if (cur) {
+                            await this.withQmp((q) => usb.usbDetach(q, cur)).catch(() => {});
+                            this.usbAttached.delete(key);
+                        }
+                        continue;
+                    }
+                    if (cur === usb.usbAttachId(match)) continue;   // same device, still there
+                    if (cur) {
+                        await this.withQmp((q) => usb.usbDetach(q, cur)).catch(() => {});
+                        this.usbAttached.delete(key);
+                    }
+                    if (!match.writable) continue;
+                    const id = await this.withQmp((q) => usb.usbAttach(q, match)).catch(() => null);
+                    if (id) {
+                        this.usbAttached.set(key, id);
+                        void appendVmLog(this.paths, `usb auto-attach: ${match.product ?? key} (${id})`);
+                    }
+                }
+            } finally { this.usbTicking = false; }
+        };
+        void tick();
+        this.usbTimer = setInterval(() => void tick(), 3_000);
+    }
 
     private watchVfsd(): void {
         if (this.vfsdTimer) return;
