@@ -192,6 +192,20 @@ export const VmSpec = z.object({
          *  -cpu host, so this must be requested explicitly; the host's
          *  kvm_intel/kvm_amd nested param must also be on. */
         nestedVirt: z.boolean().default(false),
+        /** Host-side cgroup caps on the QEMU process — when any are set the
+         *  VM launches inside a `systemd-run --user --scope cruiser-<name>`
+         *  scope (boot-frozen: edit → restart pending). A missing user bus
+         *  or systemd-run falls back to an uncapped spawn with a log line.
+         *  Delegated user cgroups only support a subset of knobs — CPU,
+         *  memory and IO weight are the useful ones. */
+        limits: z.object({
+            /** CPUQuota — "50%" (half a core) or "200%" (two cores). */
+            cpuQuota: z.string().optional(),
+            /** MemoryMax — hard cap on QEMU's RSS incl. guest RAM, e.g. "8G". */
+            memoryMax: z.string().optional(),
+            /** IOWeight — blkio scheduling weight 1..10000 (default 100). */
+            ioWeight: z.number().int().min(1).max(10000).optional(),
+        }).prefault({}),
     }).prefault({}),
 
     disk: z.object({

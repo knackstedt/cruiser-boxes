@@ -60,6 +60,14 @@ function qemuAudioBackends(qemu: string, ldLibraryPath: string): Promise<Set<str
  *  implements org.qemu.Display1 audio, so prefer a backend QEMU can drive
  *  directly — pipewire when its socket exists, then PA (incl. pipewire-pulse
  *  compat). dbus remains the fallback: the VM still gets the hda device. */
+/** Probed once: does `systemd-run --user --scope` work (user bus + delegation)? */
+let scopeWorks: Promise<boolean> | null = null;
+function userScopeWorks(): Promise<boolean> {
+    scopeWorks ??= run("systemd-run", ["--user", "--scope", "--quiet", "true"], { noThrow: true })
+        .then((r) => r.code === 0).catch(() => false);
+    return scopeWorks;
+}
+
 async function pickAudioBackend(qemu: string, ldLibraryPath: string): Promise<BuildOpts["audioBackend"]> {
     const backends = await qemuAudioBackends(qemu, ldLibraryPath);
     const xdg = process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid!()}`;
@@ -328,12 +336,32 @@ export class VmHandle {
             if (vfsdBin) await this.spawnVfsd(built.virtiofsd[i]!, vfsdBin);
 
         const env = { ...process.env, ...built.env };
+        // resources.limits → run QEMU inside a delegated user scope so the
+        // kernel enforces CPU/mem/IO caps on the whole process (daemonized
+        // children stay in the scope cgroup after systemd-run exits).
+        const lim = this.spec.resources.limits;
+        const props = [
+            ...(lim.cpuQuota ? [`CPUQuota=${lim.cpuQuota}`] : []),
+            ...(lim.memoryMax ? [`MemoryMax=${lim.memoryMax}`] : []),
+            ...(lim.ioWeight ? [`IOWeight=${lim.ioWeight}`] : []),
+        ];
+        let qemuCmd = this.toolchain.qemu;
+        let qemuArgv = built.argv;
+        if (props.length) {
+            if (await userScopeWorks()) {
+                qemuCmd = "systemd-run";
+                qemuArgv = ["--user", "--scope", "--quiet", "--unit", `cruiser-${this.spec.name}`,
+                    ...props.flatMap((p) => ["-p", p]), "--", this.toolchain.qemu, ...built.argv];
+            } else {
+                void appendVmLog(this.paths, "resources.limits set but systemd-run --user unavailable — running uncapped");
+            }
+        }
         try {
             if (this.spec.persist === "daemonize") {
                 // QEMU -daemonize: spawn returns after the daemon fork.
-                await run(this.toolchain.qemu, built.argv, { env });
+                await run(qemuCmd, qemuArgv, { env });
             } else {
-                this.qemuChild = spawnChild(this.toolchain.qemu, built.argv, { env, stdio: "ignore" });
+                this.qemuChild = spawnChild(qemuCmd, qemuArgv, { env, stdio: "ignore" });
                 this.qemuChild.on("exit", (code) => {
                     this.qemuChild = null;
                     void appendVmLog(this.paths, `qemu exited (code ${code})`);
