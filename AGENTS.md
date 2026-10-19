@@ -404,8 +404,12 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   watcher for theme/accent/contrast, an /etc/localtime fs.watch for timezone,
   session-start one-shots hash-gated via run/sync.state (locale/keyboard/
   monitors/git/proxy/ca — in-guest drift isn't clobbered unless host input
-  changed), and an `AgentForward` (ssh -N -R host agent socket, respawn with
-  backoff) for sshAgent. `syncEnabled` = spec flag AND env: `CRUISER_HOST_
+  changed), and an `AgentForward` (ssh -N -R agent socket, respawn with
+  backoff) for sshAgent. With `credentials.sshAgentKeys` set (the form's
+  detected-~/.ssh picker, `vm agent-keys` on the cli) the forwarded socket
+  is a dedicated ssh-agent spawned under run/ and ssh-add'd with just the
+  picks — the session agent is never touched; empty list = the host's
+  SSH_AUTH_SOCK as before. `syncEnabled` = spec flag AND env: `CRUISER_HOST_
   SYNC=0` kills all, `CRUISER_SYNC_<ID>=0` per channel, `CRUISER_THEME_SYNC=0`
   still honored. The `scale` channel carries host display scale + font DPI:
   `hostDisplayScale` probes gsettings scaling-factor/text-scaling-factor
@@ -426,8 +430,8 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   installed as `~/.ssh/cruiser-git-key` (0600) + a
   `# >>> cruiser-git-key >>>` ssh config block (IdentityFile+IdentitiesOnly
   for github/gitlab/bitbucket). This is the reliable git path: the
-  sshAgent channel only works while a session is open AND the host agent
-  actually holds a key.
+  sshAgent channel only works while a session is open AND (with no
+  sshAgentKeys picks) the host agent actually holds a key.
   `filesync.ts` — copy-mode shares (`mode:"copy"`): rsync over the ssh hostfwd
   + `ensureKeypair` key. direction "both" = `--update` push+pull (newest wins,
   no deletes); "host-to-guest" = authoritative push (+`--delete` when

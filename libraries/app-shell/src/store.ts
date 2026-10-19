@@ -62,6 +62,7 @@ export interface VmSummary {
      *  ~/.local/share/cruiser/mounts/<vm>), null when unmounted. */
     mount?: string | null;
     sync?: Record<string, boolean>; // spec.sync.* — feeds the edit form
+    agentKeys?: string[];          // spec.credentials.sshAgentKeys — edit form preload
     /** Spec sections changed while running that only apply at next boot
      *  (VmHandle.pendingRestart) — drives the "restart pending" marker. */
     pendingRestart?: string[];
@@ -110,6 +111,7 @@ export type CreateForm = SyncFormFields & {
     memUnit: "MiB" | "GiB";        // UI-only — memMiB always stores MiB
     vd: number;                    // virtual-desktop head mode: desktop index (1-based)
     usb: string[];                 // "vid:pid:serial?" keys selected for boot-time passthrough
+    agentKeys: string[];           // spec.credentials.sshAgentKeys — picked host key paths
     snapAuto: string;              // spec.snapshots.auto — off|daily|weekly|monthly
     snapTrigger: string;           // spec.snapshots.trigger — start|stop|both
     snapKeep: number;              // spec.snapshots.keep — auto-* rotation bound
@@ -188,6 +190,12 @@ export interface HostResources {
 }
 
 /** USB device row for the passthrough picker (subset of vm-core UsbDevice). */
+/** A detected ~/.ssh private key offered by the sshAgent picker. */
+export interface SshKeyChoice {
+    path: string;
+    label: string;
+}
+
 export interface UsbChoice {
     key: string;                   // "vid:pid:serial|"
     vendorId: string;
@@ -237,6 +245,7 @@ export interface CruiserState {
     desktops: { index: number; name?: string; current?: boolean }[];
     vdRows: number;                // best-effort grid rows for the VD picker
     usbDevices: UsbChoice[];
+    sshKeys: SshKeyChoice[];       // detected ~/.ssh private keys (sshAgent picker)
     sysinfo: SysInfo | null;
     /** Two-click confirm token for destructive actions ("vm-rm:<name>" etc.)
      *  — first click arms the button, second executes. */
@@ -301,7 +310,9 @@ export interface CruiserActions {
     setHostRes(r: HostResources | null): void;
     setDesktops(ds: { index: number; name?: string; current?: boolean }[], rows: number): void;
     setUsbDevices(ds: UsbChoice[]): void;
+    setSshKeys(ks: SshKeyChoice[]): void;
     toggleUsb(key: string): void;
+    toggleAgentKey(path: string): void;
     toggleDevtool(id: string): void;
     setSysinfo(si: SysInfo | null): void;
     setConfirm(c: string | null): void;
@@ -334,7 +345,7 @@ const defaultCreate = (): CreateForm => ({
     ...syncFormDefaults(),
     iso: "", importPath: "", importRef: "", diskDir: "",
     username: "cruiser", password: "",
-    memUnit: "GiB", vd: 0, usb: [],
+    memUnit: "GiB", vd: 0, usb: [], agentKeys: [],
     snapAuto: "off", snapTrigger: "stop", snapKeep: 5,
     encrypt: "off", keyStore: "store", homeGiB: 50,
     diskPassword: "", diskPassword2: "",
@@ -356,6 +367,7 @@ export function createCruiserStore() {
         desktops: [],
         vdRows: 1,
         usbDevices: [],
+        sshKeys: [],
         sysinfo: null,
         confirm: null,
         editVm: null,
@@ -380,6 +392,7 @@ export function createCruiserStore() {
         setHostRes: (hostRes) => set({ hostRes }),
         setDesktops: (desktops, vdRows) => set({ desktops, vdRows }),
         setUsbDevices: (usbDevices) => set({ usbDevices }),
+        setSshKeys: (sshKeys) => set({ sshKeys }),
         setSysinfo: (sysinfo) => set({ sysinfo }),
         setConfirm: (confirm) => set({ confirm }),
         setEditVm: (editVm) => set({ editVm }),
@@ -395,6 +408,14 @@ export function createCruiserStore() {
             create: {
                 ...s.create,
                 usb: s.create.usb.includes(key) ? s.create.usb.filter((k) => k !== key) : [...s.create.usb, key],
+            },
+        })),
+        toggleAgentKey: (path) => set((s) => ({
+            create: {
+                ...s.create,
+                agentKeys: s.create.agentKeys.includes(path)
+                    ? s.create.agentKeys.filter((k) => k !== path)
+                    : [...s.create.agentKeys, path],
             },
         })),
         toggleDevtool: (id) => set((s) => ({

@@ -475,7 +475,18 @@ function create(s: CruiserState): string {
         ${checkRow("Git identity", "syncGit", f.syncGit, "pushes host ~/.gitconfig user.name/email into the guest")}
         ${checkRow("Proxy settings", "syncProxy", f.syncProxy, "pushes host proxy config (gsettings/kioslaverc + /etc/environment) into the guest")}
         ${checkRow("Custom CA roots", "syncCa", f.syncCa, "pushes host /usr/local/share/ca-certificates + pki anchors into the guest trust store")}
-        ${checkRow("SSH agent", "syncAgent", f.syncAgent, "forwards the host agent socket into the guest via ssh -R — held for the viewer session; guest processes can use your host keys")}
+        ${checkRow("SSH agent", "syncAgent", f.syncAgent, "forwards an agent socket into the guest via ssh -R (viewer-session lifetime); pick keys for a dedicated agent, none picked = your session agent as-is")}
+        ${!f.syncAgent ? "" : `<div class="opts wrap" style="margin-left:140px">${[
+            ...s.sshKeys.map((k) =>
+                `<div class="opt${f.agentKeys.includes(k.path) ? " on" : ""}" data-action="agentkey-toggle" data-key="${esc(k.path)}">${esc(k.label)}</div>`),
+            // a picked path the probe lost sight of (deleted key, imported
+            // spec) stays shown so it can be unpicked
+            ...f.agentKeys.filter((p) => !s.sshKeys.some((k) => k.path === p)).map((p) =>
+                `<div class="opt on dim" data-action="agentkey-toggle" data-key="${esc(p)}">${esc(p)} <span class="meta">missing</span></div>`),
+        ].join("") || `<div class="meta">no private keys detected under ~/.ssh</div>`}</div>
+        <div class="hint" style="margin-left:140px">${f.agentKeys.length
+            ? "picked keys are loaded into a dedicated agent forwarded to this VM — passphrase-protected keys can't load unattended"
+            : "no keys picked — your session agent is forwarded as-is"}</div>`}
         ${checkRow("Git SSH key", "syncGitKey", f.syncGitKey, "installs a host private key into the guest (credentials.gitSshKeyPath, else ~/.ssh/<git email>) + an ssh config block for the common forges")}`;
     const usbSection = `<div class="h2">USB passthrough ${aptag("boot")}</div>
         ${s.usbDevices.length

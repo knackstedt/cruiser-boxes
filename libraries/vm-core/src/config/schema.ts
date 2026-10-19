@@ -447,6 +447,11 @@ export const VmSpec = z.object({
          *  the guest. Unset → ~/.ssh/<git user.email>, then the usual
          *  id_ed25519/id_rsa/id_ecdsa defaults. */
         gitSshKeyPath: z.string().optional(),
+        /** Host private key paths the sshAgent channel loads into a
+         *  dedicated ssh-agent forwarded into the guest — the VM gets
+         *  exactly this set, the session agent stays untouched. Empty =
+         *  forward the host's SSH_AUTH_SOCK as-is (legacy behavior). */
+        sshAgentKeys: z.array(z.string()).default([]),
     }).prefault({}),
 
     autostart: z.boolean().default(false),

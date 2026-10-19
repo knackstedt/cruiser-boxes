@@ -28,6 +28,11 @@ describe("sync schema", () => {
         expect(s.sync.sshAgent).toBe(true);
         expect(s.sync.theme).toBe(false);
     });
+    test("credentials.sshAgentKeys defaults empty + survives parsing", () => {
+        expect(spec().credentials.sshAgentKeys).toEqual([]);
+        const s = parseVmSpec({ name: "ok", credentials: { sshAgentKeys: ["/k/a", "/k/b"] } });
+        expect(s.credentials.sshAgentKeys).toEqual(["/k/a", "/k/b"]);
+    });
 });
 
 describe("syncEnabled", () => {
@@ -183,6 +188,29 @@ describe("AgentForward argv", () => {
         const s = spec();
         s.network.sshPort = undefined;
         expect(() => AgentForward.argv(s, "/a", "/b", "/k")).toThrow();
+    });
+});
+
+describe("hostSshKeys detection", () => {
+    test("lists private keys only — pubs, config, and junk files are skipped", async () => {
+        const { mkdir, writeFile, rm } = await import("node:fs/promises");
+        const { hostSshKeys } = await import("../libraries/host-int/src/hoststate");
+        const dir = `/var/tmp/cruiser-test-keys-${process.pid}`;
+        try {
+            await mkdir(dir, { recursive: true });
+            await writeFile(`${dir}/id_ed25519`, "-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----\n");
+            await writeFile(`${dir}/id_ed25519.pub`, "ssh-ed25519 AAAA me@host\n");
+            await writeFile(`${dir}/deploy`, "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----\n");
+            await writeFile(`${dir}/config`, "Host *\n  AddKeysToAgent yes\n");
+            await writeFile(`${dir}/known_hosts`, "github.com ssh-ed25519 AAAA\n");
+            await writeFile(`${dir}/notes.txt`, "not a key\n");
+            const ks = await hostSshKeys(dir);
+            expect(ks.map((k) => k.path)).toEqual([`${dir}/deploy`, `${dir}/id_ed25519`]);
+            expect(ks.find((k) => k.path.endsWith("id_ed25519"))!.label).toBe("id_ed25519 — me@host");
+            expect(ks.find((k) => k.path.endsWith("/deploy"))!.label).toBe("deploy");
+        } finally {
+            await rm(dir, { recursive: true, force: true });
+        }
     });
 });
 

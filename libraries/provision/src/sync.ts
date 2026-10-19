@@ -21,14 +21,14 @@
 // ============================================================================
 
 import { createHash } from "node:crypto";
-import { watch, type FSWatcher } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { existsSync, watch, type FSWatcher } from "node:fs";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import type { VmSpec } from "../../vm-core/src/config/schema";
 import { guestRun } from "../../vm-core/src/logs";
-import { sq } from "../../sys/src/exec";
+import { run, sq } from "../../sys/src/exec";
 import { guestThemeScript } from "./theme";
 import { detectAdapter } from "../../host-int/src/detect";
 import { guestLayoutFromHost } from "./monitors";
@@ -606,6 +606,7 @@ function watchHostTimezone(onChanged: () => void): () => void {
  */
 export class AgentForward {
     private child: ChildProcess | null = null;
+    private agentChild: ChildProcess | null = null;   // picked-key dedicated agent
     private disposed = false;
     private timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -633,8 +634,17 @@ export class AgentForward {
     }
 
     async start(): Promise<void> {
-        const hostSock = hostAgentSock();
-        if (!hostSock) { this.log?.("ssh agent: no SSH_AUTH_SOCK on host — channel skipped"); return; }
+        const keys = this.h.spec.credentials.sshAgentKeys;
+        // A picked key list gets its own agent — the VM receives exactly
+        // the chosen set and the session agent is never forwarded.
+        const hostSock = keys.length ? await this.spawnPickedAgent(keys) : hostAgentSock();
+        if (this.disposed) { this.agentChild?.kill("SIGTERM"); this.agentChild = null; return; }
+        if (!hostSock) {
+            this.log?.(keys.length
+                ? "ssh agent: picked-key agent failed to come up — channel skipped"
+                : "ssh agent: no SSH_AUTH_SOCK on host — channel skipped");
+            return;
+        }
         const port = this.h.spec.network.sshPort;
         if (!port) { this.log?.("ssh agent: no SSH hostfwd mapped — channel skipped"); return; }
         // resolve the guest home + write env once
@@ -653,6 +663,43 @@ export class AgentForward {
         }
         this.hostSock = hostSock;
         this.spawn();
+    }
+
+    /** Dedicated ssh-agent seeded with the spec's picked key files — the
+     *  VM gets exactly the chosen set; the session agent is never
+     *  forwarded. Passphrase-protected picks can't load non-interactively
+     *  and are skipped. Returns the agent socket, or null on failure. */
+    private async spawnPickedAgent(keys: string[]): Promise<string | null> {
+        const sock = join(this.h.paths.run, "agent.sock");
+        await rm(sock, { force: true }).catch(() => {});
+        const agent = spawn("ssh-agent", ["-D", "-a", sock], { stdio: "ignore" });
+        this.agentChild = agent;
+        agent.on("error", () => {});
+        const deadline = Date.now() + 5_000;
+        while (!existsSync(sock) && agent.exitCode === null && Date.now() < deadline)
+            await new Promise((r) => setTimeout(r, 50));
+        if (!existsSync(sock)) {
+            agent.kill("SIGTERM");
+            this.agentChild = null;
+            this.log?.("ssh agent: picked-key agent never bound its socket");
+            return null;
+        }
+        let ok = 0, skipped = 0;
+        for (let i = 0; i < keys.length; i++) {
+            const r = await run("ssh-add", ["-q", "--", keys[i]!], {
+                env: { SSH_AUTH_SOCK: sock, SSH_ASKPASS_REQUIRE: "never" },
+                timeoutMs: 10_000, noThrow: true,
+            }).catch(() => null);
+            if (r?.code === 0) ok++; else skipped++;
+        }
+        this.log?.(`ssh agent: ${ok} picked key(s) seeded` +
+            (skipped ? ` — ${skipped} skipped (passphrase-protected or unreadable)` : ""));
+        if (!ok) {
+            agent.kill("SIGTERM");
+            this.agentChild = null;
+            return null;
+        }
+        return sock;
     }
 
     private spawn(): void {
@@ -706,6 +753,8 @@ export class AgentForward {
         if (this.timer) clearTimeout(this.timer);
         this.child?.kill("SIGTERM");
         this.child = null;
+        this.agentChild?.kill("SIGTERM");
+        this.agentChild = null;
     }
 }
 

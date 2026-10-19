@@ -10,6 +10,7 @@ import { defaultSpec, DevTool, VmSpec } from "../../vm-core/src/config/schema";
 import { makeShare } from "../../vm-core/src/config/shares";
 import { CACHE_DIR, CLOUDIMG_DIR, CONFIG_DIR, DATA_DIR, ISO_DIR, VMS_DIR } from "../../vm-core/src/paths";
 import { detectAdapter, detectSession } from "../../host-int/src/detect";
+import { hostSshKeys } from "../../host-int/src/hoststate";
 import { defaultMountpoint, isMounted } from "../../host-int/src/mount";
 import type { VmSession } from "../../provision/src/session";
 import { ViewerSession } from "../../host-int/src/session";
@@ -135,14 +136,16 @@ export class CruiserService {
         const st = this.store.getState();
         const dir = st.create.diskDir || VMS_DIR;
         const adapter = detectAdapter();
-        const [desktops, usb, freeGiB, rows] = await Promise.all([
+        const [desktops, usb, sshKeys, freeGiB, rows] = await Promise.all([
             adapter.desktops().catch(() => []),
             listUsbDevices().catch(() => []),
+            hostSshKeys().catch(() => []),
             diskFreeGiB(dir).catch(() => 0),
             kdeDesktopRows().catch(() => 1),
         ]);
         st.setDesktops(desktops.map((d) => ({ index: d.index, name: d.name, current: d.current })), rows);
         this.usbToStore(usb);
+        st.setSshKeys(sshKeys);
         st.setHostRes({ cpus: cpus().length, memGiB: Math.round(totalmem() / 1073741824), diskFreeGiB: Math.round(freeGiB) });
     }
 
@@ -246,6 +249,7 @@ export class CruiserService {
             })),
             mount: isMounted(defaultMountpoint(s.name)) ? defaultMountpoint(s.name) : null,
             sync: { ...s.sync },
+            agentKeys: [...s.credentials.sshAgentKeys],
             pendingRestart: h.pendingRestart(),
             cpu: [], mem: [], disk: [], net: [], gpu: [],
         };
@@ -511,6 +515,7 @@ export class CruiserService {
             // filter through the enum — a stray chip id shouldn't sink create
             spec.os.devtools = f.devtools.filter((d) => DevTool.safeParse(d).success) as VmSpec["os"]["devtools"];
             applySyncForm(spec, f);
+            spec.credentials.sshAgentKeys = [...f.agentKeys];
             if (spec.os.desktop === "kde" && f.method === "cloudimg") {
                 const { supportsKrdp } = await import("../../provision/src/distros");
                 if (!supportsKrdp(spec.os.family, spec.os.release))
@@ -815,6 +820,7 @@ export class CruiserService {
             });
             spec.description = st.vmDesc.trim();
             applySyncForm(spec, f);
+            spec.credentials.sshAgentKeys = [...f.agentKeys];
             this.validateSpec(spec);
             if (f.diskGiB !== h.spec.disk.sizeGiB) await h.resizeDisk(f.diskGiB);
             h.spec = spec;

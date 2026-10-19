@@ -208,6 +208,7 @@ export class CruiserShell {
             }
             st().toggleUsb(d.key);
         });
+        this.host.onAction("agentkey-toggle", (d) => { if (d.key) st().toggleAgentKey(d.key); });
         this.host.onAction("pick-disk-dir", () => { void svc.pickDiskDir(); });
         this.host.onAction("pick-import", () => { void svc.pickImportFile(); });
         this.host.onAction("vm-create", () => { svc.createVm(); });
@@ -221,7 +222,7 @@ export class CruiserShell {
                 nestedVirt: vm.nestedVirt,
                 gpu: vm.gpuMode, swVk: vm.swVk, headMode: vm.headMode, persist: vm.persist,
                 autostart: vm.autostart, netMode: vm.netMode,
-                vd: vm.vd, usb: [...vm.usbKeys],
+                vd: vm.vd, usb: [...vm.usbKeys], agentKeys: [...(vm.agentKeys ?? [])],
                 snapAuto: vm.snapAuto, snapTrigger: vm.snapTrigger, snapKeep: vm.snapKeep,
             });
             const sy = vm.sync;

@@ -28,7 +28,7 @@ Edit while the VM is stopped; the next `vm start` picks changes up.
 | `persist` | enum | `daemonize` | `daemonize` · `owned` · `ephemeral` |
 | `snapshots` | object | | `auto` (`off`·`daily`·`weekly`·`monthly`), `trigger` (`start`·`stop`·`both`, dflt `stop`), `keep` (dflt 5 — auto-* rotation bound) |
 | `provisioned` | object | | `method: cloudimg\|iso\|imported`, `source`, `completedAt` — written by provisioning |
-| `credentials` | object | | `username` (POSIX name, dflt `cruiser`), `passwordFile` (0600 path — never an inline password) |
+| `credentials` | object | | `username` (POSIX name, dflt `cruiser`), `passwordFile` (0600 path — never an inline password), `gitSshKeyPath` (key the gitKey channel installs), `sshAgentKeys` (host key paths for the sshAgent dedicated agent) |
 | `autostart` | bool | `false` | boot when the app starts |
 
 ## gpu
@@ -111,7 +111,7 @@ the host value actually changed.
 | `gitIdentity` | `false` | host `user.name`/`user.email` → guest git config. **Security-sensitive** |
 | `proxy` | `false` | host proxy → guest gsettings/kioslaverc + `/etc/profile.d` env. **Security-sensitive** |
 | `caCerts` | `false` | host custom CA roots → guest trust store. **Security-sensitive** |
-| `sshAgent` | `false` | host `SSH_AUTH_SOCK` → guest via a held `ssh -N -R` forward (session lifetime). **Security-sensitive** |
+| `sshAgent` | `false` | agent socket → guest via a held `ssh -N -R` forward (session lifetime). With `credentials.sshAgentKeys` set, a dedicated agent holding just the picked keys is forwarded; empty = host `SSH_AUTH_SOCK` as-is. **Security-sensitive** |
 
 The last four default off deliberately: they move host identity, trust, or
 credentials into the guest — opt in per VM.

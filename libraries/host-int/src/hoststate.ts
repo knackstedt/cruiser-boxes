@@ -5,7 +5,7 @@
 // throw into a provision or a viewer-session start.
 // ============================================================================
 
-import { readFile } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { glob } from "node:fs/promises";
@@ -323,4 +323,33 @@ export async function hostGitSshKey(
         return { path: p, priv, pub };
     }
     return null;
+}
+
+export interface HostSshKeyChoice { path: string; label: string }
+
+/** Private keys under ~/.ssh — the sshAgent channel's picker candidates
+ *  (credentials.sshAgentKeys stores the chosen paths). A file counts as a
+ *  key when its head contains a PRIVATE KEY armor line — skips .pub,
+ *  config/known_hosts-style files, and directories like ~/.ssh/agent.
+ *  label = basename plus the .pub comment when one exists
+ *  ("id_ed25519 — user@host"). `dir` is injectable for tests. */
+export async function hostSshKeys(dir = join(homedir(), ".ssh")): Promise<HostSshKeyChoice[]> {
+    const skip = new Set([
+        "config", "environment", "rc", "authorized_keys", "authorized_keys2",
+        "known_hosts", "known_hosts.old", "moduli",
+    ]);
+    const names = await readdir(dir).catch(() => [] as string[]);
+    const out: HostSshKeyChoice[] = [];
+    for (const n of names.sort()) {
+        if (n.endsWith(".pub") || skip.has(n)) continue;
+        const p = join(dir, n);
+        if (!(await stat(p).catch(() => null))?.isFile()) continue;
+        const head = await readFile(p, "utf-8").catch(() => "");
+        if (!/PRIVATE KEY/.test(head.slice(0, 4096))) continue;
+        const comment = await readFile(`${p}.pub`, "utf-8")
+            .then((t) => t.trim().split(/\s+/).slice(2).join(" "))
+            .catch(() => "");
+        out.push({ path: p, label: comment ? `${n} — ${comment}` : n });
+    }
+    return out;
 }

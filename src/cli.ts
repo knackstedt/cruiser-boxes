@@ -126,6 +126,9 @@ usage: cruiser <area> <command> [args]
                                       keyboard monitors hostWallpaper shares | gitIdentity
                                       proxy caCerts sshAgent gitKey   (last five default off —
                                       they push host credentials/identity/trust into the guest)
+  vm agent-keys <name>                list the host keys sshAgent forwards (picked set)
+  vm agent-keys <name> add|del <path> manage the picked set — a dedicated agent holding
+  vm agent-keys <name> clear          just these is forwarded (empty = session agent as-is)
   vm logs <name> [--file cruiser|qemu|serial|install-serial] [--lines N]
            [--journal] [--unit U] [--priority P] [--boot N] [--since X] [--grep PAT]
            [--units]                    guest journal via QGA (ssh fallback on confined agents)
@@ -757,6 +760,32 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
                 const { SessionSyncs } = await import("../libraries/provision/src/sync");
                 await new SessionSyncs(h, (m) => console.log(`${h.spec.name}: ${m}`)).applyOnce();
             }
+            break;
+        }
+        case "agent-keys": {
+            const h = await needVm(args[0]);
+            const cur = h.spec.credentials.sshAgentKeys;
+            const op = args[1];
+            if (!op) {
+                const { hostSshKeys } = await import("../libraries/host-int/src/hoststate");
+                const seen = new Set((await hostSshKeys()).map((k) => k.path));
+                if (!cur.length) console.log("no picked keys — the session agent is forwarded as-is");
+                cur.forEach((p) => console.log(`  ${p}${seen.has(p) ? "" : "  (missing)"}`));
+                break;
+            }
+            const path = args[2];
+            if (op === "clear") {
+                h.spec.credentials.sshAgentKeys = [];
+            } else if (op === "add" && path) {
+                if (!cur.includes(path)) cur.push(path);
+            } else if (op === "del" && path) {
+                h.spec.credentials.sshAgentKeys = cur.filter((p) => p !== path);
+            } else {
+                console.error("expected: vm agent-keys <name> [add|del <path>|clear]");
+                process.exit(2);
+            }
+            await h.saveSpec();
+            console.log(`sshAgentKeys = [${h.spec.credentials.sshAgentKeys.join(", ") || "none"}] — applies at the next viewer session`);
             break;
         }
         case "import": {
