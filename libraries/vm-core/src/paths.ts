@@ -12,11 +12,13 @@
 //                               launch-spec.json (spec QEMU booted with —
 //                               baseline for the restart-pending diff)
 //       snapshots/                (external snapshot files if used)
+//   (vms/<name> may itself be a symlink — "VM location" lets the whole
+//   dir live on another filesystem)
 //   ~/.cache/cruiser/             cloudimg downloads, seed work dirs
 //   <repo>/opt/                   toolchain binaries (CRUISER_OPT override)
 // ============================================================================
 
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, extname, join } from "node:path";
 
@@ -32,6 +34,14 @@ export const CLOUDIMG_DIR = join(CACHE_DIR, "cloudimg");
 
 export function vmDir(name: string): string {
     return join(VMS_DIR, name);
+}
+
+/** The real (link-resolved) VM dir — vms/<name> may be a symlink to a dir
+ *  on another filesystem ("VM location" / `vm move`). Falls back to the
+ *  link path itself when it doesn't resolve (missing/unmounted target). */
+export function vmRealDir(name: string): string {
+    const d = vmDir(name);
+    try { return realpathSync(d); } catch { return d; }
 }
 
 /** Absolute path to the VM's disk — spec.disk.file is relative to the vm dir

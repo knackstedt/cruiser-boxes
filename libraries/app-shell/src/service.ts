@@ -3,12 +3,12 @@
 // store, and executes actions (create/provision/start/stop/view/snapshots).
 // ============================================================================
 
-import { VmRegistry } from "../../vm-core/src/lifecycle/registry";
+import { VmRegistry, linkVmDir } from "../../vm-core/src/lifecycle/registry";
 import { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import { syncAutostartUnit, autostartNames } from "../../vm-core/src/lifecycle/autostart";
 import { defaultSpec, DevTool, VmSpec } from "../../vm-core/src/config/schema";
 import { makeShare } from "../../vm-core/src/config/shares";
-import { CACHE_DIR, CLOUDIMG_DIR, CONFIG_DIR, DATA_DIR, ISO_DIR, VMS_DIR } from "../../vm-core/src/paths";
+import { CACHE_DIR, CLOUDIMG_DIR, CONFIG_DIR, DATA_DIR, ISO_DIR, VMS_DIR, vmRealDir } from "../../vm-core/src/paths";
 import { detectAdapter, detectSession } from "../../host-int/src/detect";
 import { hostSshKeys } from "../../host-int/src/hoststate";
 import { defaultMountpoint, isMounted } from "../../host-int/src/mount";
@@ -18,7 +18,7 @@ import { listUsbDevices } from "../../vm-core/src/usb/usb";
 import { runnerLogFiles, tailFile, guestJournal, guestJournalUnits } from "../../vm-core/src/logs";
 import { run, which } from "../../sys/src/exec";
 import { cpus, totalmem, homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { readFile } from "node:fs/promises";
 import { mark } from "./startup-profile";
 import { VmMetricsSampler } from "./metrics";
@@ -134,7 +134,7 @@ export class CruiserService {
     /** Populate create-screen extras: host totals, desktops grid, USB list. */
     async refreshCreateExtras(): Promise<void> {
         const st = this.store.getState();
-        const dir = st.create.diskDir || VMS_DIR;
+        const dir = st.create.diskDir || st.create.vmDir || VMS_DIR;
         const adapter = detectAdapter();
         const [desktops, usb, sshKeys, freeGiB, rows] = await Promise.all([
             adapter.desktops().catch(() => []),
@@ -179,6 +179,16 @@ export class CruiserService {
         const p = await this.pickPath("dir", "Choose disk location", this.store.getState().create.diskDir || VMS_DIR);
         if (!p) return;
         this.store.getState().setField("diskDir", p === VMS_DIR ? "" : p);
+        await this.refreshCreateExtras();
+    }
+
+    async pickVmDir(): Promise<void> {
+        const p = await this.pickPath("dir", "Choose VM storage location", this.store.getState().create.vmDir || VMS_DIR);
+        if (!p) return;
+        // The literal path is stored — picking VMS_DIR back in edit mode
+        // moves a relocated VM home and drops its symlink (create's
+        // linkVmDir no-ops on the default too).
+        this.store.getState().setField("vmDir", p);
         await this.refreshCreateExtras();
     }
 
@@ -249,6 +259,7 @@ export class CruiserService {
                     || (f.guestPort === 3389 && f.hostPort === s.network.rdpPort),
             })),
             mount: isMounted(defaultMountpoint(s.name)) ? defaultMountpoint(s.name) : null,
+            vmDir: vmRealDir(s.name),
             sync: { ...s.sync },
             agentKeys: [...s.credentials.sshAgentKeys],
             pendingRestart: h.pendingRestart(),
@@ -553,6 +564,10 @@ export class CruiserService {
                 spec.disk.file = join(f.diskDir, `${f.name}.qcow2`);
             }
             this.validateSpec(spec);
+            // A non-default VM location lands the whole dir elsewhere via a
+            // vms/<name> symlink — linkVmDir creates the target + the link,
+            // then registry.create writes through it as usual.
+            if (f.vmDir) await linkVmDir(spec.name, f.vmDir);
             const h = await this.registry.create(spec);
             this.handles.set(spec.name, h);
             if (spec.autostart)
@@ -806,6 +821,13 @@ export class CruiserService {
             st.setStatus("the dmabuf viewer needs a GL gpu — pick venus/virgl or the rdp viewer", "warn");
             return;
         }
+        // A changed VM location physically moves the dir — QEMU must not
+        // hold open files under it.
+        const curParent = dirname(vmRealDir(name));
+        if (f.vmDir && f.vmDir !== curParent && h.isRunning()) {
+            st.setStatus(`stop ${name} before moving its storage`, "warn");
+            return;
+        }
         await this.run(`save ${name}`, async () => {
             const prev = h.spec;
             // Clone-then-validate: a schema rejection must not leave h.spec
@@ -845,6 +867,10 @@ export class CruiserService {
             if (prev.display.headMode !== spec.display.headMode
                 || prev.display.virtualDesktop !== spec.display.virtualDesktop)
                 this.applyLiveDisplay(h);
+            // Last: relocate the real dir and repoint absolute spec paths
+            // (relocate() writes vm.json itself). The disk resize above ran
+            // against the old location — qemu-img follows the link either way.
+            if (f.vmDir && f.vmDir !== curParent) await this.registry.relocate(name, f.vmDir);
             st.resetCreate();
             st.setRoute("vm", name);
             return h.isRunning() ? bootRelevantChanges(prev, spec) : [];

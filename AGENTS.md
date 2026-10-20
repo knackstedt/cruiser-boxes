@@ -154,6 +154,16 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   qemu-img convert'd — internal snapshots never survive (convert drops
   them; reflink copies then strips them); OVMF_VARS + secrets/ copied,
   spec.origin cleared (a config pull must not rewrite both VMs).
+  `registry.relocate(name, dir)` ("VM location" row / `vm move` /
+  create's --vm-dir via linkVmDir) puts the real dir at <dir>/<name>
+  behind a vms/<name> symlink — every vmPaths() consumer resolves
+  through the link, scan() picks it up via existsSync. Moving back to
+  VMS_DIR drops the link. The move is `mv` (rename or copy+delete —
+  fs.cp chokes on run/'s stale unix sockets); absolute spec paths under
+  the old real dir get repointed. remove(--disk) + rename resolve the
+  link — a bare rm on a linked dir would drop only the link and orphan
+  the real one. vmRealDir() reports the link-resolved path (summary's
+  vmDir/detail-page location); a missing mount shows as "not found".
   Disk encryption (spec.disk.encrypt): qcow2 LUKS — QEMU/qemu-img unlock
   the image via `-object secret,id=diskkey,file=<key>` + the drive's
   `encrypt.key-secret=diskkey`. "full" = the system image itself is LUKS;

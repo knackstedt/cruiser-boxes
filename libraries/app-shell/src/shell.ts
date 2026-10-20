@@ -14,6 +14,7 @@ import { DISTROS } from "../../provision/src/distros";
 import { DEVTOOLS, DEVTOOLS_PRESET } from "../../provision/src/packages";
 import { registerUiFonts } from "./fonts";
 import { RenderGate } from "./render-gate";
+import { dirname } from "node:path";
 import { TermManager } from "./term/term-manager";
 import { mark } from "./startup-profile";
 
@@ -215,6 +216,7 @@ export class CruiserShell {
         });
         this.host.onAction("agentkey-toggle", (d) => { if (d.key) st().toggleAgentKey(d.key); });
         this.host.onAction("pick-disk-dir", () => { void svc.pickDiskDir(); });
+        this.host.onAction("pick-vm-dir", () => { void svc.pickVmDir(); });
         this.host.onAction("pick-import", () => { void svc.pickImportFile(); });
         this.host.onAction("vm-create", () => { svc.createVm(); });
         this.host.onAction("vm-edit", (d) => {
@@ -226,6 +228,7 @@ export class CruiserShell {
                 name: vm.name, cpus: vm.cpus, memMiB: vm.memMiB, diskGiB: vm.diskGiB,
                 nestedVirt: vm.nestedVirt,
                 gpu: vm.gpuMode, swVk: vm.swVk, headMode: vm.headMode, viewer: vm.viewer, persist: vm.persist,
+                vmDir: dirname(vm.vmDir),
                 autostart: vm.autostart, netMode: vm.netMode,
                 vd: vm.vd, usb: [...vm.usbKeys], agentKeys: [...(vm.agentKeys ?? [])],
                 snapAuto: vm.snapAuto, snapTrigger: vm.snapTrigger, snapKeep: vm.snapKeep,

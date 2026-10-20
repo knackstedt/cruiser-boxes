@@ -10,6 +10,7 @@ import type { VmSummary } from "../libraries/app-shell/src/store";
 function mkVm(name: string, over: Partial<VmSummary> = {}): VmSummary {
     return {
         name, state: "stopped", gpuMode: "venus", headMode: "virtual-desktop", viewer: "dmabuf",
+        vmDir: "/var/tmp/vm",
         cpus: 4, memMiB: 8192, diskGiB: 100, nestedVirt: false,
         persist: "daemonize", username: "cruiser", hasPassword: false,
         encrypt: "off", keyStorage: "store", diskLocked: false,

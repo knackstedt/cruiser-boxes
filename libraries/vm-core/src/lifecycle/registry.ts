@@ -6,12 +6,13 @@
 // to monitor/qga sockets.
 // ============================================================================
 
-import { readdir, readFile, copyFile, cp, mkdir, rename as fsRename, writeFile } from "node:fs/promises";
+import { readdir, readFile, copyFile, cp, mkdir, rename as fsRename, writeFile, lstat, realpath, rm, symlink } from "node:fs/promises";
 import { createServer } from "node:net";
-import { existsSync } from "node:fs";
-import { dirname, extname, join } from "node:path";
+import { existsSync, lstatSync } from "node:fs";
+import { dirname, extname, join, resolve } from "node:path";
 
-import { VMS_DIR, vmPaths, homeDiskPath } from "../paths";
+import { VMS_DIR, vmDir, vmPaths, homeDiskPath } from "../paths";
+import { run } from "../../../sys/src/exec";
 import { VmHandle, type VmState } from "./vm";
 import { VmSpec, parseVmSpec } from "../config/schema";
 import { cloneDisk } from "../disk/ops";
@@ -32,6 +33,25 @@ async function portFree(port: number): Promise<boolean> {
         srv.once("listening", () => srv.close(() => resolve(true)));
         srv.listen(port, "127.0.0.1");
     });
+}
+
+/** Point vms/<name> at a real dir on another filesystem: the vm dir keeps
+ *  its canonical path while everything inside it (vm.json, disk, secrets,
+ *  run/) lives under <parentDir>/<name>. A stale symlink is replaced; a
+ *  real dir or an existing target is an error. A no-op when parentDir is
+ *  the default VMS_DIR. */
+export async function linkVmDir(name: string, parentDir: string): Promise<void> {
+    const link = vmDir(name);
+    const target = join(parentDir, name);
+    if (resolve(target) === link) return;
+    if (existsSync(target)) throw new Error(`vm dir already exists: ${target}`);
+    const cur = await lstat(link).catch(() => null);
+    if (cur) {
+        if (!cur.isSymbolicLink()) throw new Error(`vm dir already exists: ${link}`);
+        await rm(link, { force: true });   // stale or being repointed
+    }
+    await mkdir(target, { recursive: true });
+    await symlink(target, link);
 }
 
 export interface RegistryEntry {
@@ -174,7 +194,6 @@ export class VmRegistry extends EventTarget {
             // A failed copy must not leave a registered-but-diskless VM —
             // nor a half-written external disk file.
             this.vms.delete(newName);
-            const { rm } = await import("node:fs/promises");
             await rm(h.paths.dir, { recursive: true, force: true }).catch(() => {});
             if (!dstDisk.startsWith(`${h.paths.dir}/`)) await rm(dstDisk, { force: true }).catch(() => {});
             // an external system disk means an external <stem>-home too —
@@ -186,6 +205,55 @@ export class VmRegistry extends EventTarget {
             throw e;
         }
         return h;
+    }
+
+    /** Move a stopped VM's real dir to <parentDir>/<name> — vms/<name>
+     *  stays the canonical path via a symlink (dropped when the target IS
+     *  the default location). Absolute spec paths under the old real dir
+     *  are repointed; a running VM refuses — QEMU holds open files there. */
+    async relocate(name: string, parentDir: string): Promise<void> {
+        const h = this.vms.get(name);
+        if (!h) throw new Error(`unknown vm '${name}'`);
+        if (h.isRunning()) throw new Error(`stop '${name}' before moving its storage`);
+        const linkDir = h.paths.dir;
+        const curReal = await realpath(linkDir);
+        const target = join(parentDir, name);
+        if (resolve(target) === curReal) return;
+        // target === linkDir means "move back to the default path" — the
+        // only entry there is the symlink we're about to replace (a real
+        // dir would have matched curReal and early-returned). Everywhere
+        // else, ANY entry at the target is a collision — lstatSync so a
+        // stray symlink counts too.
+        if (target !== linkDir && lstatSync(target, { throwIfNoEntry: false }))
+            throw new Error(`target dir already exists: ${target}`);
+        await mkdir(parentDir, { recursive: true });
+        const wasLink = (await lstat(linkDir)).isSymbolicLink();
+        // Moving back to the default path: the link occupies the target
+        // name — drop it first so the real dir can take its place (and
+        // restore it if the move fails).
+        if (target === linkDir && wasLink) await rm(linkDir, { force: true });
+        try {
+            // mv, not fs.cp — cross-device moves preserve attrs and run/'s
+            // stale unix sockets copy as special files (fs.cp throws on them).
+            await run("mv", [curReal, target], { timeoutMs: 0 });
+        } catch (e) {
+            if (target === linkDir && wasLink) await symlink(curReal, linkDir).catch(() => {});
+            throw e;
+        }
+        if (target !== linkDir) {
+            if (wasLink) await rm(linkDir, { force: true });
+            await symlink(target, linkDir);
+        }
+        // Absolute spec paths that bypassed the link into the old real dir
+        // move with it; link-path absolutes keep resolving through the
+        // link and stay untouched.
+        const spec = h.spec;
+        const repoint = (p?: string) => p?.startsWith(`${curReal}/`) ? join(target, p.slice(curReal.length + 1)) : p;
+        spec.disk.file = repoint(spec.disk.file)!;
+        spec.credentials.passwordFile = repoint(spec.credentials.passwordFile);
+        spec.credentials.gitSshKeyPath = repoint(spec.credentials.gitSshKeyPath);
+        await writeFile(h.paths.spec, JSON.stringify(spec, null, 2) + "\n");
+        this.dispatchEvent(new Event("change"));
     }
 
     /** Rename a stopped VM: move the vm dir, update spec.name, and repoint
@@ -203,17 +271,33 @@ export class VmRegistry extends EventTarget {
         const dst = vmPaths(newName);
         if (existsSync(dst.dir)) throw new Error(`target dir already exists: ${dst.dir}`);
         const oldDir = h.paths.dir;
-        await fsRename(oldDir, dst.dir);
+        // A relocated VM's dir is a symlink — rename the REAL dir on its own
+        // filesystem and repoint the link, or the old name lingers on the
+        // other disk.
+        const oldIsLink = (await lstat(oldDir)).isSymbolicLink();
+        const oldReal = oldIsLink ? await realpath(oldDir) : oldDir;
+        const dstReal = oldIsLink ? join(dirname(oldReal), newName) : dst.dir;
+        if (existsSync(dstReal)) throw new Error(`target dir already exists: ${dstReal}`);
+        await fsRename(oldReal, dstReal);
+        if (oldIsLink) {
+            await rm(oldDir, { force: true });
+            await symlink(dstReal, dst.dir);
+        }
         try {
             const spec = h.spec;
             spec.name = newName;
-            const repoint = (p?: string) => p?.startsWith(`${oldDir}/`) ? join(dst.dir, p.slice(oldDir.length + 1)) : p;
+            const repoint = (p?: string) => p?.startsWith(`${oldDir}/`) ? join(dst.dir, p.slice(oldDir.length + 1))
+                : p?.startsWith(`${oldReal}/`) ? join(dstReal, p.slice(oldReal.length + 1)) : p;
             spec.disk.file = repoint(spec.disk.file)!;
             spec.credentials.passwordFile = repoint(spec.credentials.passwordFile);
             spec.credentials.gitSshKeyPath = repoint(spec.credentials.gitSshKeyPath);
             await writeFile(dst.spec, JSON.stringify(spec, null, 2) + "\n");
         } catch (e) {
-            await fsRename(dst.dir, oldDir).catch(() => {});
+            await fsRename(dstReal, oldReal).catch(() => {});
+            if (oldIsLink) {
+                await rm(dst.dir, { force: true }).catch(() => {});
+                await symlink(oldReal, oldDir).catch(() => {});
+            }
             throw e;
         }
         const nh = await VmHandle.load(newName);
@@ -229,8 +313,12 @@ export class VmRegistry extends EventTarget {
         if (h.isRunning()) await h.kill();
         this.vms.delete(name);
         if (deleteDisk) {
-            const { rm } = await import("node:fs/promises");
+            // A relocated VM: paths.dir is a symlink — rm drops only the
+            // link, so the real dir on the other disk needs its own pass.
+            const isLink = await lstat(h.paths.dir).then((s) => s.isSymbolicLink()).catch(() => false);
+            const real = isLink ? await realpath(h.paths.dir).catch(() => null) : null;
             await rm(h.paths.dir, { recursive: true, force: true });
+            if (real && real !== h.paths.dir) await rm(real, { recursive: true, force: true });
         }
         this.dispatchEvent(new Event("change"));
     }

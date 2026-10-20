@@ -20,7 +20,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
-import { VmRegistry, VmSpec, VmHandle, HeadMode, DevTool, defaultSpec, type ShareSpec } from "../libraries/vm-core/src/index";
+import { VmRegistry, VmSpec, VmHandle, HeadMode, DevTool, defaultSpec, linkVmDir, type ShareSpec } from "../libraries/vm-core/src/index";
 import { makeShare } from "../libraries/vm-core/src/config/shares";
 import type { ViewerSession } from "../libraries/host-int/src/session";
 import { listUsbDevices } from "../libraries/vm-core/src/usb/usb";
@@ -60,6 +60,8 @@ usage: cruiser <area> <command> [args]
                    [--disk-password P]                LUKS passphrase (or CRUISER_DISK_PASSWORD,
                                                       or a tty prompt) — required when encrypting
                    [--home-disk GiB]                  size of the encrypt=home volume (default 50)
+                   [--vm-dir DIR]                     keep the whole VM dir under DIR/<name>
+                                                      (default ~/.local/share/cruiser/vms)
                    [--wallpaper PATH] [--wallpaper-pos POS]
                    [--share PATH[:tag]]                mount a host dir rw in the guest
                    [--share-ro PATH[:tag]]             …read-only (host→guest only)
@@ -103,6 +105,8 @@ usage: cruiser <area> <command> [args]
                                        drops internal snapshots — --force accepts that)
   vm clone <name> <newname>             clone a stopped VM — fresh ports, disk copied without snapshots
   vm rename <name> <newname>            rename a stopped VM (moves the vm dir, keeps everything)
+  vm move <name> <dir>                  relocate a stopped VM's dir under <dir>/<name>
+                                       (vms/<name> stays linked — the disk goes with it)
   vm autostart <name> [on|off]          start this VM with the app + at login (systemd
                                        --user unit, headless — opens no console)
   vm rm <name> [--disk]                vm view <name>   launch freerdp viewer + place window
@@ -370,6 +374,9 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             // flag values were cast unchecked — re-parse so a bad --distro /
             // --cpus / --share tag fails here instead of poisoning vm.json.
             const checked = VmSpec.parse(spec);
+            // --vm-dir: the real dir lives elsewhere behind a vms/<name>
+            // symlink — every path consumer resolves through the link.
+            const vdir = flagVal("--vm-dir"); if (vdir) await linkVmDir(name, vdir);
             const h = await registry.create(checked);
             // LUKS creation is password-gated by design — flag, env, then a
             // tty prompt. provideDiskKey routes by keyStorage: secrets/ for
@@ -452,6 +459,15 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
                 const nh = await registry.rename(args[0]!, args[1]);
                 console.log(`renamed ${args[0]} → ${nh.spec.name}`);
             } catch (e) { console.error(`rename failed: ${e instanceof Error ? e.message : e}`); process.exit(1); }
+            break;
+        }
+        case "move": {
+            const h = await needVm(args[0]);
+            if (!args[1]) usage();
+            try {
+                await registry.relocate(h.spec.name, args[1]);
+                console.log(`moved ${h.spec.name} → ${join(args[1], h.spec.name)}`);
+            } catch (e) { console.error(`move failed: ${e instanceof Error ? e.message : e}`); process.exit(1); }
             break;
         }
         case "autostart": {

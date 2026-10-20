@@ -62,6 +62,9 @@ export interface VmSummary {
     /** host mountpoint when the guest home is sshfs-mounted (default
      *  ~/.local/share/cruiser/mounts/<vm>), null when unmounted. */
     mount?: string | null;
+    /** The vm dir's real path — differs from ~/.local/share/cruiser/vms/<name>
+     *  when the VM was relocated ("VM location"). */
+    vmDir: string;
     sync?: Record<string, boolean>; // spec.sync.* — feeds the edit form
     agentKeys?: string[];          // spec.credentials.sshAgentKeys — edit form preload
     /** Spec sections changed while running that only apply at next boot
@@ -107,7 +110,8 @@ export type CreateForm = SyncFormFields & {
     iso: string;                   // iso path/url
     importPath: string;            // imported: existing disk image (absolute)
     importRef: string;             // config import: gist url/id or .cruiser.* file path
-    diskDir: string;               // "" = default (vms dir); else disk file's dir
+    diskDir: string;               // "" = default (inside vm dir); else disk file's dir
+    vmDir: string;                 // "" = default VMS_DIR; else the vm dir's parent (VM location)
     username: string;
     password: string;              // kept in-memory only; writePasswordFile persists to 0600
     memUnit: "MiB" | "GiB";        // UI-only — memMiB always stores MiB
@@ -345,7 +349,7 @@ const defaultCreate = (): CreateForm => ({
     browser: "none", snap: false, extraFonts: false, autologin: true,
     preset: "standard", devtools: [],
     ...syncFormDefaults(),
-    iso: "", importPath: "", importRef: "", diskDir: "",
+    iso: "", importPath: "", importRef: "", diskDir: "", vmDir: "",
     username: "cruiser", password: "",
     memUnit: "GiB", vd: 0, usb: [], agentKeys: [],
     snapAuto: "off", snapTrigger: "stop", snapKeep: 5,

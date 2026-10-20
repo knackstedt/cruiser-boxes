@@ -424,7 +424,7 @@ function create(s: CruiserState): string {
         ? `<span class="aptag ${kind}">${kind === "boot" ? "needs restart" : "applies live"}</span>`
         : "";
     const hostsum = r
-        ? `<div class="hostsum">host — <b>${r.cpus}</b> CPUs · <b>${r.memGiB}</b> GiB RAM · <b>${r.diskFreeGiB}</b> GiB free at ${esc(f.diskDir || "default location")}</div>`
+        ? `<div class="hostsum">host — <b>${r.cpus}</b> CPUs · <b>${r.memGiB}</b> GiB RAM · <b>${r.diskFreeGiB}</b> GiB free at ${esc(f.diskDir || f.vmDir || "default location")}</div>`
         : "";
     const memVal = f.memUnit === "GiB" ? Math.round((f.memMiB / 1024) * 100) / 100 : f.memMiB;
     const memRow = `<div class="row"><div class="lbl">Memory</div>
@@ -438,6 +438,12 @@ function create(s: CruiserState): string {
         ${editing ? "" : `<div class="row"><div class="lbl">Disk location</div>
         <div class="meta" style="width:280px">${esc(f.diskDir || `${VMS_DIR}/‹name›/`)}</div>
         <div class="opt" data-action="pick-disk-dir">Choose…</div></div>`}`;
+    const vmDirRow = `<div class="row"><div class="lbl">VM location</div>
+        <div class="meta" style="width:280px">${esc(f.vmDir || VMS_DIR)}</div>
+        <div class="opt" data-action="pick-vm-dir">Choose…</div></div>
+        <div class="hint">${editing
+            ? "where the VM dir actually lives — moving it to another disk needs the VM stopped"
+            : "the whole VM dir (config, disk image, secrets) goes under ‹dir›/‹name› — pick another drive to keep big VMs off the system disk"}</div>`;
     const vdPicker = f.headMode === "virtual-desktop" && s.desktops.length
         ? `<div class="row"><div class="lbl">Desktop</div>
             <div class="opt${f.vd === 0 ? " on" : ""}" data-action="set-vd" data-vd="0">auto</div>
@@ -529,6 +535,7 @@ function create(s: CruiserState): string {
         ${field("vCPUs", "cpus", f.cpus, 80, aptag("boot"))}
         ${memRow}
         ${diskRow}
+        ${vmDirRow}
         ${checkRow("Nested virtualization", "nestedVirt", f.nestedVirt, "pass the host's vmx/svm flag to the guest — run KVM inside the VM (needs the host kvm module's nested=1, see doctor)", aptag("boot"))}
         ${editing ? "" : `<div class="h2">Disk encryption</div>
         ${optRow("Encryption", "encrypt", f.encrypt, [["off", "off"], ["full", "full disk"], ["home", "/home only"]])}
@@ -656,6 +663,7 @@ function vmDetail(s: CruiserState): RouteBody {
         <div class="kv">
             <div class="k">resources</div><div>${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB · ${vm.diskGiB} GiB disk${vm.nestedVirt ? " · nested virt" : ""}</div>
             ${diskDetail ? `<div class="k">disk usage</div><div>${esc(diskDetail)}</div>` : ""}
+            <div class="k">location</div><div>${esc(vm.vmDir)}</div>
             <div class="k">gpu / head / viewer</div><div>${esc(vm.gpuMode)} / ${esc(vm.headMode)} / ${esc(vm.viewer)}</div>
             <div class="k">encryption</div><div>${vm.encrypt === "off" ? "off"
                 : `qcow2 LUKS — ${vm.encrypt === "full" ? "full disk" : "/home volume"}`
