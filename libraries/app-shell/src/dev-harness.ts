@@ -179,6 +179,14 @@ function runInputScript({ store, bus, shell, shotRequests }: DevHarnessCtx, env:
                         break;
                     }
                     case "wheel": { const c = await center(s); bus.wheel(c.x, c.y, s.dx ?? 0, s.dy ?? 0); break; }
+                    case "mutate": {
+                        // ad-hoc doc mutation — probe whether an attr/style
+                        // write lands on a live node (e.g. masking a password
+                        // input via its value attribute).
+                        const p = panel() as { mutate(ops: unknown[]): void } | null;
+                        p?.mutate([{ op: s.op ?? "attr", sel: s.sel, name: s.name, value: s.value, html: s.html }]);
+                        break;
+                    }
                     case "siv": (shell as unknown as { panel: { scrollIntoView(sel: string, o?: object): void } | null }).panel?.scrollIntoView(s.sel, s.opts); break;
                     case "scl": (shell as unknown as { panel: { scrollTo(sel: string, x: number, y: number, sm?: boolean): void } | null }).panel?.scrollTo(s.sel, s.x ?? 0, s.y ?? 0, s.smooth); break;
                     case "sve": {
@@ -192,6 +200,22 @@ function runInputScript({ store, bus, shell, shotRequests }: DevHarnessCtx, env:
                         const r = await panel()?.getRect(s.sel);
                         if (!r) throw new Error(`no rect for ${s.sel}`);
                         p.scrollTo(".content", 0, Math.max(0, r.y + r.h / 2 - (s.at ?? 200)));
+                        break;
+                    }
+                    case "stget": {
+                        // log a dotted store path — verifies what state a
+                        // scripted input sequence actually produced
+                        let cur: unknown = store.getState();
+                        for (const part of String(s.path).split("."))
+                            cur = (cur as Record<string, unknown>)[part];
+                        console.trace(`[stget] ${s.path} = ${JSON.stringify(cur)}`);
+                        break;
+                    }
+                    case "stset": {
+                        // Write a top-level store key — parks UI state the
+                        // production gates set (unlockPrompt, autoSnapPrompt)
+                        // so scripts can exercise the prompt DOM + handlers.
+                        store.setState({ [String(s.path)]: s.value } as never);
                         break;
                     }
                     case "probe": {

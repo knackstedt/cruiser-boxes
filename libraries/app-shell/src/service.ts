@@ -363,6 +363,7 @@ export class CruiserService {
         this.store.getState().setUsbDevices(usb.map((d) => ({
             key: `${d.vendorId}:${d.productId}${d.serial ? `:${d.serial}` : ""}`,
             vendorId: d.vendorId, productId: d.productId, serial: d.serial,
+            bus: d.bus, addr: d.addr,
             label: [d.vendor, d.product].filter(Boolean).join(" ") || `${d.vendorId}:${d.productId}`,
             writable: d.writable,
         })));
@@ -407,6 +408,20 @@ export class CruiserService {
 
     // ── logs ──
 
+    /** Serial/qemu logs carry ANSI escapes and stray control bytes — the
+     *  pane is plain text, so strip them or they render as mojibake boxes. */
+    // oxlint-disable no-control-regex — stripping control characters is
+    // the entire point of this function.
+    private stripAnsi(t: string): string {
+        return t
+            .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")   // OSC … BEL/ST
+            .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")          // CSI sequences
+            .replace(/\x1b[@-Z\\-_]/g, "")                      // lone ESC codes
+            .replace(/\r\n?/g, "\n")
+            .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, ""); // C0 controls
+    }
+    // oxlint-enable no-control-regex
+
     /** Fetch the active log source for the selected VM into store.logs. */
     async refreshLogs(): Promise<void> {
         const st = this.store.getState();
@@ -418,7 +433,7 @@ export class CruiserService {
             const files = runnerLogFiles(h.paths);
             const f = files.find((x) => x.id === l.file) ?? files[0]!;
             try {
-                const text = f.exists ? await tailFile(f.path, l.lines) : "";
+                const text = f.exists ? this.stripAnsi(await tailFile(f.path, l.lines)) : "";
                 st.setLogs({
                     files, text,
                     error: f.exists ? null : `${f.name} not created yet`,

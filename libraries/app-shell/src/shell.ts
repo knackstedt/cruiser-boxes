@@ -8,19 +8,24 @@ import { HtmlUiHost, createLocalBackend, type UiPanelHandle } from "@downdraft/e
 import type { InputBus } from "./input-bus";
 import type { CruiserService } from "./service";
 import type { Store, CreateForm } from "./store";
-import { renderRouteParts, type RouteParts } from "./screens";
+import { renderRouteParts, vmListInner, createHints, type RouteParts } from "./screens";
 import { applySameRoute } from "./content-patch";
 import { DISTROS } from "../../provision/src/distros";
 import { DEVTOOLS, DEVTOOLS_PRESET } from "../../provision/src/packages";
 import { registerUiFonts } from "./fonts";
 import { RenderGate } from "./render-gate";
 import { dirname } from "node:path";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { TermManager } from "./term/term-manager";
 import { mark } from "./startup-profile";
 
 const log = createLogger("info");
 
 const NUM_FIELDS: Set<string> = new Set(["cpus", "memMiB", "diskGiB", "snapKeep", "homeGiB"]);
+
+/** data-field values whose inputs mask as "*" bullets — see wireInputs. */
+const MASKED_FIELDS = new Set(["password", "diskPassword", "diskPassword2", "unlock-pw"]);
 const BOOL_FIELDS: Set<string> = new Set([
     "snap", "extraFonts", "autologin", "nestedVirt", "swVk",
     "syncTheme", "syncAccent", "syncContrast", "syncTimezone", "syncLocale",
@@ -75,6 +80,12 @@ export class CruiserShell {
         // first doc resolve sees the system fonts instead of the embedded
         // DejaVu fallback.
         registerUiFonts(this.host);
+        // Topbar icon — decorative; a missing/unloadable asset just leaves
+        // the empty .brand box.
+        try {
+            this.host.registerResource("ui://cruiser/icon.png",
+                readFileSync(fileURLToPath(new URL("../../../assets/icon.png", import.meta.url))));
+        } catch { /* icon is decorative */ }
         mark("fonts");
         const mountParts = renderRouteParts(store.getState());
         this.panel = this.host.mount({
@@ -137,6 +148,9 @@ export class CruiserShell {
         const st = this.store.getState();
         if (st.confirm === token) { st.setConfirm(null); return true; }
         st.setConfirm(token);
+        // The arm silently expires after 5s — say so up front so a reverted
+        // button doesn't read as the action having run.
+        st.setStatus("click again within 5s to confirm", "warn");
         if (this.confirmTimer) clearTimeout(this.confirmTimer);
         this.confirmTimer = setTimeout(() => {
             if (this.store.getState().confirm === token) this.store.getState().setConfirm(null);
@@ -151,10 +165,7 @@ export class CruiserShell {
             const route = d.route as "home" | "create" | "settings" | "vm" | "logs" | "term" | undefined;
             if (!route) return;
             st().setRoute(route, d.vm ?? null);
-            if (route === "logs") {
-                void svc.refreshLogs();
-                void svc.loadLogUnits();
-            }
+            if (route === "logs") void svc.loadLogUnits();
             if (route === "create") {
                 void svc.refreshCreateExtras();
                 // Fresh wizard on each entry — also clears values an Edit
@@ -213,9 +224,11 @@ export class CruiserShell {
         });
         this.host.onAction("usb-toggle", (d) => {
             if (!d.key) return;
-            const dev = st().usbDevices.find((u) => u.key === d.key);
-            if (dev && !dev.writable) {
-                st().setStatus(`${dev.label}: no host access — run doctor for the udev fix`, "warn");
+            // Chips dedup identical devices by key — warn only when NO
+            // physical device behind the key is writable.
+            const devs = st().usbDevices.filter((u) => u.key === d.key);
+            if (devs.length && !devs.some((u) => u.writable)) {
+                st().setStatus(`${devs[0]!.label}: no host access — run doctor for the udev fix`, "warn");
                 return;
             }
             st().toggleUsb(d.key);
@@ -328,6 +341,9 @@ export class CruiserShell {
         this.host.onAction("log-refresh", () => { void svc.refreshLogs(); });
         this.host.onAction("status-open", (d) => { if (d.path) void svc.openPath(String(d.path)); });
         this.host.onAction("status-copy", (d) => { if (d.path) void svc.copyText(String(d.path)); });
+        this.host.onAction("kv-open", (d) => { if (d.path) void svc.openPath(String(d.path)); });
+        this.host.onAction("kv-copy", (d) => { if (d.copy) void svc.copyText(String(d.copy)); });
+        this.host.onAction("usb-blocked-toggle", () => { st().toggleUsbBlocked(); });
     }
 
     /** <input data-field="x"> → store.create[x] on every input event. */
@@ -342,6 +358,18 @@ export class CruiserShell {
             }
             if (ev.t === "scroll") {
                 if (ev.id === "logpane") void this.updateLogPin();
+                return;
+            }
+            if (ev.t === "keydown") {
+                // Enter in the unlock banner's passphrase submits it — same
+                // as the Unlock button. The input still holds focus, so
+                // release the gate like a blur or the banner's removal is
+                // deferred past a blur the destroyed node never emits.
+                if (ev.k === "Enter" && ev.d?.field === "unlock-pw") {
+                    if (this.gate.blur()) queueMicrotask(() => this.pushRender());
+                    const vm = this.store.getState().unlockPrompt?.vm;
+                    if (vm) void this.svc.unlockGo(vm);
+                }
                 return;
             }
             if (ev.t !== "input" && ev.t !== "change") return;
@@ -360,9 +388,8 @@ export class CruiserShell {
             // vm-desc / share-* bind outside the create form — write directly
             // (a re-render would destroy the focused input).
             if (field === "vm-desc") { this.store.getState().setVmDesc(String(ev.v)); return; }
-            // unlock-pw binds to the banner state, not the create form —
-            // same direct-write treatment (and it never renders back).
-            if (field === "unlock-pw") { this.store.setState({ unlockPw: String(ev.v) }); return; }
+            // unlock-pw binds to the banner state, not the create form — it's
+            // masked, so it falls through to the MASKED_FIELDS branch below.
             if (field.startsWith("share-")) {
                 this.store.getState().setShareForm({ [field.slice(6)]: ev.v } as never);
                 return;
@@ -371,12 +398,48 @@ export class CruiserShell {
                 this.store.getState().setFwdForm({ [field.slice(4)]: ev.v } as never);
                 return;
             }
+            // vm-filter binds outside the create form — store the value,
+            // then patch the list directly. The render gate defers full
+            // pushes while the input holds focus, so without the direct
+            // setInnerHtml the rows would only refilter on blur.
+            if (field === "vm-filter") {
+                const st = this.store.getState();
+                st.setVmFilter(String(ev.v));
+                this.panel?.setInnerHtml("#vmlist", vmListInner(st));
+                return;
+            }
+            // Masked fields (passwords) — Blitz ignores type=password, so the
+            // doc shows one "*" bullet per stored char. Diff the incoming DOM
+            // string against the previous bullets to recover the real edit,
+            // then write the bullets back. Single-byte bullets keep the
+            // engine's byte-offset caret aligned with the glyph index.
+            if (MASKED_FIELDS.has(field)) {
+                const real = field === "unlock-pw"
+                    ? this.store.getState().unlockPw
+                    : String((this.store.getState().create as unknown as Record<string, unknown>)[field] ?? "");
+                const dom = String(ev.v);
+                const dots = "*".repeat(real.length);
+                let pre = 0;
+                while (pre < dom.length && pre < dots.length && dom[pre] === dots[pre]) pre++;
+                let suf = 0;
+                while (suf < dom.length - pre && suf < dots.length - pre && dom[dom.length - 1 - suf] === "*") suf++;
+                const next = real.slice(0, pre) + dom.slice(pre, dom.length - suf)
+                    + real.slice(pre + (dots.length - pre - suf));
+                if (field === "unlock-pw") this.store.setState({ unlockPw: next });
+                else (this.store.getState().create as unknown as Record<string, unknown>)[field] = next;
+                const mask = "*".repeat(next.length);
+                if (dom !== mask) this.panel?.mutate(
+                    [{ op: "attr", sel: `input[data-field=${field}]`, name: "value", value: mask }] as never);
+                this.patchHints();
+                return;
+            }
             const cur = this.store.getState().create;
             // memInput is display-only: convert the typed value to memMiB in
             // the active unit. Writing memMiB directly keeps focus stable.
             if (field === "memInput") {
                 const n = Number(ev.v);
                 if (Number.isFinite(n)) cur.memMiB = Math.round(n * (cur.memUnit === "GiB" ? 1024 : 1));
+                this.patchHints();
                 return;
             }
             const k = field as keyof CreateForm;
@@ -384,7 +447,16 @@ export class CruiserShell {
             // setField would re-render and destroy the focused input — write
             // the value directly to keep DOM focus stable.
             (cur as unknown as Record<string, unknown>)[k] = v;
+            this.patchHints();
         });
+    }
+
+    /** Re-patch the create form's inline validation containers — create
+     *  field writes skip the store notify to keep input focus, so hints
+     *  would otherwise go stale until the next unrelated render. */
+    private patchHints(): void {
+        const hints = createHints(this.store.getState());
+        Object.entries(hints).forEach(([sel, html]) => this.panel?.setInnerHtml(sel, html));
     }
 
     /** Render fresh parts once and push the full doc through the gate —
@@ -395,7 +467,13 @@ export class CruiserShell {
         // Stale/mixed module frames during an HMR session restart are the
         // known trigger; the next store change re-pushes either way.
         try {
-            this.pendingParts = renderRouteParts(this.store.getState());
+            const st = this.store.getState();
+            // Route changes must land even while an input holds focus — the
+            // gate defers pushes during editing, which is right for same-page
+            // churn but would swallow programmatic nav (dev-harness setRoute,
+            // service-driven routes) that never produces a blur event.
+            if (`${st.route}:${st.selectedVm ?? ""}` !== this.lastRoute) this.gate.blur();
+            this.pendingParts = renderRouteParts(st);
             this.gate.render(this.pendingParts.html);
         } catch (e) {
             log.error("shell", `render failed: ${e instanceof Error ? e.stack ?? e.message : e}`);
@@ -424,6 +502,10 @@ export class CruiserShell {
         this.lastRoute = route;
         if (!sameRoute) {
             p.setHtml(parts.html);
+            // Landing on logs from ANY path (nav action, harness setRoute,
+            // a future deep-link) refreshes — nav alone used to, which left
+            // programmatic entries stuck on "probing…".
+            if (st.route === "logs") void this.svc.refreshLogs();
             // Flash the overlay scrollbar on route change so a scrollable
             // page reads as scrollable — thumbs only paint during/after
             // scroll activity (opacity fades out ~700ms after the last one).

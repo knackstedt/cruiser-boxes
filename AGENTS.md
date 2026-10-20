@@ -393,8 +393,13 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   where the guest thinks the pointer is; hidden-cursor reports don't
   warp — the pointer re-parks at window center when it drifts >35% out
   (confined at an edge = no delta room). 'auto' engages only on a seen-visible → now-
-  hidden cursor transition while focused — a never-cursored boot
-  (firmware/splash has no cursor plane) must not capture; visibility =
+  hidden cursor transition while focused AND once the hidden cursor has
+  accrued ≥160 host-px of in-window pointer motion (hide_travel) — a
+  never-cursored boot (firmware/splash has no cursor plane) must not
+  capture, and a terminal's hide-while-typing episode un-hides on the
+  first motion delta so it never reaches the gate (without the gate,
+  typing in a guest terminal reads as a pointer-lock and the host
+  pointer blanks+confines mid-sentence); visibility =
   ANY console's slot on (virtio-gpu parks the pointer on one output's
   cursor plane, the others legitimately report off). Apps that lock
   without hiding the cursor are invisible to 'auto' — the `relgrab`

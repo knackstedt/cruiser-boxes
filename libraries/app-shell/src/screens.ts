@@ -8,7 +8,7 @@ import { VMS_DIR } from "../../vm-core/src/paths";
 import { DISTROS, supportsKrdp } from "../../provision/src/distros";
 import { DEVTOOLS } from "../../provision/src/packages";
 import { fontFaceCss } from "./fonts";
-import type { CruiserState, VmSummary } from "./store";
+import type { CruiserState, UsbChoice, VmSummary } from "./store";
 
 const CSS = `
 * { margin:0; padding:0; box-sizing:border-box; }
@@ -25,10 +25,12 @@ body { background:#10141a; color:#e8ecf1; font-family:'Cruiser Sans',sans-serif;
        display:flex; flex-direction:column; }
 .topbar { display:flex; align-items:center; gap:12px; padding:0 18px; height:56px;
           background:#161b23; border-bottom:1px solid #2a313c; }
-.brand { font-size:17px; font-weight:bold; color:#7fd0ff; }
+.brand { display:flex; align-items:center; }
+.brandicon { width:24px; height:24px; display:block; }
 .nav { display:flex; gap:4px; }
 .nav .item { padding:8px 15px; border-radius:4px; font-size:13px; color:#8a94a3; cursor:default; }
 .nav .item.on { background:#2e4361; color:#7fd0ff; font-weight:bold; }
+.nav .item:hover { color:#c8d2e0; }
 /* scrollbar-color styles the overlay thumb (blitz-paint "scrollbars"
    feature) — transparent track, slate thumb; thumb fades in on scroll. */
 .content { padding:20px; flex:1; overflow-y:scroll; scrollbar-color:#5d6a80 transparent; }
@@ -41,6 +43,9 @@ body { background:#10141a; color:#e8ecf1; font-family:'Cruiser Sans',sans-serif;
 .vmlist-head { display:flex; align-items:center; justify-content:space-between;
                margin-bottom:14px; }
 .vmlist-head .h1 { margin-bottom:0; }
+.vmfilter { display:flex; align-items:center; gap:8px; flex:1; justify-content:flex-end;
+            margin-right:12px; }
+.vmfilter input { width:180px; padding:6px 10px; font-size:13px; }
 .vmrow { display:flex; align-items:center; flex-wrap:wrap; gap:8px 14px;
          padding:11px 16px;
          background:#161b23; border:1px solid #2a313c; border-radius:6px; }
@@ -76,10 +81,15 @@ body { background:#10141a; color:#e8ecf1; font-family:'Cruiser Sans',sans-serif;
 .btn { display:inline-block; padding:8px 15px; border-radius:4px; font-size:13px;
        background:#1d3547; color:#7fd0ff; border:1px solid #4fc2f7; margin-right:6px; }
 .btn.sm { padding:4px 10px; font-size:12px; margin-right:5px; }
+.btn:hover { background:#2a4a63; }
 .btn:active { background:#2a4a63; }
 .btn.warn { background:#3a2530; color:#f08aa8; border-color:#a04868; }
+.btn.warn:hover { background:#4a2e3c; }
 .btn.dim { background:#161b23; color:#8a94a3; border-color:#2a313c; }
-.row { display:flex; gap:16px; align-items:center; margin-bottom:10px; }
+.btn.dim:hover { background:#1d232d; border-color:#4a566a; }
+/* Cap form rows so apply-mode tags can pin to a consistent right column —
+   without a bound they scatter wherever each row's content happens to end. */
+.row { display:flex; gap:16px; align-items:center; margin-bottom:10px; max-width:1060px; }
 .lbl { width:140px; font-size:13px; color:#8a94a3; }
 input { background:#0b0e13; border:1px solid #2a313c; border-radius:4px; color:#e8ecf1;
         padding:8px 10px; font-size:14px; width:220px; }
@@ -89,6 +99,17 @@ input:focus { border-color:#4fc2f7; outline:none; }
 .opt { padding:7px 13px; border-radius:4px; font-size:13px; border:1px solid #2a313c;
        background:#161b23; color:#8a94a3; }
 .opt.on { background:#2e4361; color:#7fd0ff; border-color:#4fc2f7; font-weight:bold; }
+.opt:hover { border-color:#4a566a; color:#aab4c2; }
+.opt.on:hover { color:#7fd0ff; }
+/* Armed destructive chips (share/fwd "remove?") — the warn palette, same as
+   "Confirm kill". Accent-blue read as a selection, not a danger state. */
+.opt.armed { background:#3a2530; color:#f08aa8; border-color:#a04868; }
+.opt.armed:hover { background:#4a2e3c; color:#f08aa8; }
+/* .tog marks the lone on/off switch chip — a pill shape + state dot so it
+   reads as a control, not a status badge or an option in a group. */
+.opt.tog { border-radius:11px; min-width:58px; text-align:center; }
+.opt.tog::before { content:"● "; font-size:9px; opacity:.5; }
+.opt.tog.on::before { opacity:1; }
 /* Flattened 45%-opacity equivalents — a real opacity layer would rasterize
    the label onto a transparent backdrop where LCD subpixel blending leaves
    colored fringes. */
@@ -96,18 +117,21 @@ input:focus { border-color:#4fc2f7; outline:none; }
 .opt.sm { padding:4px 9px; font-size:12px; }
 /* Apply-mode tags on the edit form while the VM runs: boot = frozen into
    QEMU's launch argv (needs restart), live = takes effect immediately. */
-.aptag { font-size:10px; padding:1px 7px; border-radius:8px; white-space:nowrap; }
+.aptag { font-size:10px; padding:1px 7px; border-radius:8px; white-space:nowrap; margin-left:auto; }
 .aptag.boot { color:#f0c98a; border:1px solid #6b5527; }
 .aptag.live { color:#9fd89f; border:1px solid #2f5233; }
 /* Text-height clickable for inline toggles in kv rows — a .btn.sm would
    stretch the row. */
 .kvtog { display:inline-block; font-size:11px; color:#8a94a3; border:1px solid #2a313c;
          border-radius:3px; padding:1px 7px; }
+.kvtog:hover { border-color:#4a566a; color:#c8d2e0; }
 .kvtog:active { background:#2a4a63; }
 .crumb { display:inline-block; font-size:12px; color:#7fd0ff; margin-bottom:10px; }
+.crumb:hover { text-decoration:underline; }
 .sharebox { background:#161b23; border:1px solid #2a313c; border-radius:6px;
             padding:10px 14px 2px; margin-top:10px; }
 .hint { font-size:12px; color:#5d6775; margin:-4px 0 10px 156px; max-width:560px; line-height:1.45; }
+.hint.warn { color:#f0c98a; }
 .hostsum { font-size:13px; color:#8a94a3; background:#161b23; border:1px solid #2a313c;
            border-radius:6px; padding:9px 12px; margin-bottom:14px; }
 .hostsum b { color:#e8ecf1; }
@@ -119,6 +143,13 @@ input:focus { border-color:#4fc2f7; outline:none; }
 .kv { display:grid; grid-template-columns:160px 1fr; gap:7px 16px; font-size:13px;
       margin-bottom:16px; }
 .kv .k { color:#8a94a3; }
+/* Facts are things users copy — paths, ports, ids. Keys stay unselectable. */
+.kv div { user-select:text; }
+.kv .k { user-select:none; }
+/* A group divider for the lower half of the detail page — the share/fwd/
+   mount/snapshot/portable sections are configuration, not live state. */
+.sech { font-size:12px; color:#8a94a3; font-weight:bold; margin:22px 0 4px;
+        padding-bottom:6px; border-bottom:1px solid #212933; }
 .docrow { display:flex; gap:10px; padding:9px 12px; font-size:13px; align-items:center; }
 .docrow .ok { color:#9fd89f; font-weight:bold; width:40px; }
 .docrow .bad { color:#f08aa8; font-weight:bold; width:40px; }
@@ -134,7 +165,7 @@ input:focus { border-color:#4fc2f7; outline:none; }
    — patching .content's innerHTML would rebuild a nested .logpre on every
    poll, resetting its scroll offset and flashing the pane. A top-level
    scrollport patched via its own innerHTML keeps the node (and offset) alive. */
-.content.logtop { flex:0 1 auto; max-height:55%; }
+.content.logtop { flex:0 1 auto; max-height:62%; }
 .logpre { flex:1; min-height:80px; margin:0 20px 12px;
           font-family:'Cruiser Mono',monospace; font-size:11px; line-height:1.5;
           background:#0b0e13; border:1px solid #2a313c; border-radius:6px;
@@ -158,6 +189,7 @@ input:focus { border-color:#4fc2f7; outline:none; }
 .fbar .ftext { flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 .fbar .fbtn { flex-shrink:0; padding:1px 8px; border:1px solid #4a515d;
               border-radius:3px; font-size:11px; }
+.fbar .fbtn:hover { border-color:#7fd0ff; color:#7fd0ff; }
 .fbar .fbtn:active { background:#2a4a63; }
 /* Term route: the .content scrollport becomes a fixed column — the head
    strip stays put and #termbox fills the rest. The embedded webui view
@@ -190,6 +222,17 @@ const HEAD_LABEL: Record<string, string> = {
     "fullscreen-monitor": "fullscreen monitor",
     windowed: "windowed",
     app: "app-only",
+};
+/** spec.persist → layman phrasing for the detail kv ("daemonize" means
+ *  nothing to someone who didn't read the QEMU docs). */
+const PERSIST_LABEL: Record<string, string> = {
+    daemonize: "keeps running after the app exits",
+    owned: "stops with the app",
+    ephemeral: "deleted when the app exits",
+};
+/** spec.provisioned → friendly label (the raw method name is jargon). */
+const PROV_LABEL: Record<string, string> = {
+    cloudimg: "cloud image", iso: "ISO autoinstall", imported: "imported image",
 };
 
 const GiB = 1024 ** 3;
@@ -321,13 +364,16 @@ function vmRowInner(vm: VmSummary, s: CruiserState): string {
             .filter(Boolean).join(" · ")
         : "";
     const mode = [GPU_LABEL[vm.gpuMode] ?? vm.gpuMode, HEAD_LABEL[vm.headMode] ?? vm.headMode, vm.viewer, ports,
-        vm.encrypt !== "off" ? `luks ${vm.encrypt}${vm.diskLocked ? " · locked" : ""}` : ""]
+        vm.encrypt !== "off" ? `luks ${vm.encrypt}` : ""]
         .filter(Boolean).join(" · ");
+    // Markup appended after esc(mode) — a colored "locked" badge, not text.
+    const lockedBit = vm.encrypt !== "off" && vm.diskLocked
+        ? ` · <span style="color:#f0c98a">locked</span>` : "";
     return `<div class="grow" data-action="nav" data-route="vm" data-vm="${esc(vm.name)}">
             <div class="vmname">${esc(vm.name)}</div>
             ${vm.description ? `<div class="vmmode">${esc(vm.description)}</div>` : ""}
             <div class="vmspecs">${esc(specs)}</div>
-            <div class="vmmode">${esc(mode)}${vm.provisioned ? "" : ` · <span style="color:#f0c98a">not provisioned</span>`}${vm.pendingRestart?.length ? ` · <span style="color:#f0c98a">restart pending: ${esc(vm.pendingRestart.join(", "))}</span>` : ""}</div>
+            <div class="vmmode">${esc(mode)}${lockedBit}${vm.provisioned ? "" : ` · <span style="color:#f0c98a">not provisioned</span>`}${vm.pendingRestart?.length ? ` · <span style="color:#f0c98a">restart pending: ${esc(vm.pendingRestart.join(", "))}</span>` : ""}</div>
             ${diskParts ? `<div class="vmdisk">${esc(diskParts)}</div>` : ""}
         </div>
         <div class="pill ${pillClass(vm.state)}">${esc(vm.state)}</div>
@@ -364,7 +410,7 @@ function unlockBanner(s: CruiserState): string {
     return `<div class="hostsum" style="border-color:#6b5527;color:#f0c98a">
         <b>${esc(p.vm)}</b>: the disk is LUKS-encrypted — enter its passphrase to ${esc(opLabel)}.
         <div class="row" style="margin-top:8px">
-            <input data-field="unlock-pw" value="${esc(s.unlockPw)}" style="width:240px" placeholder="disk passphrase">
+            <input type="password" data-field="unlock-pw" value="${"*".repeat(s.unlockPw.length)}" style="width:240px" placeholder="disk passphrase">
             ${btn("Unlock", "unlock-go", attr("vm", p.vm), "btn sm")}
             ${btn("Cancel", "unlock-cancel", attr("vm", p.vm), "btn sm dim")}</div></div>`;
 }
@@ -372,17 +418,37 @@ function unlockBanner(s: CruiserState): string {
 /** The VM list is the hot path — a store tick every ~3s rebuilds it. Rows
  *  carry stable ids so applyHtml can patch just the changed rows through
  *  rowGroup instead of re-parsing the whole list (each running row is
- *  ~200 sparkline divs). */
+ *  ~200 sparkline divs). Exported: the shell re-patches #vmlist directly
+ *  while the filter input holds focus (the render gate defers full pushes
+ *  until blur, which would make typing feel dead). */
+export function vmListInner(s: CruiserState): string {
+    const q = s.vmFilter.trim().toLowerCase();
+    const match = (vm: VmSummary) => !q ||
+        [vm.name, vm.state, vm.description ?? "", GPU_LABEL[vm.gpuMode] ?? vm.gpuMode,
+         HEAD_LABEL[vm.headMode] ?? vm.headMode, vm.viewer].some((t) => t.toLowerCase().includes(q));
+    const rows = s.vms.filter(match).map((vm) => ({ id: `vmrow-${vm.name}`, html: vmRowInner(vm, s) }));
+    if (!rows.length) {
+        return s.vms.length
+            ? `<div class="empty">no VMs match "${esc(q)}"</div>`
+            : `<div class="empty">No VMs yet.
+                <div style="margin-top:14px">${btn("+ New VM", "nav", attr("route", "create"))}</div></div>`;
+    }
+    return rows.map((r) => `<div class="vmrow" id="${esc(r.id)}">${r.html}</div>`).join("");
+}
+
 function home(s: CruiserState): RouteBody {
+    const q = s.vmFilter.trim().toLowerCase();
+    const match = (vm: VmSummary) => !q ||
+        [vm.name, vm.state, vm.description ?? "", GPU_LABEL[vm.gpuMode] ?? vm.gpuMode,
+         HEAD_LABEL[vm.headMode] ?? vm.headMode, vm.viewer].some((t) => t.toLowerCase().includes(q));
+    const rows = s.vms.filter(match).map((vm) => ({ id: `vmrow-${vm.name}`, html: vmRowInner(vm, s) }));
     const head = `${unlockBanner(s)}${autoSnapBanner(s)}<div class="vmlist-head"><div class="h1">Virtual Machines</div>
+        <div class="vmfilter"><span class="meta">filter</span>
+            <input data-field="vm-filter" value="${esc(s.vmFilter)}"></div>
         ${btn("+ New VM", "nav", attr("route", "create"))}</div>`;
-    const rows = s.vms.map((vm) => ({ id: `vmrow-${vm.name}`, html: vmRowInner(vm, s) }));
     // .vmlist is the row container — it survives even when empty so add/
     // remove/reorder swaps patch it rather than the whole .content.
-    const listInner = rows.length
-        ? rows.map((r) => `<div class="vmrow" id="${esc(r.id)}">${r.html}</div>`).join("")
-        : `<div class="empty">No VMs yet.
-            <div style="margin-top:14px">${btn("+ New VM", "nav", attr("route", "create"))}</div></div>`;
+    const listInner = vmListInner(s);
     return {
         html: `<div id="homehead">${head}</div><div class="vmlist" id="vmlist">${listInner}</div>`,
         regions: [{ sel: "#homehead", html: head }],
@@ -392,9 +458,13 @@ function home(s: CruiserState): RouteBody {
 
 // ── create wizard ──
 
-function field(label: string, key: string, val: string | number, w = 220, tag = ""): string {
+function field(label: string, key: string, val: string | number, w = 220, tag = "", type = ""): string {
+    // Blitz ignores type=password, so the doc renders one bullet per char —
+    // the shell diffs the visible string against the bullets on each input
+    // event to recover the real edit (MASKED_FIELDS in shell.ts).
+    const shown = type === "password" ? "*".repeat(String(val).length) : String(val);
     return `<div class="row"><div class="lbl">${esc(label)}</div>
-        <input data-field="${esc(key)}" value="${esc(String(val))}" style="width:${w}px">${tag}</div>`;
+        <input${type ? ` type="${type}"` : ""} data-field="${esc(key)}" value="${esc(shown)}" style="width:${w}px">${tag}</div>`;
 }
 
 function optRow(label: string, key: string, cur: string, choices: [string, string][], action = "set-field", tag = ""): string {
@@ -406,8 +476,8 @@ function optRow(label: string, key: string, cur: string, choices: [string, strin
 
 function checkRow(label: string, key: string, cur: boolean, hint = "", tag = ""): string {
     return `<div class="row"><div class="lbl">${esc(label)}</div>
-        <div class="opt${cur ? " on" : ""}" data-action="set-field" data-field="${esc(key)}" data-value="${!cur}">${cur ? "on" : "off"}</div>
-        ${tag}${hint ? `<div class="meta">${esc(hint)}</div>` : ""}</div>`;
+        <div class="opt tog${cur ? " on" : ""}" data-action="set-field" data-field="${esc(key)}" data-value="${!cur}">${cur ? "on" : "off"}</div>
+        ${hint ? `<div class="meta">${esc(hint)}</div>` : ""}${tag}</div>`;
 }
 
 const PERSIST_HINT: Record<string, string> = {
@@ -415,6 +485,38 @@ const PERSIST_HINT: Record<string, string> = {
     owned: "shuts down when you close cruiser — the VM and its disk are kept",
     ephemeral: "shuts down and deletes the VM (config + disk) when you close cruiser",
 };
+
+/* Inline validation hints. The create form writes field values straight to
+ * the store without notifying (re-render would drop input focus), so these
+ * are each wrapped in a persistent container the shell re-patches on input —
+ * see createHints(). */
+const hintName = (s: CruiserState) =>
+    s.create.name && !/^[a-z0-9][a-z0-9-]*$/.test(s.create.name)
+        ? `<div class="hint warn">lowercase letters, digits and dashes only (e.g. 'dev-box')</div>` : "";
+const hintCpus = (s: CruiserState) =>
+    s.hostRes && s.create.cpus > s.hostRes.cpus
+        ? `<div class="hint warn">over the host's ${s.hostRes.cpus} CPUs — the VM won't start</div>` : "";
+const hintMem = (s: CruiserState) =>
+    s.hostRes && s.create.memMiB > s.hostRes.memGiB * 1024
+        ? `<div class="hint warn">over the host's ${s.hostRes.memGiB} GiB — the VM won't start</div>` : "";
+const hintDisk = (s: CruiserState) =>
+    s.hostRes && s.create.diskGiB > s.hostRes.diskFreeGiB
+        ? `<div class="hint warn">over the ${s.hostRes.diskFreeGiB} GiB free at the disk location</div>` : "";
+const hintPw2 = (s: CruiserState) =>
+    s.create.diskPassword2 && s.create.diskPassword !== s.create.diskPassword2
+        ? `<div class="hint" style="color:#f08aa8">disk passwords don't match</div>` : "";
+
+/** selector → innerHtml for every live validation container on the create
+ *  route. The shell calls this after a direct create-field write. */
+export function createHints(s: CruiserState): Record<string, string> {
+    return {
+        "#hint-name": hintName(s),
+        "#hint-cpus": hintCpus(s),
+        "#hint-mem": hintMem(s),
+        "#hint-disk": hintDisk(s),
+        "#hint-pw2": hintPw2(s),
+    };
+}
 
 function create(s: CruiserState): string {
     const f = s.create;
@@ -436,10 +538,12 @@ function create(s: CruiserState): string {
         <input data-field="memInput" value="${memVal}" style="width:100px">
         <div class="opts">${(["MiB", "GiB"] as const).map((u) =>
             `<div class="opt${f.memUnit === u ? " on" : ""}" data-action="set-field" data-field="memUnit" data-value="${u}">${u}</div>`).join("")}</div>
-        ${r ? `<div class="meta">of ${r.memGiB} GiB</div>` : ""}${aptag("boot")}</div>`;
+        ${r ? `<div class="meta">of ${r.memGiB} GiB</div>` : ""}${aptag("boot")}</div>
+        <div id="hint-mem">${hintMem(s)}</div>`;
     const diskRow = `<div class="row"><div class="lbl">Disk GiB</div>
         <input data-field="diskGiB" value="${f.diskGiB}" style="width:100px">
         ${editing ? `<div class="meta">grow-only</div>` : r ? `<div class="meta">of ${r.diskFreeGiB} GiB free</div>` : ""}${aptag("boot")}</div>
+        <div id="hint-disk">${hintDisk(s)}</div>
         ${editing ? "" : `<div class="row"><div class="lbl">Disk location</div>
         <div class="meta" style="width:280px">${esc(f.diskDir || `${VMS_DIR}/‹name›/`)}</div>
         <div class="opt" data-action="pick-disk-dir">Choose…</div></div>`}`;
@@ -499,10 +603,28 @@ function create(s: CruiserState): string {
             ? "picked keys are loaded into a dedicated agent forwarded to this VM — passphrase-protected keys can't load unattended"
             : "no keys picked — your session agent is forwarded as-is"}</div>`}
         ${checkRow("Git SSH key", "syncGitKey", f.syncGitKey, "installs a host private key into the guest (credentials.gitSshKeyPath, else ~/.ssh/<git email>) + an ssh config block for the common forges")}`;
+    // Identical devices share a vid:pid:serial key — and the saved spec
+    // can't tell them apart either — so collapse them into one chip with a
+    // ×n badge instead of a row of indistinguishable duplicates.
+    const usbGroups = new Map<string, { d: UsbChoice; n: number; writable: boolean }>();
+    s.usbDevices.forEach((d) => {
+        const g = usbGroups.get(d.key);
+        if (g) { g.n++; g.writable ||= d.writable; }
+        else usbGroups.set(d.key, { d, n: 1, writable: d.writable });
+    });
+    const usbSorted = [...usbGroups.values()].sort((a, b) => Number(b.writable) - Number(a.writable));
+    const usbBlocked = usbSorted.filter((g) => !g.writable);
+    const usbShown = s.usbShowBlocked ? usbSorted : usbSorted.filter((g) => g.writable);
+    const usbChip = (g: (typeof usbSorted)[number]) => {
+        const d = g.d;
+        return `<div class="opt${f.usb.includes(d.key) ? " on" : ""}${g.writable ? "" : " dim"}" data-action="usb-toggle" data-key="${esc(d.key)}">${esc(d.label)}${g.n > 1 ? ` ×${g.n}` : ""} <span class="meta">${d.vendorId}:${d.productId}${d.serial ? ` · ${esc(d.serial)}` : ""}${g.writable ? "" : " · no access"}</span></div>`;
+    };
     const usbSection = `<div class="h2">USB passthrough ${aptag("boot")}</div>
         ${s.usbDevices.length
-            ? `<div class="opts wrap">${s.usbDevices.map((d) =>
-                `<div class="opt${f.usb.includes(d.key) ? " on" : ""}${d.writable ? "" : " dim"}" data-action="usb-toggle" data-key="${esc(d.key)}">${esc(d.label)} <span class="meta">${d.vendorId}:${d.productId}${d.writable ? "" : " · no access"}</span></div>`).join("")}</div>
+            ? `<div class="opts wrap">${usbShown.map(usbChip).join("")}${
+                usbBlocked.length
+                    ? `<div class="opt${s.usbShowBlocked ? " on" : ""}" data-action="usb-blocked-toggle">${s.usbShowBlocked ? "hide devices without access" : `+ ${usbBlocked.length} more — no host access`}</div>`
+                    : ""}</div>
                <div class="hint" style="margin-left:0">selected devices are passed straight to the guest at boot — "no access" needs a udev rule or group fix</div>`
             : `<div class="meta">no USB devices found</div>`}`;
     // grouped devtools checklist — categories render in DEVTOOLS order, each
@@ -527,7 +649,8 @@ function create(s: CruiserState): string {
         <div class="hint">a gist url/id or a local <b>*.cruiser.{yaml,toml,json}</b> doc creates the VM
             straight from the config — ports re-allocate, everything else (resources, shares, sync
             channels, os profile) comes along. Export a VM from its detail page.</div>`;
-    return `<div class="h1">${editing ? `Edit ${esc(s.editVm ?? "")}` : "New VM"}</div>
+    return `<div class="crumb" data-action="nav" data-route="home">‹ VMs</div>
+        <div class="h1">${editing ? `${esc(s.editVm ?? "")} <span class="meta" style="font-weight:normal">editing</span>` : "New VM"}</div>
         ${hostsum}
         ${importSection}
         ${editing
@@ -535,9 +658,10 @@ function create(s: CruiserState): string {
         <div class="row"><div class="lbl">Description</div>
             <input data-field="vm-desc" value="${esc(s.vmDesc)}" style="width:320px">${aptag("live")}</div>
         <div class="hint">exported with the config — a one-liner like "work dev box, cuda testing".</div>`
-            : field("Name", "name", f.name)}
+            : field("Name", "name", f.name) + `<div id="hint-name">${hintName(s)}</div>`}
         <div class="h2">Resources</div>
         ${field("vCPUs", "cpus", f.cpus, 80, aptag("boot"))}
+        <div id="hint-cpus">${hintCpus(s)}</div>
         ${memRow}
         ${diskRow}
         ${vmDirRow}
@@ -557,10 +681,9 @@ function create(s: CruiserState): string {
             ? "the passphrase is kept in the VM's secrets/ dir (0600) — the VM boots unattended"
             : "nothing is kept on disk — starting, cloning, and snapshotting each ask for the passphrase"}</div>` : ""}
         ${f.encrypt === "home" && f.method !== "imported" ? field("Home disk GiB", "homeGiB", f.homeGiB, 80) : ""}
-        ${field("Disk password", "diskPassword", f.diskPassword)}
-        ${f.encrypt !== "off" || f.method !== "imported" ? field("Repeat", "diskPassword2", f.diskPassword2) : ""}
-        ${f.diskPassword2 && f.diskPassword !== f.diskPassword2
-            ? `<div class="hint" style="color:#f08aa8">disk passwords don't match</div>` : ""}
+        ${field("Disk password", "diskPassword", f.diskPassword, 220, "", "password")}
+        ${f.encrypt !== "off" || f.method !== "imported" ? field("Repeat", "diskPassword2", f.diskPassword2, 220, "", "password") : ""}
+        <div id="hint-pw2">${hintPw2(s)}</div>
         <div class="hint">unlocks the qcow2 image itself — separate from the guest login below, and
             <b>not recoverable</b> if lost.</div>`}`}
         <div class="h2">Graphics &amp; display</div>
@@ -606,7 +729,7 @@ function create(s: CruiserState): string {
         ${usbSection}
         ${editing ? "" : `<div class="h2">Credentials</div>
         ${field("Username", "username", f.username)}
-        ${field("Password", "password", f.password)}`}
+        ${field("Password", "password", f.password, 220, "", "password")}`}
         ${vmUp
             ? `<div class="hint" style="margin-left:0">the VM is ${esc(editTarget!.state)} —
                 <span class="aptag boot">needs restart</span> fields are frozen into the running QEMU and apply at the next boot;
@@ -635,7 +758,9 @@ function vmDetail(s: CruiserState): RouteBody {
         ? `auto: ${esc(vm.snapAuto)} · ${esc({ start: "before start", stop: "after shutdown", both: "start + stop" }[vm.snapTrigger] ?? vm.snapTrigger)} · keep ${vm.snapKeep}`
         : "";
     const snapSection = up || vm.state === "starting" || vm.state === "stopping"
-        ? `<div class="meta">snapshot list + restore appear when the VM is stopped</div>`
+        ? `<div class="meta">${vm.snapshots.length
+            ? `${vm.snapshots.length} snapshot${vm.snapshots.length === 1 ? "" : "s"} — list + restore appear when the VM is stopped`
+            : `none — the list + restore appear when the VM is stopped`}</div>`
         : `<div>${snaps}</div>
            ${vm.snapshots.length ? `<div class="hint" style="margin-left:0">click a snapshot to restore (overwrites the current disk state) · ✕ deletes it</div>` : ""}
            ${autoSpec ? `<div class="meta">${autoSpec}</div>` : ""}
@@ -660,6 +785,16 @@ function vmDetail(s: CruiserState): RouteBody {
     // sparkline band, action buttons); #vmrest holds the slow sections —
     // the share form's inputs only rebuild when share/snapshot state
     // actually changes, not every poll.
+    const kvTog = (label: string, action: string, extra: string) =>
+        ` <span class="kvtog" data-action="${esc(action)}"${extra}>${esc(label)}</span>`;
+    // Copyable/connectable facts — paths and the ssh command are the things
+    // users reach for most. Ports alone were dead text on a stopped VM.
+    const connect = up
+        ? `ssh <b>${esc(vm.username)}@127.0.0.1 -p ${vm.sshPort ?? "–"}</b>`
+          + kvTog("copy", "kv-copy", attr("copy", `ssh ${vm.username}@127.0.0.1 -p ${vm.sshPort ?? ""}`))
+          + (vm.rdpPort ? ` <span class="meta">· rdp 127.0.0.1:${vm.rdpPort}</span>` : "")
+        : `<span class="meta">ssh :${vm.sshPort ?? "–"} · rdp :${vm.rdpPort ?? "–"} — reserved, live when the VM runs</span>`;
+    const locked = vm.diskLocked;
     const top = `<div class="crumb" data-action="nav" data-route="home">‹ VMs</div>
         <div class="h1">${esc(vm.name)} <span class="pill ${pillClass(vm.state)}">${esc(vm.state)}</span></div>
         ${vm.description ? `<div class="meta" style="margin:-8px 0 12px">${esc(vm.description)}</div>` : ""}
@@ -671,32 +806,34 @@ function vmDetail(s: CruiserState): RouteBody {
         <div class="kv">
             <div class="k">resources</div><div>${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB · ${vm.diskGiB} GiB disk${vm.nestedVirt ? " · nested virt" : ""}</div>
             ${diskDetail ? `<div class="k">disk usage</div><div>${esc(diskDetail)}</div>` : ""}
-            <div class="k">location</div><div>${esc(vm.vmDir)}</div>
+            <div class="k">location</div><div>${esc(vm.vmDir)}${kvTog("copy", "kv-copy", attr("copy", vm.vmDir))}${kvTog("open", "kv-open", attr("path", vm.vmDir))}</div>
             <div class="k">gpu / head / viewer</div><div>${esc(vm.gpuMode)} / ${esc(vm.headMode)} / ${esc(vm.viewer)}</div>
             <div class="k">encryption</div><div>${vm.encrypt === "off" ? "off"
                 : `qcow2 LUKS — ${vm.encrypt === "full" ? "full disk" : "/home volume"}`
-                  + ` · ${vm.keyStorage === "prompt" ? "passphrase not stored" : "key stored"}${vm.diskLocked ? " · locked" : ""}`}</div>
-            <div class="k">ports</div><div>ssh 127.0.0.1:${vm.sshPort ?? "–"} · rdp 127.0.0.1:${vm.rdpPort ?? "–"}</div>
+                  + ` · ${vm.keyStorage === "prompt" ? "passphrase not stored" : "key stored"}${locked ? ` · <span style="color:#f0c98a">locked</span>` : ""}`}</div>
+            <div class="k">connect</div><div>${connect}</div>
             <div class="k">login</div><div>${login}</div>
-            <div class="k">provisioned</div><div>${esc(vm.provisioned ?? "—")}</div>
-            <div class="k">persist</div><div>${esc(vm.persist)}</div>
+            <div class="k">provisioned</div><div>${esc(vm.provisioned ? (PROV_LABEL[vm.provisioned] ?? vm.provisioned) : "—")}</div>
+            <div class="k">persist</div><div>${esc(PERSIST_LABEL[vm.persist] ?? vm.persist)}</div>
         </div>
+        ${locked ? `<div class="hint warn" style="margin-left:0">the encrypted volume didn't unlock — restart the VM and enter the passphrase when prompted (unless it's stored).</div>` : ""}
         ${up ? `<div class="h2">Usage</div>${sparksFor(vm)}` : ""}
         <div style="margin:10px 0 18px">
             ${vmBtns(vm, s, true)}
         </div>`;
-    const rest = `<div class="h2">Portable config</div>
+    const rest = `<div class="sech">Configuration</div>
+        ${shareSection(vm, s, up)}
+        ${fwdSection(vm, s)}
+        ${mountSection(vm)}
+        <div class="h2">Snapshots</div>
+        ${snapSection}
+        <div class="h2">Portable config</div>
         <div class="row"><div class="lbl">Export / pull</div>
             ${btn("Export (yaml)", "vm-export", attr("vm", vm.name), "btn sm")}
             ${btn("Push to gist", "vm-gist-push", attr("vm", vm.name), "btn sm")}
             ${vm.origin ? btn("Pull", "vm-gist-pull", attr("vm", vm.name), "btn sm") : ""}
             <div class="meta">${vm.origin ? esc(vm.origin) : "gist/file origin set on push or import"}</div></div>
-        <div class="hint">a *.cruiser.{yaml,toml,json} doc captures the whole spec — import one from the New VM screen</div>
-        ${shareSection(vm, s, up)}
-        ${fwdSection(vm, s)}
-        ${mountSection(vm)}
-        <div class="h2">Snapshots</div>
-        ${snapSection}`;
+        <div class="hint">a *.cruiser.{yaml,toml,json} doc captures the whole spec — import one from the New VM screen</div>`;
     return {
         html: `<div id="vmtop">${top}</div><div id="vmrest">${rest}</div>`,
         regions: [{ sel: "#vmtop", html: top }, { sel: "#vmrest", html: rest }],
@@ -715,8 +852,10 @@ function shareSection(vm: VmSummary, s: CruiserState, up: boolean): string {
         const chip = (field: string, value: string, label: string, on: boolean) =>
             `<div class="opt sm${on ? " on" : ""}" data-action="share-attr" data-vm="${esc(vm.name)}" data-idx="${sh.idx}" data-field="${field}" data-value="${value}">${esc(label)}</div>`;
         const armed = s.confirm === `share-rm:${vm.name}:${sh.idx}`;
+        const tog = (field: string, value: string, label: string, on: boolean) =>
+            `<div class="opt sm tog${on ? " on" : ""}" data-action="share-attr" data-vm="${esc(vm.name)}" data-idx="${sh.idx}" data-field="${field}" data-value="${value}">${esc(label)}</div>`;
         return `<div class="vmrow">
-            ${chip("enabled", String(!sh.enabled), sh.enabled ? "on" : "off", sh.enabled)}
+            ${tog("enabled", String(!sh.enabled), sh.enabled ? "on" : "off", sh.enabled)}
             <div class="grow">${esc(sh.hostPath)} → ${esc(mp)}
                 <div class="vmmode">${esc(sh.tag)} · ${sh.mode === "copy" ? "copy (rsync)" : "mount (virtiofs/9p)"}${sh.deletions ? " · --delete" : ""}</div></div>
             <div class="opts">
@@ -727,7 +866,7 @@ function shareSection(vm: VmSummary, s: CruiserState, up: boolean): string {
                 ${chip("mode", "mount", "mount", sh.mode === "mount")}
                 ${chip("mode", "copy", "copy", sh.mode === "copy")}
             </div>
-            <div class="opt sm${armed ? " on" : ""}" data-action="share-rm" data-vm="${esc(vm.name)}" data-idx="${sh.idx}">${armed ? "remove?" : "✕"}</div>
+            <div class="opt sm${armed ? " armed" : ""}" data-action="share-rm" data-vm="${esc(vm.name)}" data-idx="${sh.idx}">${armed ? "remove?" : "✕"}</div>
         </div>`;
     }).join("") : `<div class="meta">no shares yet</div>`;
     const syncNow = vm.shares.some((x) => x.mode === "copy" && x.enabled) && up
@@ -738,7 +877,7 @@ function shareSection(vm: VmSummary, s: CruiserState, up: boolean): string {
             <div class="opt" data-action="share-pick">Browse…</div></div>
         <div class="row"><div class="lbl">Guest path</div>
             <input data-field="share-guestPath" value="${esc(sf.guestPath)}" style="width:280px">
-            <div class="meta">${sf.mode === "mount" ? "mountpoint — default /mnt/<tag>" : "destination dir — default ~/cruiser-sync/<name>"}</div></div>
+            <div class="meta">${sf.mode === "mount" ? "mountpoint — default /mnt/<tag>; the tag is the share's short name, derived from the folder" : "destination dir — default ~/cruiser-sync/<name>"}</div></div>
         <div class="row"><div class="lbl">Mode</div><div class="opts">
             ${opt("mode", "mount", "mount", sf.mode)}${opt("mode", "copy", "copy", sf.mode)}</div>
             <div class="meta">${sf.mode === "mount" ? "real host folder in the guest — attaches at boot" : "rsync'd copies — applies live, single files work"}</div></div>
@@ -764,10 +903,12 @@ function fwdSection(vm: VmSummary, s: CruiserState): string {
     const ff = s.fwdForm;
     const rows = vm.forwards.length ? vm.forwards.map((f) => {
         const armed = s.confirm === `fwd-rm:${vm.name}:${f.proto}:${f.hostPort}`;
+        const autoLabel = f.guestPort === 22 ? "built-in — vm ssh"
+            : f.guestPort === 3389 ? "built-in — the rdp viewer" : "built-in";
         return `<div class="vmrow">
             <div class="grow"><code>${esc(f.proto)}</code> 127.0.0.1:${f.hostPort} → guest:${f.guestPort}
-                <div class="vmmode">${f.auto ? "built-in — carries vm ssh / the rdp viewer" : "custom"}</div></div>
-            ${f.auto ? "" : `<div class="opt sm${armed ? " on" : ""}" data-action="fwd-rm" data-vm="${esc(vm.name)}" data-port="${f.hostPort}" data-proto="${esc(f.proto)}">${armed ? "remove?" : "✕"}</div>`}
+                <div class="vmmode">${f.auto ? autoLabel : "custom"}</div></div>
+            ${f.auto ? "" : `<div class="opt sm${armed ? " armed" : ""}" data-action="fwd-rm" data-vm="${esc(vm.name)}" data-port="${f.hostPort}" data-proto="${esc(f.proto)}">${armed ? "remove?" : "✕"}</div>`}
         </div>`;
     }).join("") : `<div class="meta">no forwards</div>`;
     const form = `<div class="sharebox">
@@ -815,7 +956,7 @@ function logsView(s: CruiserState): RouteBody {
     const l = s.logs;
     const chip = (field: string, value: string, label: string, cur: string) =>
         `<div class="opt${cur === value ? " on" : ""}" data-action="log-set" data-field="${esc(field)}" data-value="${esc(value)}">${esc(label)}</div>`;
-    const srcTabs = `<div class="opts">${chip("source", "runner", "runner log", l.source)}${chip("source", "journal", "guest journal", l.source)}</div>`;
+    const srcTabs = `<div class="opts">${chip("source", "runner", "host log", l.source)}${chip("source", "journal", "guest journal", l.source)}</div>`;
     const linesSel = `<div class="opts">${[100, 300, 1000, 3000].map((n) => chip("lines", String(n), String(n), String(l.lines))).join("")}</div>`;
     const follow = `<div class="opt${l.follow ? " on" : ""}" data-action="log-set" data-field="follow" data-value="${!l.follow}">follow</div>`;
 
@@ -825,11 +966,6 @@ function logsView(s: CruiserState): RouteBody {
                 `<div class="opt${l.file === f.id ? " on" : ""}${f.exists ? "" : " dim"}" data-action="log-set" data-field="file" data-value="${esc(f.id)}">${esc(f.name)}${f.exists ? ` <span class="meta">${fmtSmall(f.sizeBytes)}</span>` : ""}</div>`).join("")
             : `<span class="meta">probing…</span>`}</div></div>`
         : `${vm?.state === "running" ? "" : `<div class="hint" style="margin-left:0">the guest isn't running — start it to read its journal</div>`}
-            <div class="row"><div class="lbl">Unit</div>
-                <input data-field="log-unit" value="${esc(l.unit)}" style="width:260px">
-                ${l.unit ? `<div class="opt" data-action="log-set" data-field="unit" data-value="">clear</div>` : ""}</div>
-            ${l.units.length ? `<div class="opts wrap unitlist">${l.units.slice(0, 80).map((u) =>
-                `<div class="opt${l.unit === u ? " on" : ""}" data-action="log-set" data-field="unit" data-value="${esc(u)}">${esc(u)}</div>`).join("")}</div>` : ""}
             <div class="row"><div class="lbl">Priority</div><div class="opts">${
                 chip("priority", "", "all", l.priority) + chip("priority", "err", "err+", l.priority) +
                 chip("priority", "warning", "warning+", l.priority) + chip("priority", "info", "info+", l.priority) +
@@ -841,13 +977,25 @@ function logsView(s: CruiserState): RouteBody {
                 <div class="meta">e.g. "1 hour ago", "today", "10:00"</div></div>
             <div class="row"><div class="lbl">Grep</div>
                 <input data-field="log-grep" value="${esc(l.grep)}" style="width:260px">
-                <div class="meta">regex filter (journalctl -g)</div></div>`;
+                <div class="meta">regex filter (journalctl -g)</div></div>
+            <div class="row"><div class="lbl">Unit</div>
+                <input data-field="log-unit" value="${esc(l.unit)}" style="width:260px">
+                ${l.unit ? `<div class="opt" data-action="log-set" data-field="unit" data-value="">clear</div>` : ""}</div>
+            ${l.units.length ? `<div class="opts wrap unitlist">${l.units.slice(0, 80).map((u) =>
+                `<div class="opt${l.unit === u ? " on" : ""}" data-action="log-set" data-field="unit" data-value="${esc(u)}">${esc(u)}</div>`).join("")}</div>` : ""}`;
 
     const meta = [
         l.fetchedAt ? `fetched ${Math.max(0, Math.round((Date.now() - l.fetchedAt) / 1000))}s ago` : "",
         l.transport ? `via ${l.transport}` : "",
         l.loading ? "fetching…" : "",
     ].filter(Boolean).join(" · ");
+    // The active runner file's real path — the pane only shows the tail, so
+    // open/copy get users to the file itself (editor, bug reports).
+    const activeFile = l.source === "runner" ? l.files.find((x) => x.id === l.file) : undefined;
+    const fileBtns = activeFile?.exists
+        ? ` <span class="kvtog" data-action="status-open"${attr("path", activeFile.path)}>open</span>
+            <span class="kvtog" data-action="status-copy"${attr("path", activeFile.path)}>copy path</span>`
+        : "";
 
     // .logpre is NOT emitted here — it's a sibling of .content patched
     // through the RouteParts.log region so the scrollport node survives
@@ -858,8 +1006,8 @@ function logsView(s: CruiserState): RouteBody {
         <div class="logbar">${srcTabs}<span class="meta">lines</span>${linesSel}${follow}${btn("Refresh", "log-refresh", "", "btn sm")}</div>
         ${controls}`;
     return {
-        html: `<div id="logctl">${ctl}</div><div id="logmeta"><div class="logmeta" style="margin-bottom:6px">${esc(meta)}</div></div>`,
-        regions: [{ sel: "#logctl", html: ctl }, { sel: "#logmeta", html: `<div class="logmeta" style="margin-bottom:6px">${esc(meta)}</div>` }],
+        html: `<div id="logctl">${ctl}</div><div id="logmeta"><div class="logmeta" style="margin-bottom:6px">${esc(meta)}${fileBtns}</div></div>`,
+        regions: [{ sel: "#logctl", html: ctl }, { sel: "#logmeta", html: `<div class="logmeta" style="margin-bottom:6px">${esc(meta)}${fileBtns}</div>` }],
     };
 }
 
@@ -889,7 +1037,7 @@ function termView(s: CruiserState): RouteBody {
     const name = s.selectedVm ?? "?";
     const vm = s.vms.find((v) => v.name === name);
     const head = `<div class="crumb" data-action="nav" data-route="vm" data-vm="${esc(name)}">‹ ${esc(name)}</div>
-        <span class="pill ${pillClass(vm?.state ?? "")}">${esc(vm?.state ?? "?")}</span>
+        <span class="pill ${pillClass(vm?.state ?? "")}">${esc(vm?.state ?? "not found")}</span>
         <div class="meta">terminal · ${esc(s.termLine || "…")}</div>
         <div style="flex:1"></div>
         ${btn("Reconnect", "vm-term-reconnect", attr("vm", name), "btn sm dim")}
@@ -907,8 +1055,8 @@ function settings(s: CruiserState): string {
     const hostBlock = h ? `<div class="kv">
             <div class="k">session</div><div>${esc(h.session)}</div>
             <div class="k">wm adapter</div><div>${esc(h.adapterId)}</div>
-            <div class="k">monitors</div><div>${h.monitors.map((m) => `${esc(m.name)} ${m.w}x${m.h}@${m.x},${m.y}${m.primary ? "*" : ""}`).join(" · ") || "none"}</div>
-            <div class="k">desktops</div><div>${h.desktops.map((d) => `${d.index}${d.name ? ` ${d.name}` : ""}${d.current ? "*" : ""}`).join("  ") || "none"}</div>
+            <div class="k">monitors</div><div>${h.monitors.map((m) => `${esc(m.name)} ${m.w}x${m.h} +${m.x}+${m.y}${m.primary ? "*" : ""}`).join(" · ") || "none"}</div>
+            <div class="k">desktops</div><div>${h.desktops.map((d) => `${esc(d.name || String(d.index))}${d.current ? "*" : ""}`).join(" · ") || "none"}</div>
             <div class="k">caps</div><div>${Object.entries(h.caps).filter(([k]) => k !== "notes").map(([k, v]) => `${k}:${v ? "yes" : "no"}`).join(" ")}</div>
         </div>` : `<div class="empty">probing host…</div>`;
     const res = s.hostRes ? `<div class="kv">
@@ -933,14 +1081,15 @@ function settings(s: CruiserState): string {
             <div class="k">cache</div><div>${esc(si.cacheDir)}</div>
         </div>` : "";
     const usbBlock = s.usbDevices.length
-        ? s.usbDevices.map((d) => `<div class="docrow"><div class="${d.writable ? "ok" : "bad"}">${d.writable ? " ok" : "ro"}</div>
-            <div style="flex:1">${esc(d.label)}</div><div class="fix">${d.vendorId}:${d.productId}</div></div>`).join("")
+        ? [...s.usbDevices].sort((a, b) => Number(b.writable) - Number(a.writable) || (a.bus ?? 0) - (b.bus ?? 0) || (a.addr ?? 0) - (b.addr ?? 0))
+            .map((d) => `<div class="docrow"><div class="${d.writable ? "ok" : "bad"}">${d.writable ? " ok" : "ro"}</div>
+            <div style="flex:1">${esc(d.label)}</div><div class="fix">${d.vendorId}:${d.productId}${d.serial ? ` · ${esc(d.serial)}` : ""}${d.bus !== undefined ? ` · port ${d.bus}-${d.addr}` : ""}</div></div>`).join("")
         : `<div class="empty">no USB devices found</div>`;
     const blocked = s.usbDevices.filter((d) => !d.writable).length;
     const docRows = s.doctor === null
         ? ""
         : s.doctor.map((d) => `<div class="docrow"><div class="${d.ok ? "ok" : "bad"}">${d.ok ? " ok" : "FAIL"}</div><div style="flex:1">${esc(d.label)}</div><div class="fix">${esc(d.fix)}</div></div>`).join("");
-    return `<div class="h1">Settings &amp; Doctor</div>
+    return `<div class="h1">Diagnostics</div>
         <div class="h2">Host session</div>
         ${hostBlock}
         <div class="h2">Host resources</div>
@@ -949,10 +1098,10 @@ function settings(s: CruiserState): string {
         ${sysBlock}
         <div class="h2">Paths</div>
         ${pathBlock}
-        <div class="h2">USB devices ${blocked ? `<span class="meta">(${blocked} need permission — run doctor for the udev fix)</span>` : ""}</div>
-        ${usbBlock}
         <div class="h2">Doctor</div>
-        ${btn("Run doctor", "doctor")}${docRows ? `<div style="margin-top:8px">${docRows}</div>` : `<div class="meta" style="display:inline-block;margin-left:10px">not run</div>`}`;
+        ${btn("Run doctor", "doctor")}${docRows ? `<div style="margin-top:8px">${docRows}</div>` : `<div class="meta" style="display:inline-block;margin-left:10px">not run</div>`}
+        <div class="h2">USB devices ${blocked ? `<span class="meta">(${blocked} need permission — run doctor for the udev fix)</span>` : ""}</div>
+        ${usbBlock}`;
 }
 
 /** A patchable region — a stable container whose INNER markup is swapped
@@ -1010,8 +1159,8 @@ export function renderRouteParts(s: CruiserState): RouteParts {
         s.route === "vm" ? vmDetail(s) :
         s.route === "logs" ? logsView(s) :
         s.route === "term" ? termView(s) : { html: settings(s) };
-    const topbar = `<div class="brand">cruiser</div>
-        <div class="nav">${nav("home", "VMs", ["home", "create", "vm", "logs", "term"].includes(s.route))}${nav("settings", "Settings")}</div>
+    const topbar = `<div class="brand"><img class="brandicon" src="ui://cruiser/icon.png"></div>
+        <div class="nav">${nav("home", "VMs", ["home", "create", "vm", "logs", "term"].includes(s.route))}${nav("settings", "Diagnostics")}</div>
         <div style="flex:1"></div>`;
     const fcls = s.statusKind === "error" ? " err" : s.statusKind === "warn" ? " warn" : "";
     // A status carrying a real absolute path ("— see /…/viewer-dd.log")

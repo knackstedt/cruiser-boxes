@@ -207,6 +207,8 @@ export interface UsbChoice {
     vendorId: string;
     productId: string;
     serial?: string;
+    bus?: number;                  // usb bus number — with addr, the port id
+    addr?: number;
     label: string;                 // "Vendor Product"
     writable: boolean;
 }
@@ -276,6 +278,10 @@ export interface CruiserState {
     unlockPw: string;
     /** Detail-screen password reveal — keyed to the VM, cleared on nav. */
     pwReveal: { vm: string; pw: string } | null;
+    /** Home-list filter string — matched against name/state/mode/desc. */
+    vmFilter: string;
+    /** USB picker: show devices that lack host access too. */
+    usbShowBlocked: boolean;
 }
 
 export interface ShareForm {
@@ -331,6 +337,8 @@ export interface CruiserActions {
     setAutoSnapPrompt(p: AutoSnapPrompt | null): void;
     setUnlockPrompt(p: UnlockPrompt | null): void;
     setPwReveal(r: { vm: string; pw: string } | null): void;
+    setVmFilter(v: string): void;
+    toggleUsbBlocked(): void;
 }
 
 export type CruiserStore = CruiserState & CruiserActions;
@@ -386,6 +394,8 @@ export function createCruiserStore() {
         unlockPrompt: null,
         unlockPw: "",
         pwReveal: null,
+        vmFilter: "",
+        usbShowBlocked: false,
         setRoute: (route, vm = null) => set({ route, selectedVm: vm, confirm: null, editVm: null, pwReveal: null, unlockPrompt: null, unlockPw: "" }),
         setVms: (vms) => set({ vms }),
         setStatus: (status, kind = "info") => set({ status, statusKind: kind }),
@@ -410,6 +420,8 @@ export function createCruiserStore() {
         setAutoSnapPrompt: (autoSnapPrompt) => set({ autoSnapPrompt }),
         setUnlockPrompt: (unlockPrompt) => set({ unlockPrompt }),
         setPwReveal: (pwReveal) => set({ pwReveal }),
+        setVmFilter: (vmFilter) => set({ vmFilter }),
+        toggleUsbBlocked: () => set((s) => ({ usbShowBlocked: !s.usbShowBlocked })),
         toggleUsb: (key) => set((s) => ({
             create: {
                 ...s.create,

@@ -599,6 +599,10 @@ extern "C" {
                     event_mask: u32, pointer_mode: i32, keyboard_mode: i32,
                     confine_to: u64, cursor: u64, time: u64) -> i32;
     fn XUngrabPointer(d: *mut std::ffi::c_void, time: u64) -> i32;
+    fn XGrabButton(d: *mut std::ffi::c_void, button: u32, modifiers: u32,
+                   grab_window: u64, owner_events: i32, event_mask: u32,
+                   pointer_mode: i32, keyboard_mode: i32,
+                   confine_to: u64, cursor: u64);
     fn XIconifyWindow(d: *mut std::ffi::c_void, w: u64, screen: i32) -> i32;
     fn XSelectInput(d: *mut std::ffi::c_void, w: u64, mask: i64);
     fn XPending(d: *mut std::ffi::c_void) -> i32;
@@ -1133,8 +1137,9 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                     // minifb's conn already owns it — adding it here fails
                     // the whole select with BadAccess and blinds the grab
                     // path too (grab delivery still consults the mask).
-                    // Buttons ride the pointer grab while grabbed, minifb
-                    // polling while ungrabbed.
+                    // Buttons ride the pointer grab while grabbed; while
+                    // ungrabbed L/M/R + wheel are minifb-polled and nav
+                    // buttons 8/9 arrive via passive grabs (below).
                     XSelectInput(d, xid, 0x3); // KeyPress|KeyRelease
                     XFlush(d);
                     xdpy = d;
@@ -1424,6 +1429,24 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
             XFlush(xdpy);
         }
     }
+    // Passive grabs on buttons 8/9 (nav back/forward). Ungrabbed button
+    // delivery belongs to minifb's conn (exclusive ButtonPressMask) and
+    // minifb's MouseButton enum stops at L/M/R — without these grabs the
+    // nav buttons are invisible in the default mode. A passive grab needs
+    // no window mask: it activates on a press inside xwin (any modifier
+    // state) and the press + release deliver to this conn exactly like an
+    // active grab's events. While --grab/capture holds the pointer the
+    // device is already grabbed, so these can never double-deliver.
+    if !xdpy.is_null() {
+        unsafe {
+            for b in [8u32, 9] {
+                // AnyModifier=1<<15, owner_events=0, Press|Release mask,
+                // Async/Async — same constants as XGrabPointer below.
+                XGrabButton(xdpy, b, 1 << 15, xwin_id, 0, 0xC, 1, 1, 0, 0);
+            }
+            XFlush(xdpy);
+        }
+    }
     // last fire time per passive-grab trigger — X autorepeat would otherwise
     // re-fire the action every repeat interval while the combo is held.
     let mut passive_last = std::collections::HashMap::<usize, std::time::Instant>::new();
@@ -1470,9 +1493,12 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     // warps the host pointer to the guest's own cursor spot, so the
     // guest sprite (applied as the X cursor) sits where the guest thinks
     // the pointer is. Triggering: 'always' = while focused; 'auto' = the
-    // guest had a visible cursor and now hides it (a locked app's tell);
-    // EscAct::RelGrab toggles a per-episode override; ungrab/abort and
-    // focus loss release.
+    // guest had a visible cursor and now hides it AND the cursor stays
+    // hidden through real pointer motion (a locked app's tell — a
+    // terminal's hide-while-typing episode re-shows on the first wiggle,
+    // so it never accrues the travel and never captures). EscAct::RelGrab
+    // toggles a per-episode override; ungrab/abort and focus loss release.
+    const HIDE_TRAVEL_PX: f32 = 160.0; // 'auto' motion gate — see above
     let mut captured = false;
     let mut rel_override: Option<bool> = None;
     let mut rel_hold_off = false;
@@ -1482,6 +1508,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     let mut rel_send = std::time::Instant::now() - std::time::Duration::from_secs(1);
     let mut cursor_visible = false;
     let mut cursor_ever_visible = false;
+    let mut hide_travel = 0.0f32; // host-px accrued while the guest cursor is hidden
 
     // numlock reconcile guard: a NumLock press forwarded to the guest
     // flips host state instantly but the guest's LED report lags — a poll
@@ -1501,7 +1528,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     while win.is_open() {
         win.update(); // events only — EGL renders into this window directly
         let active = win.is_active();
-        if !active { grab_hold_off = false; rel_hold_off = false; rel_override = None; }
+        if !active { grab_hold_off = false; rel_hold_off = false; rel_override = None; hide_travel = 0.0; }
         if !xdpy.is_null() {
             if SIG_ABORT.swap(false, Ordering::Relaxed) {
                 // panic path — needs no keyboard; the generation bump
@@ -1632,7 +1659,8 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
         let want = active && !xdpy.is_null() && !rel_hold_off
             && rel_override.unwrap_or(match rel_mode {
                 RelMode::Always => true,
-                RelMode::Auto => cursor_ever_visible && !cursor_visible,
+                RelMode::Auto => cursor_ever_visible && !cursor_visible
+                    && hide_travel >= HIDE_TRAVEL_PX,
                 RelMode::Off => false,
             });
         if want != captured {
@@ -1759,17 +1787,18 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                         }
                     }
                 } else if a.t == 4 || a.t == 5 {
-                    // ButtonPress/Release — reachable ONLY while pgrabbed:
-                    // the button-mask selection on xwin belongs to minifb
-                    // (ButtonPressMask is exclusive — see the XSelectInput
-                    // note above), so ungrabbed button events go there and
-                    // are polled below. The Async pointer grab delivers all
-                    // button events to us: in-window clicks are consumed +
-                    // forwarded to the guest; a click outside drops the grab
-                    // and re-injects the press via XTEST — a real device
-                    // event, so KWin's passive grabs and click-to-focus see
-                    // it exactly as if we'd never grabbed.
-                    if !pgrabbed { continue; }
+                    // ButtonPress/Release. Two delivery paths, disjoint by
+                    // grab state: the active pointer grab while pgrabbed,
+                    // and the passive 8/9 nav grabs while ungrabbed — xwin's
+                    // button-mask selection belongs to minifb (exclusive —
+                    // see the XSelectInput note above), so the passive grabs
+                    // are the ONLY ungrabbed source: the activating press,
+                    // plus every button event while that grab is held.
+                    // In-window clicks are consumed + forwarded to the
+                    // guest; a click outside drops the grab and re-injects
+                    // the press via XTEST — a real device event, so KWin's
+                    // passive grabs and click-to-focus see it exactly as if
+                    // we'd never grabbed.
                     let k = unsafe { ev.key };
                     let btn = k.keycode;
                     let down = a.t == 4;
@@ -1900,11 +1929,25 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                     let (ww, wh) = win.get_size();
                     if mx >= 0.0 && my >= 0.0 && mx < ww as f32 && my < wh as f32
                         && (mx, my) != mouse {
+                        // 'auto' gate: a guest cursor that stays hidden
+                        // through real motion is the lock signature — a
+                        // hide-while-typing terminal re-shows on the first
+                        // delta, so it never reaches the threshold.
+                        if !cursor_visible && mouse.0 >= 0.0 {
+                            hide_travel += (mx - mouse.0).hypot(my - mouse.1);
+                        }
                         mouse = (mx, my);
                         pending_abs = Some((mx, my));
+                    } else if !(mx >= 0.0 && my >= 0.0 && mx < ww as f32 && my < wh as f32) {
+                        // left the window — re-entry must not count the
+                        // jump toward hide_travel
+                        mouse = (-1.0, -1.0);
                     }
                 }
             }
+        } else if !captured {
+            // off-window sample — same re-entry jump guard as above
+            mouse = (-1.0, -1.0);
         }
         // Buttons + wheel while UNGRABBED: those events deliver to minifb's
         // conn (ButtonPressMask selection is exclusively theirs), so its
@@ -2070,7 +2113,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
         // visibility transition ends the current lock episode (and with
         // it any relgrab override).
         let vis = cur_slots.iter().any(|s| s.seen && s.on);
-        if vis { cursor_ever_visible = true; }
+        if vis { cursor_ever_visible = true; hide_travel = 0.0; }
         if vis != cursor_visible && rel_mode == RelMode::Auto { rel_override = None; }
         cursor_visible = vis;
         if (cur_dirty || cur_applied.map(|a| a.0) != Some(cur_ci)) && !xdpy.is_null() {
