@@ -1118,8 +1118,9 @@ export class CruiserService {
         const h = this.handles.get(name); if (!h) return;
         await this.run(`launch ${cmd}`, async () => {
             const { launchApp } = await import("../../app-mode/src/waypipe");
-            await launchApp(h, cmd);
-        }, { vm: name, verb: "launching" });
+            return await launchApp(h, cmd);
+        }, { vm: name, verb: "launching",
+             done: (l) => l.warning ?? `launched ${cmd} via ${l.transport}` });
     }
 
     // ── config import/export + shares ──

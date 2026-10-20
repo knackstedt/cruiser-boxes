@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createServer, type Socket } from "node:net";
+import { spawn } from "node:child_process";
 import { rm, writeFile } from "node:fs/promises";
 import { defaultSpec, parseVmSpec } from "../libraries/vm-core/src/config/schema";
 import { diskPath, VMS_DIR, vmPaths } from "../libraries/vm-core/src/paths";
@@ -18,6 +19,7 @@ import { parseEscapeAction } from "../libraries/host-int/src/session";
 import { kdeDesktopsRc, kdeKeys, kdeUnkeys, kglobalConflicts, khotkeysDataGroups, khotkeysDropGroups, khotkeysUuid, KWIN_VD_UUID, kwinDesktopBindings, unwrapShC } from "../libraries/host-int/src/kde";
 import { gnomeUnkeys } from "../libraries/host-int/src/adapters";
 import { autoSnaps, autoSnapshotDue, autoPruneList } from "../libraries/vm-core/src/lifecycle/autosnap";
+import { desktopExecToCmd, earlyWatch, judgeEarlyExit } from "../libraries/app-mode/src/waypipe";
 import type { SnapshotInfo } from "../libraries/vm-core/src/disk/ops";
 
 // ── schema ──
@@ -705,5 +707,42 @@ describe("autosnap", () => {
         expect(autoPruneList(list, 2)).toEqual(["auto-1"]);
         expect(autoPruneList(list, 1)).toEqual(["auto-1", "auto-2"]);
         expect(autoPruneList(list, 1)).not.toContain("snap-keepme");
+    });
+});
+
+// ── app-mode launch ──
+
+describe("app-mode", () => {
+    test("desktopExecToCmd strips field codes", () => {
+        expect(desktopExecToCmd("/usr/bin/foo %U")).toBe("/usr/bin/foo");
+        expect(desktopExecToCmd("kate -b %F")).toBe("kate -b");
+        // flatpak wraps codes in @@u … @@
+        expect(desktopExecToCmd(
+            "/usr/bin/flatpak run --branch=stable --command=vivaldi com.vivaldi.Vivaldi @@u %U @@"))
+            .toBe("/usr/bin/flatpak run --branch=stable --command=vivaldi com.vivaldi.Vivaldi");
+    });
+    test("judgeEarlyExit: delegation marker → warning, not throw", () => {
+        const w = judgeEarlyExit("vivaldi", "ssh-x", { code: 0, out: "Opening in existing browser session." });
+        expect(w).toContain("delegated");
+        expect(w).toContain("guest desktop");
+    });
+    test("judgeEarlyExit: nonzero exit throws with stderr", () => {
+        expect(() => judgeEarlyExit("x", "ssh-x", { code: 255, out: "Permission denied" }))
+            .toThrow("Permission denied");
+    });
+    test("judgeEarlyExit: clean quick exit → undefined", () => {
+        expect(judgeEarlyExit("x", "ssh-x", { code: 0, out: "" })).toBeUndefined();
+    });
+    test("earlyWatch captures exit output within window", async () => {
+        const c = spawn("sh", ["-c", "echo Opening in existing browser session.; exit 0"], { stdio: "pipe" });
+        const r = await earlyWatch(c, 2000);
+        expect(r?.code).toBe(0);
+        expect(r?.out).toContain("existing browser session");
+    });
+    test("earlyWatch returns null for a survivor, leaves it detached", async () => {
+        const c = spawn("sleep", ["5"], { detached: true, stdio: "pipe" });
+        const r = await earlyWatch(c, 300);
+        expect(r).toBeNull();
+        c.kill("SIGKILL");
     });
 });

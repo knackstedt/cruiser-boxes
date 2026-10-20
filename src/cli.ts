@@ -1243,7 +1243,8 @@ switch (area) {
                 cmd = app.exec;
             }
             const l = await launchApp(h, cmd);
-            console.log(`launched via ${l.transport}: ${l.command}`);
+            if (l.warning) console.log(`warn: ${l.warning}`);
+            else console.log(`launched via ${l.transport}: ${l.command}`);
         } else if (sub === "install") {
             (await installAppLaunchers(h, rest.slice(1))).forEach((p) => console.log(`installed ${p}`));
         } else if (sub === "uninstall") {

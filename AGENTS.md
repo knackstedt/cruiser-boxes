@@ -527,6 +527,16 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   rdp→freerdp text, dmabuf→viewer-dd) and drops the escape list when the
   host adapter can't bind shortcuts.
 - `libraries/app-mode` — waypipe over vsock (socat bridge) / ssh fallback.
+  guestAppCatalog also scans flatpak export dirs (system+user), /usr/local,
+  and snapd's, deduped by desktop id in XDG precedence order (user first);
+  flatpak `@@u %U @@` exec wrappers are stripped with the bare field codes.
+  The ssh transports spawn with piped stdio + a ~2.5s earlyWatch window:
+  an app that exits inside it gets judged — Chromium-family singleton
+  delegation ("Opening in existing browser session" → the window went to a
+  copy already running in the guest's own session, NOT the host) becomes
+  AppLaunch.warning (cli warn: / UI done-status); a nonzero exit throws
+  WaypipeError. Survivors get drain-noop'd pipes + unref (a full pipe
+  buffer would stall the ssh channel's flow control).
 - `libraries/app-shell` — UI: zustand store, CruiserService, screens markup.
   Screen split: the vm detail screen owns everything that acts IMMEDIATELY
   (lifecycle buttons, shares add/remove/toggle, portable-config

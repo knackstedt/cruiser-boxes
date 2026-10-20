@@ -37,10 +37,13 @@ client. Getting this backwards is the classic waypipe debugging trap.
 
 ## The app catalog
 
-`app list` enumerates `.desktop` files in the guest's
-`/usr/share/applications` and the provisioned user's
-`~/.local/share/applications` (skipping `NoDisplay=true`), returning
-`id`, `Name=`, and the `Exec=` line with field codes (`%U` etc.) stripped —
+`app list` enumerates `.desktop` files in the guest, in XDG precedence
+order (later duplicates are dropped): the user's
+`~/.local/share/applications` and flatpak user exports, then
+`/usr/local/share/applications`, `/usr/share/applications`, flatpak system
+exports (`/var/lib/flatpak/exports/share/applications`), and snapd's dir —
+skipping `NoDisplay=true`. It returns `id`, `Name=`, and the `Exec=` line
+with field codes (`%U` etc.) and flatpak's `@@u … @@` wrappers stripped —
 the transports run the raw command.
 
 ## Requirements and caveats
@@ -48,6 +51,13 @@ the transports run the raw command.
 - The VM needs `network.sshPort` for the ssh transports (allocated at
   create) and the guest-setup-provided ssh keypair; `authorizeInGuest`
   retries authorization before falling back to existing auth.
+- Single-instance apps (Chromium family: Chrome, Vivaldi, Brave…) delegate
+  a second launch to the already-running process. If that instance lives in
+  the guest's own desktop session, the new window opens *inside the guest*,
+  not on the host. The ssh transports watch the first ~2.5s of output and
+  report this as a warning ("delegated to an instance already running in
+  the guest session"); close the in-guest copy and relaunch to get a host
+  window.
 - App windows carry the guest's own toolkit rendering — theme sync affects
   them the same as the desktop.
 - waypipe is optimized for single apps; multi-window session forwarding
