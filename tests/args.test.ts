@@ -43,7 +43,7 @@ describe("buildArgs", () => {
     });
 
     test("software mode drops gl and blob", () => {
-        const a = build((s) => { s.gpu.mode = "software"; });
+        const a = build((s) => { s.gpu.mode = "software"; s.display.viewer = "rdp"; });
         expect(a).toContain('"driver":"virtio-vga"');
         expect(a).not.toContain("gl=on");
         expect(a).not.toContain('"venus"');
@@ -63,7 +63,7 @@ describe("buildArgs", () => {
     });
 
     test("rendernode lands on -spice when set", () => {
-        const a = build((s) => { s.gpu.renderNode = "/dev/dri/renderD129"; });
+        const a = build((s) => { s.display.viewer = "rdp"; s.gpu.renderNode = "/dev/dri/renderD129"; });
         expect(a).toContain("rendernode=/dev/dri/renderD129");
     });
 
@@ -106,6 +106,16 @@ describe("buildArgs", () => {
         void b;
     });
 
+    test("dmabuf is the default viewer — dbus display, no -spice", () => {
+        expect(defaultSpec("t0").display.viewer).toBe("dmabuf");
+        const a = build();
+        expect(a).toContain("-display\ndbus,p2p=on,gl=on");
+        expect(a).not.toContain("-spice");
+        const rdp = build((s) => { s.display.viewer = "rdp"; });
+        expect(rdp).toContain("-spice");
+        expect(rdp).not.toContain("-display\ndbus");
+    });
+
     test("dmabuf viewer + clipboard → qemu-vdagent chardev + spice.0 port", () => {
         const dd = (s: ReturnType<typeof defaultSpec>) => { s.display.viewer = "dmabuf"; };
         const on = build(dd, { vdagent: true });
@@ -117,7 +127,7 @@ describe("buildArgs", () => {
         // clipboard flag off / rdp viewer → no vdagent
         expect(build((s) => { s.display.viewer = "dmabuf"; s.display.clipboard = false; }, { vdagent: true }))
             .not.toContain("qemu-vdagent");
-        expect(build(undefined, { vdagent: true })).not.toContain("qemu-vdagent");
+        expect(build((s) => { s.display.viewer = "rdp"; }, { vdagent: true })).not.toContain("qemu-vdagent");
     });
 
     test("install mode attaches iso+seed+kernel", () => {

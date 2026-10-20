@@ -315,7 +315,7 @@ function vmRowInner(vm: VmSummary, s: CruiserState): string {
         ? [vm.sshPort && `ssh :${vm.sshPort}`, vm.rdpPort && `rdp :${vm.rdpPort}`]
             .filter(Boolean).join(" · ")
         : "";
-    const mode = [GPU_LABEL[vm.gpuMode] ?? vm.gpuMode, HEAD_LABEL[vm.headMode] ?? vm.headMode, ports,
+    const mode = [GPU_LABEL[vm.gpuMode] ?? vm.gpuMode, HEAD_LABEL[vm.headMode] ?? vm.headMode, vm.viewer, ports,
         vm.encrypt !== "off" ? `luks ${vm.encrypt}${vm.diskLocked ? " · locked" : ""}` : ""]
         .filter(Boolean).join(" · ");
     return `<div class="grow" data-action="nav" data-route="vm" data-vm="${esc(vm.name)}">
@@ -554,6 +554,10 @@ function create(s: CruiserState): string {
         <div class="h2">Graphics &amp; display</div>
         ${optRow("GPU mode", "gpu", f.gpu, [["venus", "Venus (Vulkan)"], ["virgl", "virgl (GL)"], ["software", "software"]], "set-field", aptag("boot"))}
         ${f.gpu === "venus" ? checkRow("Host software Vulkan", "swVk", f.swVk, "expose the host's lavapipe (CPU renderer) to the guest — off keeps software Vulkan on the guest's own lavapipe", aptag("boot")) : ""}
+        ${optRow("Viewer", "viewer", f.viewer, [["dmabuf", "dmabuf"], ["rdp", "rdp"]], "set-field", aptag("boot"))}
+        <div class="hint">${f.viewer === "dmabuf"
+            ? "QEMU's dma-buf display → viewer-dd: a zero-copy console — needs a venus/virgl GPU"
+            : "xfreerdp into the guest's RDP server — works with any GPU mode"}</div>
         ${optRow("Head mode", "headMode", f.headMode, [["virtual-desktop", "virtual desktop"], ["fullscreen-monitor", "fullscreen monitor"], ["windowed", "windowed"], ["app", "app-only"]], "set-field", aptag("live"))}
         ${vdPicker}
         ${optRow("Persist", "persist", f.persist, [["daemonize", "survives app"], ["owned", "stops with app"], ["ephemeral", "deleted on exit"]], "set-field", aptag("live"))}
@@ -652,7 +656,7 @@ function vmDetail(s: CruiserState): RouteBody {
         <div class="kv">
             <div class="k">resources</div><div>${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB · ${vm.diskGiB} GiB disk${vm.nestedVirt ? " · nested virt" : ""}</div>
             ${diskDetail ? `<div class="k">disk usage</div><div>${esc(diskDetail)}</div>` : ""}
-            <div class="k">gpu / head</div><div>${esc(vm.gpuMode)} / ${esc(vm.headMode)}</div>
+            <div class="k">gpu / head / viewer</div><div>${esc(vm.gpuMode)} / ${esc(vm.headMode)} / ${esc(vm.viewer)}</div>
             <div class="k">encryption</div><div>${vm.encrypt === "off" ? "off"
                 : `qcow2 LUKS — ${vm.encrypt === "full" ? "full disk" : "/home volume"}`
                   + ` · ${vm.keyStorage === "prompt" ? "passphrase not stored" : "key stored"}${vm.diskLocked ? " · locked" : ""}`}</div>

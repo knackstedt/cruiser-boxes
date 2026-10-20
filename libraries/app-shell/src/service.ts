@@ -224,6 +224,7 @@ export class CruiserService {
         return {
             name: s.name, state,
             gpuMode: s.gpu.mode, swVk: s.gpu.softwareVk, headMode: s.display.headMode,
+            viewer: s.display.viewer,
             cpus: s.resources.cpus, memMiB: s.resources.memoryMiB,
             diskGiB: s.disk.sizeGiB, nestedVirt: s.resources.nestedVirt,
             sshPort: s.network.sshPort, rdpPort: s.network.rdpPort,
@@ -484,6 +485,11 @@ export class CruiserService {
             if (!f.diskPassword) { st.setStatus("set a disk password — encrypted VMs need one at creation", "warn"); return; }
             if (f.diskPassword !== f.diskPassword2) { st.setStatus("disk passwords don't match", "warn"); return; }
         }
+        // dmabuf needs exported GL scanouts — a software-gpu VM must use rdp.
+        if (f.viewer === "dmabuf" && f.gpu === "software") {
+            st.setStatus("the dmabuf viewer needs a GL gpu — pick venus/virgl or the rdp viewer", "warn");
+            return;
+        }
         await this.run(`create ${f.name}`, async () => {
             const spec = defaultSpec(f.name);
             spec.resources.cpus = f.cpus;
@@ -493,6 +499,7 @@ export class CruiserService {
             spec.gpu.mode = f.gpu as VmSpec["gpu"]["mode"];
             spec.gpu.softwareVk = f.swVk;
             spec.display.headMode = f.headMode as VmSpec["display"]["headMode"];
+            spec.display.viewer = f.viewer as VmSpec["display"]["viewer"];
             spec.persist = f.persist as VmSpec["persist"];
             spec.autostart = f.autostart;
             spec.network.mode = f.netMode as VmSpec["network"]["mode"];
@@ -795,6 +802,10 @@ export class CruiserService {
         // LUKS resize needs the passphrase — park the whole save on the
         // unlock banner when prompt-mode has no key on file.
         if (f.diskGiB !== h.spec.disk.sizeGiB && !this.diskKeyReady(h, "grow")) return;
+        if (f.viewer === "dmabuf" && f.gpu === "software") {
+            st.setStatus("the dmabuf viewer needs a GL gpu — pick venus/virgl or the rdp viewer", "warn");
+            return;
+        }
         await this.run(`save ${name}`, async () => {
             const prev = h.spec;
             // Clone-then-validate: a schema rejection must not leave h.spec
@@ -807,6 +818,7 @@ export class CruiserService {
             spec.gpu.mode = f.gpu as VmSpec["gpu"]["mode"];
             spec.gpu.softwareVk = f.swVk;
             spec.display.headMode = f.headMode as VmSpec["display"]["headMode"];
+            spec.display.viewer = f.viewer as VmSpec["display"]["viewer"];
             if (f.vd > 0) spec.display.virtualDesktop = f.vd;
             spec.persist = f.persist as VmSpec["persist"];
             spec.autostart = f.autostart;

@@ -112,7 +112,12 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   "restart pending" marker (vm row/detail) + the edit form's
   "needs restart"/"applies live" field tags. persist/headMode/sync/
   copy-shares are LIVE (session-level), resources/gpu/display-viewer/
-  network/usb/mount-shares are boot-frozen.
+  network/usb/mount-shares are boot-frozen. display.viewer defaults to
+  dmabuf — a create/edit "Viewer" row on both surfaces; software gpu has
+  no GL scanouts to export, so the UI coerces rdp on pick + guards on
+  save and the cli falls back (explicit --viewer dmabuf --gpu software
+  is a create error). Guests provision their RDP server either way, so
+  an rdp flip needs no re-provision.
   `logs.ts` — the Logs screen's backends: run/ file tails (cruiser.log is
   tee'd from lifecycle + provision via `appendVmLog`; serial.log is attached
   on every boot) and guest journalctl with filters over QGA, falling back to

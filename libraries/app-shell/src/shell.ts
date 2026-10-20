@@ -172,6 +172,11 @@ export class CruiserShell {
                 : BOOL_FIELDS.has(k) ? d.value === "true"
                 : (d.value ?? "");
             st().setField(k, v as never);
+            // software gpu exports no GL scanouts — drop the viewer to rdp
+            // instead of leaving an unbootable combo selected (create/save
+            // guard against it too).
+            if (k === "gpu" && v === "software" && st().create.viewer === "dmabuf")
+                st().setField("viewer", "rdp");
         });
         this.host.onAction("set-distro", (d) => {
             const fam = d.value as keyof typeof DISTROS;
@@ -220,7 +225,7 @@ export class CruiserShell {
             Object.assign(st().create, {
                 name: vm.name, cpus: vm.cpus, memMiB: vm.memMiB, diskGiB: vm.diskGiB,
                 nestedVirt: vm.nestedVirt,
-                gpu: vm.gpuMode, swVk: vm.swVk, headMode: vm.headMode, persist: vm.persist,
+                gpu: vm.gpuMode, swVk: vm.swVk, headMode: vm.headMode, viewer: vm.viewer, persist: vm.persist,
                 autostart: vm.autostart, netMode: vm.netMode,
                 vd: vm.vd, usb: [...vm.usbKeys], agentKeys: [...(vm.agentKeys ?? [])],
                 snapAuto: vm.snapAuto, snapTrigger: vm.snapTrigger, snapKeep: vm.snapKeep,

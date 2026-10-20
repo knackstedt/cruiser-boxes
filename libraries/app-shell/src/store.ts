@@ -31,6 +31,7 @@ export interface VmSummary {
     gpuMode: string;
     swVk: boolean;                 // spec.gpu.softwareVk — host lavapipe over Venus
     headMode: string;
+    viewer: string;                // spec.display.viewer — dmabuf|rdp
     cpus: number;
     memMiB: number;
     diskGiB: number;
@@ -87,6 +88,7 @@ export type CreateForm = SyncFormFields & {
     gpu: string;                   // venus|virgl|software
     swVk: boolean;                 // venus: expose host lavapipe (CPU Vulkan) to the guest
     headMode: string;              // fullscreen-monitor|windowed|virtual-desktop|app
+    viewer: string;                // dmabuf|rdp — dmabuf needs gpu venus/virgl
     persist: string;               // daemonize|owned|ephemeral
     autostart: boolean;            // spec.autostart — boot unit + start with the app
     netMode: string;               // spec.network.mode — nat|restricted|isolated|vmnet
@@ -337,7 +339,7 @@ const defaultLogs = (): LogsState => ({
 
 const defaultCreate = (): CreateForm => ({
     name: "", cpus: 4, memMiB: 8192, diskGiB: 100, nestedVirt: false,
-    gpu: "venus", swVk: false, headMode: "virtual-desktop", persist: "daemonize",
+    gpu: "venus", swVk: false, headMode: "virtual-desktop", viewer: "dmabuf", persist: "daemonize",
     autostart: false, netMode: "nat",
     method: "cloudimg", distro: "ubuntu", release: "26.04", desktop: "gnome",
     browser: "none", snap: false, extraFonts: false, autologin: true,

@@ -52,7 +52,7 @@ usage: cruiser <area> <command> [args]
                                                         needs the host kvm module's nested=1, see doctor)
                    [--sw-vk]                           venus: also expose host lavapipe (CPU Vulkan)
                    [--sync a,b,c] [--no-sync x,y]     host→guest sync channels (see vm sync)
-                   [--viewer rdp|dmabuf]              dmabuf = direct QEMU dma-buf display (virgl+)
+                   [--viewer rdp|dmabuf]              dmabuf (default) = direct QEMU dma-buf display (virgl+)
                    [--encrypt off|full|home]          qcow2 LUKS — full = whole system image,
                                                       home = separate encrypted /home volume
                    [--key-store store|prompt]         store: keep key in secrets/ (unattended boot);
@@ -272,7 +272,7 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             for (let i = 0; i < handles.length; i++) {
                 const h = handles[i]!;
                 const s = await h.probe();
-                console.log(`${h.spec.name.padEnd(20)} ${s.padEnd(10)} ${h.spec.gpu.mode.padEnd(8)} ${h.spec.display.headMode.padEnd(20)} ssh:${h.spec.network.sshPort} rdp:${h.spec.network.rdpPort}`);
+                console.log(`${h.spec.name.padEnd(20)} ${s.padEnd(10)} ${h.spec.gpu.mode.padEnd(8)} ${h.spec.display.viewer.padEnd(7)} ${h.spec.display.headMode.padEnd(20)} ssh:${h.spec.network.sshPort} rdp:${h.spec.network.rdpPort}`);
             }
             if (!registry.list().length) console.log("(no VMs — `cruiser vm create <name>`)");
             break;
@@ -300,6 +300,13 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const gpu = flagVal("--gpu"); if (gpu) spec.gpu.mode = gpu as VmSpec["gpu"]["mode"];
             const hm = flagVal("--head-mode"); if (hm) spec.display.headMode = hm as VmSpec["display"]["headMode"];
             const viewer = flagVal("--viewer"); if (viewer) spec.display.viewer = viewer as VmSpec["display"]["viewer"];
+            // dmabuf needs exported GL scanouts — a software gpu can only
+            // drive the rdp viewer. Coerce the default; an explicit
+            // --viewer dmabuf on software is a real conflict.
+            if (spec.gpu.mode === "software" && spec.display.viewer === "dmabuf") {
+                if (viewer) { console.error("--viewer dmabuf needs a GL gpu (--gpu virgl|venus)"); process.exit(2); }
+                spec.display.viewer = "rdp";
+            }
             const persist = flagVal("--persist"); if (persist) spec.persist = persist as VmSpec["persist"];
             const net = flagVal("--net"); if (net) spec.network.mode = net as VmSpec["network"]["mode"];
             const distro = flagVal("--distro"); if (distro) spec.os.family = distro as VmSpec["os"]["family"];
@@ -374,7 +381,7 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
                 await h.provideDiskKey(pw);
             }
             console.log(`created ${h.spec.name} @ ${h.paths.dir}`);
-            console.log(`  ssh:${h.spec.network.sshPort} rdp:${h.spec.network.rdpPort} gpu:${h.spec.gpu.mode} head:${h.spec.display.headMode}`);
+            console.log(`  ssh:${h.spec.network.sshPort} rdp:${h.spec.network.rdpPort} gpu:${h.spec.gpu.mode} viewer:${h.spec.display.viewer} head:${h.spec.display.headMode}`);
             console.log(`  next: cruiser provision cloudimg ${spec.name} <release>  (or drop a disk.qcow2 in)`);
             break;
         }
