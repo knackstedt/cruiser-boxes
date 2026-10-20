@@ -172,12 +172,18 @@ export class CruiserShell {
             const v = NUM_FIELDS.has(k) ? Number(d.value ?? 0)
                 : BOOL_FIELDS.has(k) ? d.value === "true"
                 : (d.value ?? "");
-            st().setField(k, v as never);
             // software gpu exports no GL scanouts — drop the viewer to rdp
             // instead of leaving an unbootable combo selected (create/save
-            // guard against it too).
-            if (k === "gpu" && v === "software" && st().create.viewer === "dmabuf")
-                st().setField("viewer", "rdp");
+            // guard against it too). A real gpu change back to a GL mode
+            // restores dmabuf — the fast default; rdp stays a re-pick.
+            const gpuChanged = k === "gpu" && v !== st().create.gpu;
+            st().setField(k, v as never);
+            if (k === "gpu") {
+                if (v === "software" && st().create.viewer === "dmabuf")
+                    st().setField("viewer", "rdp");
+                else if (gpuChanged && st().create.viewer === "rdp")
+                    st().setField("viewer", "dmabuf");
+            }
         });
         this.host.onAction("set-distro", (d) => {
             const fam = d.value as keyof typeof DISTROS;
@@ -227,7 +233,11 @@ export class CruiserShell {
             Object.assign(st().create, {
                 name: vm.name, cpus: vm.cpus, memMiB: vm.memMiB, diskGiB: vm.diskGiB,
                 nestedVirt: vm.nestedVirt,
-                gpu: vm.gpuMode, swVk: vm.swVk, headMode: vm.headMode, viewer: vm.viewer, persist: vm.persist,
+                gpu: vm.gpuMode, swVk: vm.swVk, headMode: vm.headMode,
+                // dmabuf is preselected whenever the gpu can export scanouts
+                // — a saved rdp only survives an explicit re-pick.
+                viewer: vm.gpuMode === "software" ? "rdp" : "dmabuf",
+                persist: vm.persist,
                 vmDir: dirname(vm.vmDir),
                 autostart: vm.autostart, netMode: vm.netMode,
                 vd: vm.vd, usb: [...vm.usbKeys], agentKeys: [...(vm.agentKeys ?? [])],

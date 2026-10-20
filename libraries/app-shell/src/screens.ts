@@ -99,6 +99,11 @@ input:focus { border-color:#4fc2f7; outline:none; }
 .aptag { font-size:10px; padding:1px 7px; border-radius:8px; white-space:nowrap; }
 .aptag.boot { color:#f0c98a; border:1px solid #6b5527; }
 .aptag.live { color:#9fd89f; border:1px solid #2f5233; }
+/* Text-height clickable for inline toggles in kv rows — a .btn.sm would
+   stretch the row. */
+.kvtog { display:inline-block; font-size:11px; color:#8a94a3; border:1px solid #2a313c;
+         border-radius:3px; padding:1px 7px; }
+.kvtog:active { background:#2a4a63; }
 .crumb { display:inline-block; font-size:12px; color:#7fd0ff; margin-bottom:10px; }
 .sharebox { background:#161b23; border:1px solid #2a313c; border-radius:6px;
             padding:10px 14px 2px; margin-top:10px; }
@@ -563,8 +568,8 @@ function create(s: CruiserState): string {
         ${f.gpu === "venus" ? checkRow("Host software Vulkan", "swVk", f.swVk, "expose the host's lavapipe (CPU renderer) to the guest — off keeps software Vulkan on the guest's own lavapipe", aptag("boot")) : ""}
         ${optRow("Viewer", "viewer", f.viewer, [["dmabuf", "dmabuf"], ["rdp", "rdp"]], "set-field", aptag("boot"))}
         <div class="hint">${f.viewer === "dmabuf"
-            ? "QEMU's dma-buf display → viewer-dd: a zero-copy console — needs a venus/virgl GPU"
-            : "xfreerdp into the guest's RDP server — works with any GPU mode"}</div>
+            ? "the guest's display straight on your screen — lower latency than rdp; needs a venus/virgl GPU"
+            : "remote-desktop into the guest — works with any GPU mode"}</div>
         ${optRow("Head mode", "headMode", f.headMode, [["virtual-desktop", "virtual desktop"], ["fullscreen-monitor", "fullscreen monitor"], ["windowed", "windowed"], ["app", "app-only"]], "set-field", aptag("live"))}
         ${vdPicker}
         ${optRow("Persist", "persist", f.persist, [["daemonize", "survives app"], ["owned", "stops with app"], ["ephemeral", "deleted on exit"]], "set-field", aptag("live"))}
@@ -641,13 +646,16 @@ function vmDetail(s: CruiserState): RouteBody {
     ].filter(Boolean).join(" · ");
     // login row — masked until "show" reads the 0600 secrets file into
     // store.pwReveal; user-select:text makes the revealed text copyable
-    // (selection is globally off otherwise).
+    // (selection is globally off otherwise). The toggle is a text-height
+    // chip — a .btn.sm would stretch the whole kv row.
     const pwRev = s.pwReveal?.vm === vm.name ? s.pwReveal.pw : null;
+    const pwTog = (label: string) =>
+        `<span class="kvtog" data-action="vm-pw"${attr("vm", vm.name)}>${esc(label)}</span>`;
     const login = !vm.hasPassword
         ? `${esc(vm.username)} · <span class="meta">no password on record</span>`
         : pwRev !== null
-            ? `${esc(vm.username)} · <b style="user-select:text">${esc(pwRev)}</b> ${btn("hide", "vm-pw", attr("vm", vm.name), "btn sm dim")}`
-            : `${esc(vm.username)} · •••••••• ${btn("show password", "vm-pw", attr("vm", vm.name), "btn sm dim")}`;
+            ? `${esc(vm.username)} · <b style="user-select:text">${esc(pwRev)}</b> ${pwTog("hide")}`
+            : `${esc(vm.username)} · •••••••• ${pwTog("show")}`;
     // #vmtop carries everything that churns on a metrics tick (pill, kv,
     // sparkline band, action buttons); #vmrest holds the slow sections —
     // the share form's inputs only rebuild when share/snapshot state
