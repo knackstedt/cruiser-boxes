@@ -560,6 +560,19 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   (`vm-pw` action → `svc.togglePassword` → `rdpPassword()`) — the plaintext
   sits in `store.pwReveal` (VM-keyed, cleared on setRoute), never in
   VmSummary where it'd be re-read every 3s poll.
+  `ansi.ts` — the log pane's escape renderer: `store.logs.text` keeps the
+  RAW bytes (no stripping in service.refreshLogs — serial + journal text
+  both carry ANSI), `logPaneInner` converts at render time. Full SGR —
+  16/256/truecolor, bold→bright incl. default-fg→bright-white, italic,
+  underline styles via 4:n (+58 color), strike, overline, inverse (swaps
+  the defaults too), conceal, framed, faint (flattened toward bg, no
+  opacity — same subpixel reason as .opt.dim); blink accepted but static.
+  OSC 8 → spans with data-action="log-url" → svc.openUrl (http(s)-only —
+  log text is guest-influenced, same posture as the guest urlopen shim).
+  DEC charset "0" maps to box-drawing Unicode (G0–G3 + SO/SI/LS/SS); all
+  other CSI/OSC/DCS and C0s drop. The palette borrows app colors and the
+  defaults key off .logpre's #c8d2e0/#0b0e13 — if the pane theme changes,
+  re-key FG/BG.
   `term/` — the embedded guest terminal (Term button / `vm-term` action,
   route "term"). Chain: `term-dd` (Rust PTY proxy, `ssh -tt` over the
   hostfwd + cruiser key) ↔ length-prefixed stdio frames

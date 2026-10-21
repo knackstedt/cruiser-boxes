@@ -8,6 +8,7 @@ import { VMS_DIR } from "../../vm-core/src/paths";
 import { DISTROS, supportsKrdp } from "../../provision/src/distros";
 import { DEVTOOLS } from "../../provision/src/packages";
 import { fontFaceCss } from "./fonts";
+import { ansiToHtml } from "./ansi";
 import type { CruiserState, UsbChoice, VmSummary } from "./store";
 
 const CSS = `
@@ -23,7 +24,13 @@ body, .logpre, .logpre * { user-select:auto; }
 html, body { height:100%; }
 body { background:#10141a; color:#e8ecf1; font-family:'Cruiser Sans',sans-serif; overflow:hidden;
        display:flex; flex-direction:column; }
+/* position:relative lifts the topbar to paint level 2 so it hit-tests BEFORE
+   .content — blitz hit_inner doesn't clip hits to the scrollport, so once
+   .content scrolls, clipped rows above it still take clicks over whatever
+   sits there (blitz#1182). Unpositioned siblings lose to the scrollport's
+   scrolled-away children and nav clicks die. */
 .topbar { display:flex; align-items:center; gap:12px; padding:0 18px; height:56px;
+          position:relative;
           background:#161b23; border-bottom:1px solid #2a313c; }
 .brand { display:flex; align-items:center; }
 .brandicon { width:24px; height:24px; display:block; }
@@ -1018,7 +1025,7 @@ function logsView(s: CruiserState): RouteBody {
  *  we want them to keep resolving to #logpane). */
 function logPaneInner(s: CruiserState): string {
     const l = s.logs;
-    const body = l.error ? `<span class="logerr">${esc(l.error)}</span>` : esc(l.text || "(empty)");
+    const body = l.error ? `<span class="logerr">${esc(l.error)}</span>` : ansiToHtml(l.text || "(empty)");
     return `${body}<div class="logend" style="height:1px"></div>`;
 }
 

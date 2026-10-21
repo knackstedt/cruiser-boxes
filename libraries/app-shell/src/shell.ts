@@ -339,6 +339,7 @@ export class CruiserShell {
             void svc.refreshLogs();
         });
         this.host.onAction("log-refresh", () => { void svc.refreshLogs(); });
+        this.host.onAction("log-url", (d) => { if (d.url) void svc.openUrl(String(d.url)); });
         this.host.onAction("status-open", (d) => { if (d.path) void svc.openPath(String(d.path)); });
         this.host.onAction("status-copy", (d) => { if (d.path) void svc.copyText(String(d.path)); });
         this.host.onAction("kv-open", (d) => { if (d.path) void svc.openPath(String(d.path)); });

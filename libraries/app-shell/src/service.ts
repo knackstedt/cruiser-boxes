@@ -408,21 +408,9 @@ export class CruiserService {
 
     // ── logs ──
 
-    /** Serial/qemu logs carry ANSI escapes and stray control bytes — the
-     *  pane is plain text, so strip them or they render as mojibake boxes. */
-    // oxlint-disable no-control-regex — stripping control characters is
-    // the entire point of this function.
-    private stripAnsi(t: string): string {
-        return t
-            .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")   // OSC … BEL/ST
-            .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")          // CSI sequences
-            .replace(/\x1b[@-Z\\-_]/g, "")                      // lone ESC codes
-            .replace(/\r\n?/g, "\n")
-            .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, ""); // C0 controls
-    }
-    // oxlint-enable no-control-regex
-
-    /** Fetch the active log source for the selected VM into store.logs. */
+    /** Fetch the active log source for the selected VM into store.logs.
+     *  Text stays raw — the log pane renders ANSI escapes to styled HTML
+     *  (ansi.ts) and drops non-printing bytes at paint time. */
     async refreshLogs(): Promise<void> {
         const st = this.store.getState();
         const name = st.selectedVm;
@@ -433,7 +421,7 @@ export class CruiserService {
             const files = runnerLogFiles(h.paths);
             const f = files.find((x) => x.id === l.file) ?? files[0]!;
             try {
-                const text = f.exists ? this.stripAnsi(await tailFile(f.path, l.lines)) : "";
+                const text = f.exists ? await tailFile(f.path, l.lines) : "";
                 st.setLogs({
                     files, text,
                     error: f.exists ? null : `${f.name} not created yet`,
@@ -1092,6 +1080,14 @@ export class CruiserService {
         }
         const { spawnChild } = await import("../../sys/src/exec");
         spawnChild("xdg-open", [p], { detached: true }).unref();
+    }
+
+    /** OSC-8 links inside the log pane — scheme-filtered to http(s) like
+     *  the guest urlopen channel; log text is guest-influenced. */
+    async openUrl(u: string): Promise<void> {
+        if (!/^https?:\/\//i.test(u)) return;
+        const { spawnChild } = await import("../../sys/src/exec");
+        spawnChild("xdg-open", [u], { detached: true }).unref();
     }
 
     /** Host clipboard write ("copy path") — the UI toolkit can't own a
