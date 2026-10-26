@@ -324,21 +324,34 @@ ${p.autologin
     // empty-password kdewallet, GNOME a blank-password login keyring.
     const walletSection = !p.autologin ? "" : gnome ? guestGnomeKeyringScript() : guestKwalletScript();
 
-    const lockSection = gnome ? `# no lock/suspend inside the VM (user session bus may not exist pre-login)
-runuser -u "$U" -- env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/"$UUID"/bus \\
-    gsettings set org.gnome.desktop.screensaver lock-enabled false 2>/dev/null || true
-runuser -u "$U" -- env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/"$UUID"/bus \\
-    gsettings set org.gnome.desktop.lockdown disable-lock-screen true 2>/dev/null || true
-runuser -u "$U" -- env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/"$UUID"/bus \\
-    gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type nothing 2>/dev/null || true
-runuser -u "$U" -- env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/"$UUID"/bus \\
-    gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true` : `# no lock/suspend inside the VM — kscreenlocker + powerdevil config
-runuser -u "$U" -- env XDG_RUNTIME_DIR=/run/user/"$UUID" \\
-    kwriteconfig6 --file kscreenlockerrc --group Daemon --key Autolock false 2>/dev/null || true
-runuser -u "$U" -- env XDG_RUNTIME_DIR=/run/user/"$UUID" \\
-    kwriteconfig6 --file kscreenlockerrc --group Daemon --key LockOnResume false 2>/dev/null || true
-runuser -u "$U" -- env XDG_RUNTIME_DIR=/run/user/"$UUID" \\
-    kwriteconfig6 --file powermanagementprofilesrc --group AC --group SuspendSession --key idleTime 0 2>/dev/null || true`;
+    // Sleep/lock off inside the VM — two layers. (1) mask the systemd sleep
+    // targets: sessions running STOCK power settings (GNOME's headless
+    // session runs as the gdm user, the gdm greeter autosuspends too) ask
+    // logind to suspend on idle — the mask makes every userspace suspend a
+    // no-op regardless of whose settings apply. Host pause is QEMU-level
+    // (vm suspend → QMP stop) and unaffected. (2) per-user DE settings for
+    // lock + display-off.
+    const lockSection = `# no guest-initiated suspend — the host owns pause/resume
+systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target 2>/dev/null || true
+${gnome ? `# gsettings needs a session bus, but provision runs before the first
+# RDP login (and the headless session belongs to gdm) — $U usually has no
+# live bus, so the writes used to fail silently. dbus-run-session gives
+# them a private bus; they land in ~/.config/dconf for future sessions.
+GS() { runuser -u "$U" -- dbus-run-session -- gsettings set "$@" 2>/dev/null || true; }
+GS org.gnome.desktop.screensaver lock-enabled false
+GS org.gnome.desktop.lockdown disable-lock-screen true
+GS org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type nothing
+GS org.gnome.desktop.session idle-delay 0` : `# kwriteconfig writes the ini directly — no session needed. Plasma 6
+# keeps power config in powerdevilrc ([<profile>][<action>] groups;
+# AutoSuspendAction 0 = NoAction); powermanagementprofilesrc +
+# SuspendSession was the Plasma 5 layout — kept last for imported p5 disks.
+KW() { runuser -u "$U" -- env XDG_RUNTIME_DIR=/run/user/"$UUID" kwriteconfig6 "$@" 2>/dev/null || true; }
+KW --file kscreenlockerrc --group Daemon --key Autolock false
+KW --file kscreenlockerrc --group Daemon --key LockOnResume false
+KW --file powerdevilrc --group AC --group SuspendAndShutdown --key AutoSuspendAction 0
+KW --file powerdevilrc --group AC --group Display --key TurnOffDisplayWhenIdle false
+KW --file powerdevilrc --group AC --group Display --key DimDisplayWhenIdle false
+KW --file powermanagementprofilesrc --group AC --group SuspendSession --key idleTime 0`}`;
 
     const appSection = `# app channels — flatpak always (store backends plug into it), snapd opt-in
 if command -v flatpak >/dev/null; then
