@@ -23,21 +23,21 @@ export function termPageHtml(fontSize = 13): string {
     const statusPx = Math.max(10, Math.round(fontSize * 11 / 13));
     return `<!doctype html>
 <html><head><meta charset="utf-8"><style>
-html, body { margin:0; padding:0; height:100%; background:#0b0e13; overflow:hidden; }
+html, body { margin:0; padding:0; height:100%; background:#0e0e0e; overflow:hidden; }
 #term { height:100%; width:100%; box-sizing:border-box; padding:8px 10px; }
 #status { position:absolute; left:0; right:0; bottom:0; padding:2px 10px;
-          font:${statusPx}px monospace; color:#5d6775; background:#0b0e13;
-          border-top:1px solid #212933; white-space:nowrap; overflow:hidden; }
+          font:${statusPx}px monospace; color:#666666; background:#0e0e0e;
+          border-top:1px solid #282828; white-space:nowrap; overflow:hidden; }
 ${TERM_CSS}
 /* Themed scrollbar — the stock xterm.css ships none, so the webui backend
    falls back to its unthemed default (a white strip). After TERM_CSS so
    these win. */
-.xterm .xterm-viewport { scrollbar-width: thin; scrollbar-color: #333d4f transparent; }
+.xterm .xterm-viewport { scrollbar-width: thin; scrollbar-color: #3c3c3c transparent; }
 .xterm .xterm-viewport::-webkit-scrollbar { width: 10px; }
 .xterm .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
 .xterm .xterm-viewport::-webkit-scrollbar-thumb {
-    background: #333d4f; border-radius: 5px; border: 2px solid #0b0e13; }
-.xterm .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #46526a; }
+    background: #3c3c3c; border-radius: 5px; border: 2px solid #0e0e0e; }
+.xterm .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #515151; }
 .xterm .xterm-viewport::-webkit-scrollbar-corner { background: transparent; }
 </style></head>
 <body>
@@ -53,9 +53,9 @@ const term = new Terminal({
     fontSize: ${fontSize},
     scrollback: 5000,
     theme: {
-        background: "#0b0e13", foreground: "#c8d2e0",
-        cursor: "#7fd0ff", cursorAccent: "#0b0e13",
-        selectionBackground: "#2e4361",
+        background: "#0e0e0e", foreground: "#d1d1d1",
+        cursor: "#5ee6a8", cursorAccent: "#0e0e0e",
+        selectionBackground: "#2c4e3c",
     },
 });
 const fit = new FitAddon.FitAddon();

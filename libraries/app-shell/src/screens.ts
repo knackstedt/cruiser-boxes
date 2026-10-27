@@ -22,7 +22,7 @@ const CSS = `
 * { user-select:none; }
 body, .logpre, .logpre * { user-select:auto; }
 html, body { height:100%; }
-body { background:#10141a; color:#e8ecf1; font-family:'Cruiser Sans',sans-serif; overflow:hidden;
+body { background:#141414; color:#ececec; font-family:'Cruiser Sans',sans-serif; overflow:hidden;
        display:flex; flex-direction:column; }
 /* position:relative lifts the topbar to paint level 2 so it hit-tests BEFORE
    .content — blitz hit_inner doesn't clip hits to the scrollport, so once
@@ -31,20 +31,20 @@ body { background:#10141a; color:#e8ecf1; font-family:'Cruiser Sans',sans-serif;
    scrolled-away children and nav clicks die. */
 .topbar { display:flex; align-items:center; gap:12px; padding:0 18px; height:56px;
           position:relative;
-          background:#161b23; border-bottom:1px solid #2a313c; }
+          background:#1b1b1b; border-bottom:1px solid #303030; }
 .brand { display:flex; align-items:center; }
 .brandicon { width:24px; height:24px; display:block; }
 .nav { display:flex; gap:4px; }
-.nav .item { padding:8px 15px; border-radius:4px; font-size:13px; color:#8a94a3; cursor:default; }
-.nav .item.on { background:#2e4361; color:#7fd0ff; font-weight:bold; }
-.nav .item:hover { color:#c8d2e0; }
+.nav .item { padding:8px 15px; border-radius:4px; font-size:13px; color:#939393; cursor:default; }
+.nav .item.on { background:#2c4e3c; color:#5ee6a8; font-weight:bold; }
+.nav .item:hover { color:#d1d1d1; }
 /* scrollbar-color styles the overlay thumb (blitz-paint "scrollbars"
    feature) — transparent track, slate thumb; thumb fades in on scroll. */
-.content { padding:20px; flex:1; overflow-y:scroll; scrollbar-color:#5d6a80 transparent; }
+.content { padding:20px; flex:1; overflow-y:scroll; scrollbar-color:#696969 transparent; }
 .h1 { font-size:20px; font-weight:bold; margin-bottom:14px; }
-.h2 { font-size:14px; font-weight:bold; margin:18px 0 8px; color:#8a94a3; }
+.h2 { font-size:14px; font-weight:bold; margin:18px 0 8px; color:#939393; }
 /* checklist group headers — sit above an .opts block inside form rows */
-.h3 { font-size:12px; font-weight:bold; color:#5d6775; margin:12px 0 4px 140px; }
+.h3 { font-size:12px; font-weight:bold; color:#666666; margin:12px 0 4px 140px; }
 .h3 .opt { margin-left:8px; }
 .vmlist { display:flex; flex-direction:column; gap:8px; }
 .vmlist-head { display:flex; align-items:center; justify-content:space-between;
@@ -55,59 +55,59 @@ body { background:#10141a; color:#e8ecf1; font-family:'Cruiser Sans',sans-serif;
 .vmfilter input { width:180px; padding:6px 10px; font-size:13px; }
 .vmrow { display:flex; align-items:center; flex-wrap:wrap; gap:8px 14px;
          padding:11px 16px;
-         background:#161b23; border:1px solid #2a313c; border-radius:6px; }
+         background:#1b1b1b; border:1px solid #303030; border-radius:6px; }
 /* 240px basis: below that the pill/buttons wrap to a second line instead
    of crushing the spec text into one-word-per-line. */
 .vmrow .grow { flex:1 1 240px; min-width:0; }
 .vmbtns { display:flex; align-items:center; flex-wrap:wrap; row-gap:4px; }
 .vmname { font-size:15px; font-weight:bold; }
-.vmspecs { font-size:12px; color:#8a94a3; margin-top:3px; }
-.vmmode { font-size:12px; color:#5d6775; margin-top:2px; }
-.vmdisk { font-size:12px; color:#5d6775; margin-top:2px; }
+.vmspecs { font-size:12px; color:#939393; margin-top:3px; }
+.vmmode { font-size:12px; color:#666666; margin-top:2px; }
+.vmdisk { font-size:12px; color:#666666; margin-top:2px; }
 .sparks { display:flex; gap:16px; margin:0 4px; flex-wrap:wrap; }
 /* five sparks don't fit beside the buttons — running rows get a full-width
    stats band under the name/spec/pill/button line. */
 .vmrow > .sparks { flex:1 1 100%; margin:4px 0 0; padding-top:8px;
-                   border-top:1px solid #212933; justify-content:flex-end; }
+                   border-top:1px solid #282828; justify-content:flex-end; }
 .spark { display:flex; flex-direction:column; align-items:flex-end; gap:3px; }
 .spbars { display:flex; align-items:flex-end; gap:1px; height:24px; }
-.spb { width:2px; border-radius:1px; background:#212933; }
-.spark.cpu .spb.v { background:#4fc2f7; }
+.spb { width:2px; border-radius:1px; background:#282828; }
+.spark.cpu .spb.v { background:#5ee6a8; }
 .spark.mem .spb.v { background:#9fd89f; }
 .spark.disk .spb.v { background:#f0c98a; }
 .spark.net .spb.v { background:#b39af0; }
 .spark.gpu .spb.v { background:#7fd0b0; }
-.splbl { font-size:10px; color:#5d6775; white-space:nowrap; }
+.splbl { font-size:10px; color:#666666; white-space:nowrap; }
 .pill { padding:4px 11px; border-radius:11px; font-size:12px; white-space:nowrap; }
 .pill.running { background:#1d3a24; color:#9fd89f; }
-.pill.stopped { background:#212933; color:#8a94a3; }
+.pill.stopped { background:#282828; color:#939393; }
 .pill.other { background:#3a2e1d; color:#f0c98a; }
-.meta { font-size:12px; color:#5d6775; }
-.empty { padding:40px; text-align:center; color:#5d6775; font-size:14px;
-         border:1px dashed #2a313c; border-radius:8px; }
+.meta { font-size:12px; color:#666666; }
+.empty { padding:40px; text-align:center; color:#666666; font-size:14px;
+         border:1px dashed #303030; border-radius:8px; }
 .btn { display:inline-block; padding:8px 15px; border-radius:4px; font-size:13px;
-       background:#1d3547; color:#7fd0ff; border:1px solid #4fc2f7; margin-right:6px; }
+       background:#1b3a2c; color:#5ee6a8; border:1px solid #5ee6a8; margin-right:6px; }
 .btn.sm { padding:4px 10px; font-size:12px; margin-right:5px; }
-.btn:hover { background:#2a4a63; }
-.btn:active { background:#2a4a63; }
+.btn:hover { background:#2a5240; }
+.btn:active { background:#2a5240; }
 .btn.warn { background:#3a2530; color:#f08aa8; border-color:#a04868; }
 .btn.warn:hover { background:#4a2e3c; }
-.btn.dim { background:#161b23; color:#8a94a3; border-color:#2a313c; }
-.btn.dim:hover { background:#1d232d; border-color:#4a566a; }
+.btn.dim { background:#1b1b1b; color:#939393; border-color:#303030; }
+.btn.dim:hover { background:#222222; border-color:#555555; }
 /* Cap form rows so apply-mode tags can pin to a consistent right column —
    without a bound they scatter wherever each row's content happens to end. */
 .row { display:flex; gap:16px; align-items:center; margin-bottom:10px; max-width:1060px; }
-.lbl { width:140px; font-size:13px; color:#8a94a3; }
-input { background:#0b0e13; border:1px solid #2a313c; border-radius:4px; color:#e8ecf1;
+.lbl { width:140px; font-size:13px; color:#939393; }
+input { background:#0e0e0e; border:1px solid #303030; border-radius:4px; color:#ececec;
         padding:8px 10px; font-size:14px; width:220px; }
-input:focus { border-color:#4fc2f7; outline:none; }
+input:focus { border-color:#5ee6a8; outline:none; }
 .opts { display:flex; gap:6px; }
 .opts.wrap { flex-wrap:wrap; max-width:680px; }
-.opt { padding:7px 13px; border-radius:4px; font-size:13px; border:1px solid #2a313c;
-       background:#161b23; color:#8a94a3; }
-.opt.on { background:#2e4361; color:#7fd0ff; border-color:#4fc2f7; font-weight:bold; }
-.opt:hover { border-color:#4a566a; color:#aab4c2; }
-.opt.on:hover { color:#7fd0ff; }
+.opt { padding:7px 13px; border-radius:4px; font-size:13px; border:1px solid #303030;
+       background:#1b1b1b; color:#939393; }
+.opt.on { background:#2c4e3c; color:#5ee6a8; border-color:#5ee6a8; font-weight:bold; }
+.opt:hover { border-color:#555555; color:#b3b3b3; }
+.opt.on:hover { color:#5ee6a8; }
 /* Armed destructive chips (share/fwd "remove?") — the warn palette, same as
    "Confirm kill". Accent-blue read as a selection, not a danger state. */
 .opt.armed { background:#3a2530; color:#f08aa8; border-color:#a04868; }
@@ -120,7 +120,7 @@ input:focus { border-color:#4fc2f7; outline:none; }
 /* Flattened 45%-opacity equivalents — a real opacity layer would rasterize
    the label onto a transparent backdrop where LCD subpixel blending leaves
    colored fringes. */
-.opt.dim { background:#161b23; color:#4a515d; border-color:#1f252e; }
+.opt.dim { background:#1b1b1b; color:#505050; border-color:#242424; }
 .opt.sm { padding:4px 9px; font-size:12px; }
 /* Apply-mode tags on the edit form while the VM runs: boot = frozen into
    QEMU's launch argv (needs restart), live = takes effect immediately. */
@@ -129,43 +129,43 @@ input:focus { border-color:#4fc2f7; outline:none; }
 .aptag.live { color:#9fd89f; border:1px solid #2f5233; }
 /* Text-height clickable for inline toggles in kv rows — a .btn.sm would
    stretch the row. */
-.kvtog { display:inline-block; font-size:11px; color:#8a94a3; border:1px solid #2a313c;
+.kvtog { display:inline-block; font-size:11px; color:#939393; border:1px solid #303030;
          border-radius:3px; padding:1px 7px; }
-.kvtog:hover { border-color:#4a566a; color:#c8d2e0; }
-.kvtog:active { background:#2a4a63; }
-.crumb { display:inline-block; font-size:12px; color:#7fd0ff; margin-bottom:10px; }
+.kvtog:hover { border-color:#555555; color:#d1d1d1; }
+.kvtog:active { background:#2a5240; }
+.crumb { display:inline-block; font-size:12px; color:#5ee6a8; margin-bottom:10px; }
 .crumb:hover { text-decoration:underline; }
-.sharebox { background:#161b23; border:1px solid #2a313c; border-radius:6px;
+.sharebox { background:#1b1b1b; border:1px solid #303030; border-radius:6px;
             padding:10px 14px 2px; margin-top:10px; }
-.hint { font-size:12px; color:#5d6775; margin:-4px 0 10px 156px; max-width:560px; line-height:1.45; }
+.hint { font-size:12px; color:#666666; margin:-4px 0 10px 156px; max-width:560px; line-height:1.45; }
 .hint.warn { color:#f0c98a; }
-.hostsum { font-size:13px; color:#8a94a3; background:#161b23; border:1px solid #2a313c;
+.hostsum { font-size:13px; color:#939393; background:#1b1b1b; border:1px solid #303030;
            border-radius:6px; padding:9px 12px; margin-bottom:14px; }
-.hostsum b { color:#e8ecf1; }
+.hostsum b { color:#ececec; }
 .vdgrid { display:grid; gap:6px; }
 .spinwrap { display:flex; flex-direction:column; align-items:center; justify-content:center;
             height:540px; gap:18px; }
-.spinglyph { font-size:64px; color:#7fd0ff; }
-.spinlbl { font-size:14px; color:#8a94a3; max-width:460px; text-align:center; line-height:1.5; }
+.spinglyph { font-size:64px; color:#5ee6a8; }
+.spinlbl { font-size:14px; color:#939393; max-width:460px; text-align:center; line-height:1.5; }
 .kv { display:grid; grid-template-columns:160px 1fr; gap:7px 16px; font-size:13px;
       margin-bottom:16px; }
-.kv .k { color:#8a94a3; }
+.kv .k { color:#939393; }
 /* Facts are things users copy — paths, ports, ids. Keys stay unselectable. */
 .kv div { user-select:text; }
 .kv .k { user-select:none; }
 /* A group divider for the lower half of the detail page — the share/fwd/
    mount/snapshot/portable sections are configuration, not live state. */
-.sech { font-size:12px; color:#8a94a3; font-weight:bold; margin:22px 0 4px;
-        padding-bottom:6px; border-bottom:1px solid #212933; }
+.sech { font-size:12px; color:#939393; font-weight:bold; margin:22px 0 4px;
+        padding-bottom:6px; border-bottom:1px solid #282828; }
 .docrow { display:flex; gap:10px; padding:9px 12px; font-size:13px; align-items:center; }
 .docrow .ok { color:#9fd89f; font-weight:bold; width:40px; }
 .docrow .bad { color:#f08aa8; font-weight:bold; width:40px; }
-.docrow .fix { color:#5d6775; font-size:12px; }
+.docrow .fix { color:#666666; font-size:12px; }
 .snap { display:inline-block; padding:5px 11px; margin:0 0 6px 0; font-size:12px;
-        background:#212933; border-radius:11px 0 0 11px; color:#8a94a3; }
+        background:#282828; border-radius:11px 0 0 11px; color:#939393; }
 .snap.armed { background:#3a2e1d; color:#f0c98a; }
 .snapdel { display:inline-block; padding:5px 9px; margin:0 8px 6px 0; font-size:12px;
-        background:#212933; border-radius:0 11px 11px 0; color:#5d6775; }
+        background:#282828; border-radius:0 11px 11px 0; color:#666666; }
 .snapdel.armed { background:#3a1d1d; color:#f08aa8; }
 .logbar { display:flex; align-items:center; gap:10px; margin-bottom:12px; flex-wrap:wrap; }
 /* On the logs route the scrollpane is a SIBLING of .content (see RouteParts)
@@ -175,29 +175,29 @@ input:focus { border-color:#4fc2f7; outline:none; }
 .content.logtop { flex:0 1 auto; max-height:62%; }
 .logpre { flex:1; min-height:80px; margin:0 20px 12px;
           font-family:'Cruiser Mono',monospace; font-size:11px; line-height:1.5;
-          background:#0b0e13; border:1px solid #2a313c; border-radius:6px;
+          background:#0e0e0e; border:1px solid #303030; border-radius:6px;
           padding:10px 12px; overflow-y:scroll;
-          scrollbar-color:#5d6a80 transparent; white-space:pre-wrap;
-          word-break:break-all; color:#c8d2e0; }
-.logmeta { font-size:11px; color:#5d6775; }
+          scrollbar-color:#696969 transparent; white-space:pre-wrap;
+          word-break:break-all; color:#d1d1d1; }
+.logmeta { font-size:11px; color:#666666; }
 .logerr { color:#f08aa8; }
-.unitlist { max-height:104px; overflow-y:scroll; scrollbar-color:#5d6a80 transparent;
+.unitlist { max-height:104px; overflow-y:scroll; scrollbar-color:#696969 transparent;
             margin:0 0 10px 140px; }
 .footer { height:28px; flex-shrink:0;
-          background:#161b23; border-top:1px solid #2a313c; }
+          background:#1b1b1b; border-top:1px solid #303030; }
 /* Status notifier — one severity-colored bar (dot + single-line text). */
 .fbar { display:flex; align-items:center; gap:9px; height:100%; padding:0 18px;
-        font-size:12px; color:#5d6775; }
-.fbar .fdot { width:7px; height:7px; border-radius:4px; background:#4a515d; flex-shrink:0; }
+        font-size:12px; color:#666666; }
+.fbar .fdot { width:7px; height:7px; border-radius:4px; background:#505050; flex-shrink:0; }
 .fbar.warn { color:#f0c98a; }
 .fbar.warn .fdot { background:#f0c98a; }
 .fbar.err { color:#f0b8c8; background:#331e27; }
 .fbar.err .fdot { background:#f08aa8; }
 .fbar .ftext { flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
-.fbar .fbtn { flex-shrink:0; padding:1px 8px; border:1px solid #4a515d;
+.fbar .fbtn { flex-shrink:0; padding:1px 8px; border:1px solid #505050;
               border-radius:3px; font-size:11px; }
-.fbar .fbtn:hover { border-color:#7fd0ff; color:#7fd0ff; }
-.fbar .fbtn:active { background:#2a4a63; }
+.fbar .fbtn:hover { border-color:#5ee6a8; color:#5ee6a8; }
+.fbar .fbtn:active { background:#2a5240; }
 /* Term route: the .content scrollport becomes a fixed column — the head
    strip stays put and #termbox fills the rest. The embedded webui view
    composites over #termbox's rect (TermManager probes it post-layout). */
@@ -205,8 +205,8 @@ input:focus { border-color:#4fc2f7; outline:none; }
 .termhead { display:flex; align-items:center; gap:12px; margin-bottom:10px;
             flex-shrink:0; }
 .termhead .crumb { margin-bottom:0; }
-#termbox { flex:1; min-height:80px; background:#0b0e13;
-           border:1px solid #2a313c; border-radius:6px; }
+#termbox { flex:1; min-height:80px; background:#0e0e0e;
+           border:1px solid #303030; border-radius:6px; }
 `;
 
 function esc(s: string): string {
@@ -661,7 +661,7 @@ function create(s: CruiserState): string {
         ${hostsum}
         ${importSection}
         ${editing
-            ? `<div class="row"><div class="lbl">Name</div><div class="meta" style="color:#e8ecf1">${esc(s.editVm ?? "")}</div></div>
+            ? `<div class="row"><div class="lbl">Name</div><div class="meta" style="color:#ececec">${esc(s.editVm ?? "")}</div></div>
         <div class="row"><div class="lbl">Description</div>
             <input data-field="vm-desc" value="${esc(s.vmDesc)}" style="width:320px">${aptag("live")}</div>
         <div class="hint">exported with the config — a one-liner like "work dev box, cuda testing".</div>`

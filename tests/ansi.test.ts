@@ -51,10 +51,10 @@ describe("ansiToHtml", () => {
     });
 
     test("inverse swaps fg/bg including defaults", () => {
-        expect(ansiToHtml(`${E}[7mx`)).toBe('<span style="color:#0b0e13;background:#c8d2e0">x</span>');
-        expect(ansiToHtml(`${E}[7;31mx`)).toBe('<span style="color:#0b0e13;background:#f08aa8">x</span>');
+        expect(ansiToHtml(`${E}[7mx`)).toBe('<span style="color:#0e0e0e;background:#d1d1d1">x</span>');
+        expect(ansiToHtml(`${E}[7;31mx`)).toBe('<span style="color:#0e0e0e;background:#f08aa8">x</span>');
         expect(ansiToHtml(`${E}[7mx${E}[27my`))
-            .toBe('<span style="color:#0b0e13;background:#c8d2e0">x</span>y');
+            .toBe('<span style="color:#0e0e0e;background:#d1d1d1">x</span>y');
     });
 
     test("conceal paints fg = bg", () => {
@@ -103,7 +103,7 @@ describe("ansiToHtml", () => {
     test("mixed real-world line", () => {
         const s = ansiToHtml(`${E}[32m[  OK  ]${E}[0m Started ${E}[1mnginx${E}[0m.`);
         expect(s).toBe('<span style="color:#9fd89f">[  OK  ]</span> Started '
-            + '<span style="color:#f2f5f9;font-weight:bold">nginx</span>.');
+            + '<span style="color:#f5f5f5;font-weight:bold">nginx</span>.');
     });
 });
 

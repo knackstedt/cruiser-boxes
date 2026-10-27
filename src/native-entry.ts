@@ -64,7 +64,7 @@ mark("host");
 const { surface, device, window: win } = host;
 const gpuCtx = surface.getContext("webgpu")!;
 const format = host.gpu.getPreferredCanvasFormat() as GPUTextureFormat;
-const CLEAR = { r: 0.063, g: 0.078, b: 0.102, a: 1 };
+const CLEAR = { r: 0.078, g: 0.078, b: 0.078, a: 1 };
 
 const bus = new InputBus();
 const store = createCruiserStore();

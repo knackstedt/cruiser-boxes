@@ -4,17 +4,17 @@
 // the pane converts them at render time.
 // ============================================================================
 
-const FG = "#c8d2e0";            // .logpre foreground
-const BG = "#0b0e13";            // .logpre background
-const LINK = "#7fd0ff";          // hyperlink accent
+const FG = "#d1d1d1";            // .logpre foreground
+const BG = "#0e0e0e";            // .logpre background
+const LINK = "#5ee6a8";          // hyperlink accent
 
 // Palette indices 0–15, tuned to the pane's dark theme — values borrowed
 // from the app palette so log colors read like the rest of the UI.
 const BASE16 = [
-    "#4a515d", "#f08aa8", "#9fd89f", "#f0c98a",
-    "#7fd0ff", "#b39af0", "#7fd0b0", "#c8d2e0",
-    "#5d6775", "#ff9ec0", "#b5e8b5", "#ffd9a3",
-    "#9cddff", "#ceb7f5", "#9fe8cf", "#f2f5f9",
+    "#505050", "#f08aa8", "#9fd89f", "#f0c98a",
+    "#5ee6a8", "#b39af0", "#7fd0b0", "#d1d1d1",
+    "#666666", "#ff9ec0", "#b5e8b5", "#ffd9a3",
+    "#8ff0c6", "#ceb7f5", "#9fe8cf", "#f5f5f5",
 ];
 
 // DEC special-graphics set (charset "0") mapped to Unicode — serial boot
