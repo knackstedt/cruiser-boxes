@@ -31,8 +31,12 @@ export class InputBus implements RendererInputBus {
     /** Whether the most recent pointerdown was consumed — mirrors the
      *  engine bus's pointerDownConsumed (pointer-lock layer reads it). */
     private pdownConsumed = false;
+    private wheelConsumed = false;
+    private kdownConsumed = false;
 
     wasPointerDownConsumed(): boolean { return this.pdownConsumed; }
+    wasWheelConsumed(): boolean { return this.wheelConsumed; }
+    wasKeyDownConsumed(): boolean { return this.kdownConsumed; }
 
     private add(kind: string, fn: (e: never, c: InputEventControl) => void, prio = 100) {
         const s: Sub = { fn, prio, seq: this.seq++ };
@@ -73,9 +77,13 @@ export class InputBus implements RendererInputBus {
         this.pdownConsumed = this.consumed;
     }
     pointerUp(x: number, y: number, button = 0) { this.dispatch("pup", { clientX: x, clientY: y, button }); }
-    wheel(x: number, y: number, dx: number, dy: number) { this.dispatch("wheel", { clientX: x, clientY: y, deltaX: dx, deltaY: dy }); }
+    wheel(x: number, y: number, dx: number, dy: number) {
+        this.dispatch("wheel", { clientX: x, clientY: y, deltaX: dx, deltaY: dy });
+        this.wheelConsumed = this.consumed;
+    }
     key(down: boolean, key: string, code: string, mods?: { ctrlKey?: boolean; shiftKey?: boolean; altKey?: boolean; metaKey?: boolean }) {
         this.dispatch(down ? "kdown" : "kup", { key, code, ...mods });
+        if (down) this.kdownConsumed = this.consumed;
     }
     drag(_d: DragDelta) { /* synthetic drags not used */ }
 }
