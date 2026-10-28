@@ -1,6 +1,6 @@
 {
   "name": "cruiser",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "productName": "Cruiser",
   "description": "WinBoat-style QEMU/KVM VM manager for Linux guests, on the DownDraft native runtime.",
   "author": "Andrew G. Knackstedt",
