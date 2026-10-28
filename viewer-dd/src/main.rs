@@ -2073,7 +2073,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                         s.seen = true;
                         if s.on != on { s.on = on; cur_dirty = true; }
                     }
-                    if captured && on {
+                    if captured && pgrabbed && on {
                         // Shadow the guest cursor: warp the host pointer to
                         // the guest's own cursor spot (console px → window
                         // px through the same fit the input map inverts)
@@ -2081,7 +2081,12 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                         // where the guest believes the pointer is. >2px
                         // gate: don't fight per-report jitter. Hidden-
                         // cursor reports skip this — parking is the
-                        // recenter check's job.
+                        // recenter check's job. The pgrabbed gate matters:
+                        // captured-but-unconfined means the confine grab
+                        // lost a race (retried above) and the host pointer
+                        // is roaming the desktop — warping then teleports
+                        // the user's cursor into window coords on every
+                        // guest report, offscreen window included.
                         let (ww, wh) = win.get_size();
                         let rects = head_rects(&heads, span.as_deref(), ww as i32, wh as i32);
                         if let Some(&(rx, ry, rw, rh)) = rects.get(ci) {
