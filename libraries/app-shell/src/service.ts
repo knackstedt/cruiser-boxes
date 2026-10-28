@@ -1090,18 +1090,33 @@ export class CruiserService {
         spawnChild("xdg-open", [u], { detached: true }).unref();
     }
 
-    /** Host clipboard write ("copy path") — the UI toolkit can't own a
-     *  selection, so shell out: wl-copy on Wayland, xclip/xsel on X11. */
+    /** Host clipboard write ("copy path") — the native window owns the
+     *  selection itself (arboard behind dd_window_* FFI); wl-copy/xclip/xsel
+     *  stay as fallback for hosts where that path is absent or dead. */
     async copyText(text: string): Promise<void> {
         const st = this.store.getState();
-        const tool = async (bin: string, args: string[]) =>
-            !!(await which(bin)) &&
-            await run(bin, args, { input: text, timeoutMs: 8_000 }).then(() => true, () => false);
-        const x11 = () => tool("xclip", ["-selection", "clipboard"])
-            .then((ok) => ok || tool("xsel", ["--clipboard", "--input"]));
-        const ok = process.env.WAYLAND_DISPLAY
-            ? await tool("wl-copy", []) || await x11()
-            : await x11() || await tool("wl-copy", []);
+        const nw = (globalThis as {
+            __nativeWindow?: { setClipboardText?: (t: string) => void; getClipboardText?: () => string };
+        }).__nativeWindow;
+        let ok = false;
+        try {
+            nw?.setClipboardText?.(text);
+            // a dead arboard init is a silent no-op inside the FFI — read
+            // back to confirm the selection took (its buffer is 4K, so
+            // longer writes just trust the call).
+            ok = !!nw?.setClipboardText
+                && (text.length >= 4000 || nw?.getClipboardText?.() === text);
+        } catch { /* no window / FFI error — shell tools below */ }
+        if (!ok) {
+            const tool = async (bin: string, args: string[]) =>
+                !!(await which(bin)) &&
+                await run(bin, args, { input: text, timeoutMs: 8_000 }).then(() => true, () => false);
+            const x11 = () => tool("xclip", ["-selection", "clipboard"])
+                .then((o) => o || tool("xsel", ["--clipboard", "--input"]));
+            ok = process.env.WAYLAND_DISPLAY
+                ? await tool("wl-copy", []) || await x11()
+                : await x11() || await tool("wl-copy", []);
+        }
         st.setStatus(ok ? "path copied to clipboard"
             : "no clipboard tool found (install wl-clipboard or xclip)", ok ? "info" : "warn");
     }
