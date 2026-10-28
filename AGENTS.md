@@ -260,6 +260,13 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   GL worker coalesces the burst into a single paced (~166Hz) present via
   eglSwapBuffersWithDamageKHR (rects are BOTTOM-left surface coords per
   the KHR spec — flip y) + EGL_EXT_buffer_age-scissored partial repaints.
+  Presents are ONLY damage-driven — the GL worker parks on the job
+  channel, so a VD switch/iconify that unmaps the window would leave the
+  remapped (fresh, BLACK) pixmap up forever while the guest is idle:
+  the xdpy drain selects Exposure|VisibilityChange|StructureNotify on
+  xwin (0x38003) and turns Expose/VisibilityNotify/MapNotify into
+  XJob::Repaint — a forced full-path repaint off the held EGLImages,
+  no QEMU traffic needed.
   ScanoutDMABUF2's y0_top is COUNTERINTUITIVE: buffers arriving
   y0_top=false sample upright ONLY with the v-flip (v_bottom=(y+h)/bh);
   treating the flag literally renders every head upside-down (observed on
@@ -331,9 +338,12 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   abort-gen/ungrab-gen are AtomicU64 generation counters (a swap() flag
   races the multiple producers), SIGUSR1 bumps abort_gen
   (pkill -USR1 -x viewer-dd — no keyboard needed), ctrl+alt+shift+
-  right-click aborts via the pointer-grab path, and any grab held
-  >60s force-releases as a heartbeat so a wedged grab can't strand
-  the host. Focus loss
+  right-click aborts via the pointer-grab path, holding CapsLock ≥5s
+  while a grab/capture is live fires the ungrab path (xwin-key-stream
+  hold timing — needs no combo and no keyboard grab, only focus;
+  cleared on unfocus, same-timestamp peek eats autorepeat), and any
+  grab held >60s force-releases as a heartbeat so a wedged grab can't
+  strand the host. Focus loss
   replays key-ups for every qnum the guest still sees held plus button
   releases — the release half of a WM-consumed combo otherwise leaves
   modifiers stuck down guest-side. The drain is UNCONDITIONAL while
@@ -392,7 +402,11 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   the guest keeps a cursor, each listener MouseSet(x,y,on) report is
   warped to (console px → window px through the same head_rects +
   fit_viewport the abs map inverts) so the guest-sprite X cursor sits
-  where the guest thinks the pointer is; hidden-cursor reports don't
+  where the guest thinks the pointer is — but ONLY while pgrabbed:
+  captured-but-unconfined means the confine grab lost a race and the
+  host pointer is roaming, so warping then teleports the user's cursor
+  into window coords on every report (offscreen window included);
+  hidden-cursor reports don't
   warp — the pointer re-parks at window center when it drifts >35% out
   (confined at an edge = no delta room). 'auto' engages only on a seen-visible → now-
   hidden cursor transition while focused AND once the hidden cursor has

@@ -57,6 +57,13 @@ enum XJob {
     /// Damage rect on a console (scanout px) — QEMU emits one UpdateDMABUF
     /// per damaged region, so a frame's damage arrives as a serialized burst.
     Nudge(usize, i32, i32, i32, i32),
+    /// Host-side repaint request (remap/expose/unobscure). The present path
+    /// is damage-driven, but the X server discards an unmapped window's
+    /// backing — VD switches unmap us, and the remapped window's fresh
+    /// pixmap composites BLACK until the next swap, which an idle guest
+    /// never schedules. Re-rasterizes from the held EGLImages — no QEMU
+    /// traffic needed.
+    Repaint,
 }
 
 /// Guest hardware cursor pushed by QEMU over the listener — CursorDefine
@@ -1054,6 +1061,7 @@ enum RelMode { Off, Auto, Always }
 fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                   console_paths: Vec<String>, title: &str, mut w: usize, mut h: usize,
                   jrx: std::sync::mpsc::Receiver<XJob>,
+                  jtx: std::sync::mpsc::Sender<XJob>,
                   crx: std::sync::mpsc::Receiver<CurJob>,
                   heads: std::sync::Arc<Heads>, span: Option<Span>,
                   esc: std::sync::Arc<EscState>, rel_mode: RelMode,
@@ -1140,7 +1148,11 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                     // Buttons ride the pointer grab while grabbed; while
                     // ungrabbed L/M/R + wheel are minifb-polled and nav
                     // buttons 8/9 arrive via passive grabs (below).
-                    XSelectInput(d, xid, 0x3); // KeyPress|KeyRelease
+                    // + Exposure|VisibilityChange|StructureNotify: a VD
+                    // switch unmaps us and the remapped window needs a
+                    // repaint kick (damage-driven presents never fire on
+                    // their own) — the drain turns those into XJob::Repaint.
+                    XSelectInput(d, xid, 0x38003); // Key|Exposure|Visibility|StructureNotify
                     XFlush(d);
                     xdpy = d;
                 }
@@ -1167,9 +1179,12 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                 // window-space damage of recent swaps — buffer-age partial repaints
                 let mut hist: std::collections::VecDeque<Vec<WRect>> =
                     std::collections::VecDeque::new();
+                // remap/expose → full repaint next present (see XJob::Repaint)
+                let mut force_full = false;
                 let pump = |first: Option<XJob>,
                                 latest: &mut Vec<Option<ScanFd>>,
-                                damage: &mut Vec<Vec<WRect>>| {
+                                damage: &mut Vec<Vec<WRect>>,
+                                force_full: &mut bool| {
                     for j in first.into_iter().chain(std::iter::from_fn(|| jrx.try_recv().ok())) {
                         match j {
                             XJob::Fd(s) => {
@@ -1187,6 +1202,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                             XJob::Nudge(ci, x, y, w, h) => {
                                 if ci < nheads { add_rect(&mut damage[ci], (x, y, w, h)); }
                             }
+                            XJob::Repaint => *force_full = true,
                         }
                     }
                 };
@@ -1226,7 +1242,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                     }
                     // drain the burst — QEMU emits one UpdateDMABUF call per
                     // damage rect, serialized by its guest-side gl-block
-                    pump(Some(first), &mut latest, &mut damage);
+                    pump(Some(first), &mut latest, &mut damage, &mut force_full);
                     let mut imported = import_all(&mut latest, &mut xegl);
                     // windowed single-head: track the guest resolution like
                     // the old per-console windows did — spans are
@@ -1238,7 +1254,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                             egl::x11_resize(&xegl, ext.0.max(1) as u32, ext.1.max(1) as u32);
                         }
                     }
-                    let dirty = damage.iter().any(|d| !d.is_empty());
+                    let dirty = force_full || damage.iter().any(|d| !d.is_empty());
                     if dirty {
                         // ~166Hz present cap: QEMU serializes a frame's damage
                         // rects over separate calls — absorbing stragglers here
@@ -1248,12 +1264,14 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                         if let Some(rem) = PACE.checked_sub(last_swap.elapsed()) {
                             if !rem.is_zero() {
                                 std::thread::sleep(rem);
-                                pump(None, &mut latest, &mut damage);
+                                pump(None, &mut latest, &mut damage, &mut force_full);
                                 imported = import_all(&mut latest, &mut xegl) || imported;
                             }
                         }
                         let (ww, wh) = egl::x11_geom(&xegl);
-                        let resized = (ww, wh) != last_geom;
+                        // a remap drops the presented image entirely — run
+                        // the same full-repaint path as a resize
+                        let resized = (ww, wh) != last_geom || std::mem::take(&mut force_full);
                         last_geom = (ww, wh);
                         let rects = head_rects(&gh, gspan.as_deref(), ww, wh);
                         // scanout-px damage → window px through the same
@@ -1503,6 +1521,12 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     let mut rel_override: Option<bool> = None;
     let mut rel_hold_off = false;
     let mut seen_rel = 0u64;
+    // Hold-CapsLock ≥5s = the ungrab escape — a hatch needing no combo,
+    // only the focused key stream. A sub-threshold release is an
+    // ordinary caps toggle forwarded to the guest like any key.
+    const CAPS_HOLD_MS: u128 = 5000;
+    let caps_xkey = xkey_for(0x3a); // CAPS_LOCK qnum — always Some
+    let mut caps_down_at: Option<std::time::Instant> = None;
     let mut rel_last: Option<(f32, f32)> = None; // last pointer sample (delta baseline)
     let mut rel_acc = (0.0f32, 0.0f32);          // fractional deltas pending send
     let mut rel_send = std::time::Instant::now() - std::time::Duration::from_secs(1);
@@ -1528,7 +1552,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     while win.is_open() {
         win.update(); // events only — EGL renders into this window directly
         let active = win.is_active();
-        if !active { grab_hold_off = false; rel_hold_off = false; rel_override = None; hide_travel = 0.0; }
+        if !active { grab_hold_off = false; rel_hold_off = false; rel_override = None; hide_travel = 0.0; caps_down_at = None; }
         if !xdpy.is_null() {
             if SIG_ABORT.swap(false, Ordering::Relaxed) {
                 // panic path — needs no keyboard; the generation bump
@@ -1649,6 +1673,17 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                     if captured { "release" } else { "capture" });
             }
         }
+        // Hold-caps escape: ≥CAPS_HOLD_MS held while a grab/capture is
+        // live → the ungrab path (drops keyboard grab, pointer confine,
+        // and rel capture until the next focus cycle). Gated on a held
+        // state so a long caps press with nothing grabbed stays a plain
+        // toggle.
+        if caps_down_at.is_some_and(|t| t.elapsed().as_millis() >= CAPS_HOLD_MS)
+            && (grabbed || pgrabbed || captured) {
+            caps_down_at = None;
+            esc.ungrab_gen.fetch_add(1, Ordering::Relaxed);
+            eprintln!("[+{}s][esc] caps-lock held ≥{CAPS_HOLD_MS}ms — ungrab ({title})", ts());
+        }
         // Capture decision → transition. Entering: flip QEMU's handler to
         // relative (In::Mode rides the input channel, so mouse_set lands
         // before the deltas that follow), confine the pointer to the
@@ -1702,10 +1737,40 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                 unsafe { XNextEvent(xdpy, &mut ev); }
                 let a = unsafe { ev.any };
                 if a.send_event != 0 { continue; }
+                // Expose(12) / VisibilityNotify(15) / MapNotify(19): the
+                // window just (re)gained a visible pixmap — VD switches and
+                // iconify unmap us, and the fresh backing composites black
+                // until the next swap. Nothing else schedules a present
+                // while the guest is idle, so kick the GL worker.
+                if a.t == 12 || a.t == 15 || a.t == 19 {
+                    let _ = jtx.send(XJob::Repaint);
+                    continue;
+                }
                 if (a.t == 2 || a.t == 3) && unsafe { ev.key }._win == xwin_id {
                     let k = unsafe { ev.key };
                     let down = a.t == 2;
                     let Some(q) = qnum_for_keycode(k.keycode) else { continue };
+                    if Some(k.keycode) == caps_xkey {
+                        // caps-hold tracking, ahead of the swallowed/combo
+                        // paths so neither can hide a press or release
+                        if down {
+                            if caps_down_at.is_none() {
+                                caps_down_at = Some(std::time::Instant::now());
+                            }
+                        } else {
+                            // same-timestamp release+press = autorepeat,
+                            // still held (lock keys don't repeat by
+                            // default, but `xset r` can enable it)
+                            let mut still = false;
+                            if unsafe { XPending(xdpy) } > 0 {
+                                let mut pv: XEvBuf = unsafe { std::mem::zeroed() };
+                                unsafe { XPeekEvent(xdpy, &mut pv); }
+                                let p = unsafe { pv.key };
+                                still = p.t == 2 && p.keycode == k.keycode && p.time == k.time;
+                            }
+                            if !still { caps_down_at = None; }
+                        }
+                    }
                     if swallowed.contains(&k.keycode) {
                         if !down { swallowed.remove(&k.keycode); }
                         continue;
@@ -2448,7 +2513,7 @@ async fn main() -> Result<()> {
     // the runtime's workers while we join.
     let t = title.clone();
     let wh = std::thread::spawn(move ||
-        present_window(iconn, paths, &t, w, h, jrx, crx, heads, span, esc, rel_mode, monitor));
+        present_window(iconn, paths, &t, w, h, jrx, jtx, crx, heads, span, esc, rel_mode, monitor));
     let r = wh.join().unwrap_or_else(|_| Err(anyhow::anyhow!("window thread panicked")));
     eprintln!("[*] window closed — {r:?}");
     Ok(())
