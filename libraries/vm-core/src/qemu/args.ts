@@ -112,7 +112,7 @@ export function buildArgs(
     spec: VmSpec,
     paths: VmPaths,
     opts: BuildOpts,
-    env: { ldLibraryPath: string },
+    env: { ldLibraryPath: string; renderServerExec?: string },
 ): BuiltArgs {
     const a: string[] = [];
     const push = (...v: (string | number)[]) => a.push(...v.map(String));
@@ -364,6 +364,10 @@ export function buildArgs(
     if (opts.extraArgs) a.push(...opts.extraArgs);
 
     const outEnv: Record<string, string> = { LD_LIBRARY_PATH: env.ldLibraryPath };
+    // yttrium: the patched virglrenderer keeps its venus render server beside
+    // the variant lib — point the loader at it explicitly.
+    if (env.renderServerExec) outEnv.RENDER_SERVER_EXEC_PATH = env.renderServerExec;
+    if (process.env.CRUISER_VKR_DEBUG) outEnv.VKR_DEBUG = process.env.CRUISER_VKR_DEBUG;
     if (spec.gpu.mode === "venus" && !spec.gpu.softwareVk) {
         // Venus exposes every host VkPhysicalDevice to the guest — including
         // lavapipe. A guest app that asks wgpu for the software/fallback

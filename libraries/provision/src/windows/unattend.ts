@@ -37,6 +37,9 @@ export interface UnattendOpts {
     testsigning?: boolean;
     /** extracted yttrium payload dir placed at \yttrium on the ISO. */
     yttriumDir?: string;
+    /** virtio-win os dir convention — "w11" | "w10"; picks the matching
+     *  Win1x driver subtree (drivers + the yttrium inf). */
+    winDir?: string;
 }
 
 const xesc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;")
@@ -265,22 +268,56 @@ Write-Output "[cruiser] enabling testsigning (yttrium driver path)"
 ` : "";
     const yttrium = o.yttriumDir ? `
 # ── yttrium viogpu3d — test-signed alpha WDDM + Mesa userspace ──
-# cert first so pnputil accepts the self-signed driver package; every .inf
-# under the payload is registered (the KMD binds virtio-gpu, the mesa DLLs
-# land beside it per the release layout).
+# cert first so pnputil accepts the package. Only the matching OS dir's
+# inf is installed — the inf's CopyFiles/AddReg stages the mesa/venus
+# usermode DLLs (d3d10umd, wgl ICD, libvulkan_virtio + icd json) itself;
+# copying them by hand would fight the driver store.
 $yt = Join-Path $seed "yttrium"
+$ytInf = Get-ChildItem $yt -Recurse -Filter viogpu3d.inf |
+    Where-Object { $_.FullName -match 'Install_Debug\\\\Win1[01]\\\\amd64' } |
+    Sort-Object { [bool]($_.FullName -match '${o.winDir === "w10" ? "Win10" : "Win11"}') } -Descending |
+    Select-Object -First 1
 if (Test-Path $yt) {
     Write-Output "[cruiser] installing yttrium payload from $yt"
     Get-ChildItem $yt -Recurse -Filter *.cer | ForEach-Object {
         & certutil -addstore -f TrustedPublisher $_.FullName | Out-Null
         & certutil -addstore -f Root $_.FullName | Out-Null }
-    Get-ChildItem $yt -Recurse -Filter *.inf | ForEach-Object {
-        Write-Output "[cruiser] pnputil $($_.Name)"
-        & pnputil /add-driver $_.FullName /install | Out-Null }
-    Get-ChildItem $yt -Recurse -Include *.dll,*.json -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -match 'mesa|virtio|vulkan|zink|d3d|opengl' } | ForEach-Object {
-            Copy-Item $_.FullName "C:\\Windows\\System32\\" -Force -ErrorAction SilentlyContinue }
-    # venus/wddm path: DWM compositing needs the vendor registry hint
+    if ($ytInf) {
+        Write-Output "[cruiser] pnputil $($ytInf.FullName)"
+        & pnputil /add-driver $ytInf.FullName /install | Out-Null
+    } else { Write-Output "[cruiser] WARN: no Win11/Win10 amd64 viogpu3d.inf in payload" }
+    # Upstream issue #21: dwmredir.dll spawns the DWM LPC Port Thread with a
+    # 128KiB stack; viogpu_d3d10's ~100KiB single-frame prologue overflows it
+    # and DWM crash-loops. One-byte patch: mov edx,0x20000 -> mov edx,0x400000
+    # (4MiB) at the DwmInitializePort call site. Pattern-verified so it no-ops
+    # on builds where the sequence moved or the fix already shipped.
+    $dwmredir = "C:\\Windows\\System32\\dwmredir.dll"
+    if (Test-Path $dwmredir) {
+        try {
+            $b = [IO.File]::ReadAllBytes($dwmredir)
+            $pat = [byte[]](0xC7,0x44,0x24,0x20,0x00,0x00,0x01,0x00)
+            $hit = -1
+            for ($i = 0; $i -lt $b.Length - 64 -and $hit -lt 0; $i++) {
+                $ok = $true
+                for ($j = 0; $j -lt 8; $j++) { if ($b[$i+$j] -ne $pat[$j]) { $ok = $false; break } }
+                if (-not $ok) { continue }
+                for ($k = $i + 8; $k -lt $i + 48; $k++) {
+                    if ($b[$k] -eq 0xBA -and $b[$k+1] -eq 0 -and $b[$k+2] -eq 0 -and
+                        $b[$k+3] -eq 0x02 -and $b[$k+4] -eq 0) { $hit = $k + 3; break }
+                }
+            }
+            if ($hit -ge 0) {
+                if (-not (Test-Path "$dwmredir.cruiser-bak")) { Copy-Item $dwmredir "$dwmredir.cruiser-bak" -Force }
+                & takeown /f $dwmredir /a | Out-Null
+                & icacls $dwmredir /grant '*S-1-5-32-544:F' | Out-Null
+                $b[$hit] = 0x40
+                [IO.File]::WriteAllBytes("$dwmredir.patched", $b)
+                Rename-Item $dwmredir 'dwmredir.orig.dll' -Force
+                Rename-Item "$dwmredir.patched" 'dwmredir.dll' -Force
+                Write-Output "[cruiser] patched dwmredir.dll LPC thread stack 128KiB -> 4MiB (yttrium#21)"
+            } else { Write-Output "[cruiser] dwmredir.dll: yttrium#21 pattern not found — left unpatched" }
+        } catch { Write-Output "[cruiser] WARN: dwmredir patch failed: $_" }
+    }
     New-Item "HKLM:\\SOFTWARE\\Cruiser" -Force | Out-Null
     Set-ItemProperty "HKLM:\\SOFTWARE\\Cruiser" -Name YttriumInstalled -Value 1
 } else { Write-Output "[cruiser] WARN: yttrium payload missing on seed media" }

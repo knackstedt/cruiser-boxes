@@ -14,6 +14,10 @@ export interface Toolchain {
     xfreerdp: string;
     /** LD_LIBRARY_PATH prefix required to run the opt/ qemu. */
     ldLibraryPath: string;
+    /** arehnman's yttrium-patched virglrenderer (venus resource sharing the
+     *  viogpu3d UMD needs) — present when the toolchain built the
+     *  virglrenderer-yttrium component. */
+    yttriumVirgl?: { ldLibraryPath: string; renderServerExec: string };
     fromOpt: boolean;
 }
 
@@ -56,5 +60,11 @@ export async function resolveToolchain(): Promise<Toolchain> {
         join(opt, "spice", "lib", "x86_64-linux-gnu"),
     ].filter((p) => existsSync(p)).join(":");
 
-    return { qemu, qemuImg, xfreerdp, ldLibraryPath: ld, fromOpt };
+    const ytLib = join(opt, "virglrenderer-yttrium", "lib", "x86_64-linux-gnu");
+    const ytServer = join(opt, "virglrenderer-yttrium", "libexec", "virgl_render_server");
+    const yttriumVirgl = existsSync(ytLib) && existsSync(ytServer)
+        ? { ldLibraryPath: [ytLib, ld].filter(Boolean).join(":"), renderServerExec: ytServer }
+        : undefined;
+
+    return { qemu, qemuImg, xfreerdp, ldLibraryPath: ld, yttriumVirgl, fromOpt };
 }

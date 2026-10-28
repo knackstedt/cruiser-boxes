@@ -280,7 +280,14 @@ export class VmHandle {
             if (this.spec.display.sound)
                 opts.audioBackend ??= await pickAudioBackend(this.toolchain.qemu, this.toolchain.ldLibraryPath);
         }
-        return buildArgs(this.spec, this.paths, opts, { ldLibraryPath: this.toolchain.ldLibraryPath });
+        // The yttrium guest driver needs arehnman's patched virglrenderer on
+        // the host (cross-context venus resource sharing) — prefer the
+        // variant when the toolchain provides it.
+        const yt = this.spec.os?.winDriver === "yttrium" ? this.toolchain.yttriumVirgl : undefined;
+        return buildArgs(this.spec, this.paths, opts, {
+            ldLibraryPath: yt?.ldLibraryPath ?? this.toolchain.ldLibraryPath,
+            renderServerExec: yt?.renderServerExec,
+        });
     }
 
     /** Materialize boot-attached images that aren't the system disk —
