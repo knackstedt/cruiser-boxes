@@ -52,10 +52,12 @@ export interface BuildOpts {
         /** Additional cdrom drives attached after iso+seedIso — the windows
          *  install uses this for the virtio-win driver disc. */
         extraCds?: string[];
-        /** Attach the system disk + all cdroms on the q35's native AHCI
-         *  instead of virtio — required for guests whose installer has no
-         *  virtio storage drivers (Windows PE). Production boots still get
-         *  virtio-blk once the image has viostor injected. */
+        /** Attach install cdroms on the q35's native AHCI instead of
+         *  virtio-scsi — driverless WinPE sees them with no vioscsi. The
+         *  system DISK stays virtio even in install mode: the seed ISO's
+         *  DriverPaths gives WinPE viostor, and installing on the real
+         *  production device is what makes the first virtio boot not
+         *  0x7B (INACCESSIBLE_BOOT_DEVICE). */
         sata?: boolean;
     };
     /** display.viewer=dmabuf: rendernode QEMU exports scanouts from — must be
@@ -130,8 +132,9 @@ export function buildArgs(
     // flags every libvirt/win guest ships; measurable win on scheduling,
     // timers and TLB shootdowns. Linux -cpu host already gets them via
     // the kernel's own detection so they're omitted there.
+    // hv_time is required by hv_stimer (QEMU refuses to start without it).
     const winHv = spec.os.family === "windows"
-        ? ",hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_vpindex,hv_runtime,hv_synic,hv_stimer"
+        ? ",hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_vpindex,hv_runtime,hv_synic,hv_stimer,hv_time"
         : "";
     push("-cpu", `host${winHv}${nestedFlag ? `,+${nestedFlag}` : ""}`);
     push("-smp", `${cpus},sockets=${spec.resources.sockets},cores=${cpus},threads=${spec.resources.threads}`);
@@ -156,9 +159,11 @@ export function buildArgs(
         if (enc === "full" && spec.disk.format !== "qcow2")
             throw new Error(`disk.encrypt=full requires disk.format=qcow2 (got ${spec.disk.format})`);
     }
-    // install.sata → the system disk attaches on the native AHCI for a
-    // driverless installer (Windows PE); normal boots keep virtio-blk.
-    const diskIf = opts.mode === "install" && opts.install?.sata ? "ide" : "virtio";
+    // install.sata scopes to cdroms only — the system disk is always
+    // virtio so install and production boot paths match (installing on
+    // IDE then booting virtio is a 0x7B INACCESSIBLE_BOOT_DEVICE on
+    // windows; the seed ISO's WinPE DriverPaths supplies viostor).
+    const diskIf = "virtio";
     push("-drive", `file=${disk},if=${diskIf},format=${spec.disk.format},discard=unmap` +
         (enc === "full" ? `,encrypt.key-secret=${DISK_SECRET_ID}` : ""));
     if (enc === "home") {

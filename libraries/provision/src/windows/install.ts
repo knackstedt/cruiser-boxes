@@ -13,6 +13,8 @@ import type { VmSpec } from "../../../vm-core/src/config/schema";
 import { resolveToolchain } from "../../../vm-core/src/qemu/resolve";
 import { createDisk, requireDiskKeyFile } from "../../../vm-core/src/disk/ops";
 import { buildArgs, ovmfVarsTemplate } from "../../../vm-core/src/qemu/args";
+import { spawnSwtpm } from "../../../vm-core/src/lifecycle/vm";
+import { QmpClient } from "../../../vm-core/src/qmp/client";
 
 export interface WindowsInstallOpts {
     /** install media (eval/consumer ISO). */
@@ -66,10 +68,35 @@ export async function runWindowsInstall(spec: VmSpec, o: WindowsInstallOpts): Pr
         },
     }, { ldLibraryPath: tc.ldLibraryPath });
 
+    // QEMU's tpm-emulator chardev connects at machine init — the daemon
+    // must be listening first (same constraint as the lifecycle's start()).
+    if (spec.security.tpm) await spawnSwtpm(paths);
+
     const child = spawn(tc.qemu, built.argv, {
         env: { ...process.env, ...built.env },
         stdio: ["ignore", "ignore", "inherit"],
     });
+    // Windows install media parks on "Press any key to boot from CD or
+    // DVD" — nobody pressing means OVMF's watchdog kills the boot image
+    // (~10s) and it falls through to PXE. Tap a key every 2s for the
+    // first ~90s so the prompt is hit whenever OVMF gets there. The key
+    // is a LEFT ARROW, not Enter: it still satisfies "any key" but can
+    // never activate a focused button — an Enter leaking into the setup
+    // GUI (e.g. landing on Cancel → quit-confirm → Yes) would abort the
+    // whole install.
+    void (async () => {
+        try {
+            for (let i = 0; i < 45 && child.exitCode === null; i++) {
+                await new Promise((r) => setTimeout(r, 2_000));
+                if (child.exitCode !== null) break;
+                const q = await QmpClient.connect(paths.monitorSock, 2_000).catch(() => null);
+                if (!q) continue;
+                await q.execute("send-key", { keys: [{ type: "qcode", data: "left" }] })
+                    .catch(() => {});
+                q.close();
+            }
+        } catch { /* never sink the install on a key-tap failure */ }
+    })();
     await new Promise<void>((res, rej) => {
         const timer = setTimeout(() => { child.kill("SIGKILL"); rej(new Error("windows install timed out")); },
             o.timeoutMs ?? 120 * 60_000);

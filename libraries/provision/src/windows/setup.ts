@@ -62,9 +62,10 @@ export async function runWindowsSetup(h: VmHandle, o: WindowsSetupOpts = {}): Pr
         const letter = String.fromCharCode(90 - i); // Z, Y, X, …
         const tag = s.tag.replace(/'/g, "");
         await psBest(h, `
-$exe = "C:\\Program Files\\Virtio-FS\\virtiofs.exe"
+$exe = @("C:\\Program Files\\Virtio-FS Service\\virtiofs.exe",
+         "C:\\Program Files\\Virtio-FS\\virtiofs.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
 $svc = "cruiserfs_${tag}"
-if (-not (Test-Path $exe)) { Write-Error "virtiofs.exe not installed"; exit 1 }
+if (-not $exe) { Write-Error "virtiofs.exe not installed"; exit 1 }
 sc.exe stop $svc 2>$null | Out-Null
 sc.exe delete $svc 2>$null | Out-Null
 sc.exe create $svc binPath= "\`"$exe\`" -t ${tag} -m ${letter}:" start= auto DisplayName= "cruiser share ${tag}" | Out-Null
@@ -82,6 +83,11 @@ $l = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyCon
 if ($l) { Write-Output "RDP listening on 3389" } else { Write-Output "RDP NOT listening — check Terminal Server service" }
 `, say, "rdp");
 
-    // QGA clock sync — slirp-blocked NTP leaves the guest drifting.
-    await psBest(h, `w32tm /resync /force 2>&1 | Out-String`, say, "timesync");
+    // QGA clock sync — slirp-blocked NTP leaves the guest drifting. The
+    // w32time service defaults to Manual and isn't started yet this early
+    // post-OOBE, so set it up before resyncing (0x80070426 without it).
+    await psBest(h, `
+Set-Service w32time -StartupType Automatic -ErrorAction SilentlyContinue
+Start-Service w32time -ErrorAction SilentlyContinue
+w32tm /resync /force 2>&1 | Out-String`, say, "timesync");
 }

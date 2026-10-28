@@ -36,9 +36,10 @@ export async function provisionVmWindows(h: VmHandle, o: ProvisionOpts): Promise
         // a user-supplied --iso goes through ensureIso (sidecar digest when
         // the mirror publishes one); the catalog path resolves Microsoft's
         // signed URL itself (no published digest — structural check only).
-        const winIso = o.iso?.startsWith("http")
-            ? await ensureIso(o.iso)
-            : await ensureWindowsIso(spec.os.release || "11", o.iso);
+        const media = o.iso?.startsWith("http")
+            ? { path: await ensureIso(o.iso) }
+            : await ensureWindowsIso(spec.os.release || "11", o.iso, (m) => log(h, o, m));
+        const winIso = media.path;
         log(h, o, `install media: ${winIso}`);
 
         log(h, o, "fetching virtio-win driver disc…");
@@ -54,15 +55,17 @@ export async function provisionVmWindows(h: VmHandle, o: ProvisionOpts): Promise
             hostname: windowsHostname(spec.name),
             username: spec.credentials.username,
             password: pw,
-            edition: spec.os.winEdition ?? defaultWinEdition(spec.os.release || "11"),
+            edition: spec.os.winEdition ?? media.edition ?? defaultWinEdition(spec.os.release || "11"),
             timezone: windowsTimezone(await seedTimezone(spec, o.timezone)),
             locale: windowsLocale(snap.locale),
             testsigning: spec.os.winDriver === "yttrium",
             yttriumZip,
+            driverIso,
+            winDir: spec.os.release === "10" ? "w10" : "w11",
         });
 
         log(h, o, "running unattended install — attach `cruiser vm view " + spec.name +
-            "` to watch (the installer boots on native SATA; production gets virtio)…");
+            "` to watch (cds on native IDE; the disk is real virtio via WinPE DriverPaths)…");
         await runWindowsInstall(spec, { winIso, unattendIso, driverIso });
         await h.saveSpec();
 

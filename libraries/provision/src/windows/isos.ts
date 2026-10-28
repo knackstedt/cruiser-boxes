@@ -29,14 +29,26 @@ const MS_PROFILE = "606624d44113";
 const VIRTIO_ARCHIVE = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/";
 const YTTRIUM_RELEASES = "https://api.github.com/repos/arehnman/yttrium-virtio-gpu/releases";
 
+/** Windows 11 Enterprise Evaluation (25H2) — Microsoft's own CDN, legal
+ *  eval media, and the sha256 Microsoft publishes on the eval page.
+ *  Used when the consumer-ISO API's Sentinel gate blocks this IP. Single
+ *  image ("Windows 11 Enterprise Evaluation"); unactivated, 90-day eval. */
+export const WIN_EVAL_ISO = {
+    url: "https://software-static.download.prss.microsoft.com/dbazure/888969d5-f34g-4e03-ac9d-1f9786c66749/" +
+        "26200.6584.250915-1905.25h2_ge_release_svc_refresh_CLIENTENTERPRISEEVAL_OEMRET_x64FRE_en-us.iso",
+    file: "windows-11-enterprise-eval-x64.iso",
+    sha256: "a61adeab895ef5a4db436e0a7011c92a2ff17bb0357f58b13bbc4062e535e7b9",
+    edition: "Windows 11 Enterprise Evaluation",
+};
+
 /** ISO9660 primary volume descriptor magic at sector 16. */
 export async function isoSanityCheck(path: string, minBytes = 256 * 1024 * 1024): Promise<void> {
     const { size } = await stat(path);
     if (size < minBytes) throw new Error(`${path}: too small (${size} B) — not an install ISO`);
     const fh = await open(path, "r");
     try {
-        const buf = Buffer.alloc(6);
-        await fh.read(buf, 0, 6, 0x8001);
+        const buf = Buffer.alloc(5);
+        await fh.read(buf, 0, 5, 0x8001);
         if (buf.toString("latin1") !== "CD001") throw new Error(`${path}: no ISO9660 signature — corrupt or wrong file`);
     } finally { await fh.close(); }
 }
@@ -94,40 +106,64 @@ export async function resolveWindowsIsoUrl(release: string): Promise<string> {
     return url;
 }
 
+export interface WindowsMedia { path: string; /** /IMAGE/NAME hint for eval media. */ edition?: string }
+
 /** Fetch (or reuse) the official Windows ISO. `userIso` = a path or URL the
- *  caller supplied — trusted as-is aside from the structural check. */
-export async function ensureWindowsIso(release: string, userIso?: string): Promise<string> {
+ *  caller supplied — trusted as-is aside from the structural check. The
+ *  returned `edition` hints the unattend /IMAGE/NAME for single-image
+ *  media (eval) so InstallFrom can't select a name that isn't there. */
+export async function ensureWindowsIso(release: string, userIso?: string,
+    onLog?: (msg: string) => void): Promise<WindowsMedia> {
     await mkdir(ISO_DIR, { recursive: true });
     if (userIso) {
         if (!userIso.startsWith("http")) {
             await isoSanityCheck(userIso);
-            return userIso;
+            return { path: userIso };
         }
         const file = join(ISO_DIR, userIso.split("/").pop() ?? `windows-${release}.iso`);
         await ensureDownload(userIso, file);
         await isoSanityCheck(file);
-        return file;
+        return { path: file };
     }
     const file = join(ISO_DIR, `windows-${release}-x64.iso`);
     if (!existsSync(file)) {
-        const url = await resolveWindowsIsoUrl(release);
-        await ensureDownload(url, file);
+        try {
+            const url = await resolveWindowsIsoUrl(release);
+            await ensureDownload(url, file);
+        } catch (e) {
+            // Sentinel blocks the consumer flow from some IPs — the eval ISO
+            // is the sanctioned fallback (digest-pinned, no API gate).
+            if (release === "11" && e instanceof Error && /Sentinel|manually/.test(e.message)) {
+                onLog?.("consumer ISO blocked by Microsoft's IP filter — using the official Enterprise Evaluation ISO instead");
+                const evalFile = join(ISO_DIR, WIN_EVAL_ISO.file);
+                await ensureDownload(WIN_EVAL_ISO.url, evalFile,
+                    { expect: { algo: "sha256", hex: WIN_EVAL_ISO.sha256 } });
+                await isoSanityCheck(evalFile);
+                return { path: evalFile, edition: WIN_EVAL_ISO.edition };
+            }
+            throw e;
+        }
     }
     await isoSanityCheck(file);
-    return file;
+    return { path: file };
 }
 
-/** Newest versioned virtio-win driver ISO from the Red Hat archive. */
+/** Newest versioned virtio-win driver ISO from the Red Hat archive.
+ *  fedorapeople sits behind Anubis — it PoW-challenges browser UAs but
+ *  passes CLI agents, so this host's fetches wear a curl UA. */
+const CLI_UA = "curl/8.0";
+
 export async function ensureVirtioWinIso(): Promise<string> {
     await mkdir(ISO_DIR, { recursive: true });
-    const index = await (await fetch(VIRTIO_ARCHIVE, { headers: { "User-Agent": WIN_UA } })).text();
-    const dirs = [...index.matchAll(/virtio-win-(\d+\.\d+\.\d+-\d+)\//g)]
+    const index = await (await fetch(VIRTIO_ARCHIVE, { headers: { "User-Agent": CLI_UA } })).text();
+    const dirs = [...index.matchAll(/virtio-win-(\d+(?:\.\d+)+(?:-\d+)?)\//g)]
         .map((m) => m[1]!)
         .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
     const latest = dirs[dirs.length - 1];
     if (!latest) throw new Error(`no virtio-win releases under ${VIRTIO_ARCHIVE}`);
     const file = join(ISO_DIR, `virtio-win-${latest}.iso`);
-    await ensureDownload(`${VIRTIO_ARCHIVE}virtio-win-${latest}/virtio-win.iso`, file);
+    await ensureDownload(`${VIRTIO_ARCHIVE}virtio-win-${latest}/virtio-win.iso`, file,
+        { headers: { "User-Agent": CLI_UA } });
     await isoSanityCheck(file, 32 * 1024 * 1024);
     return file;
 }

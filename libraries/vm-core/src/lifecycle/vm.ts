@@ -546,18 +546,7 @@ export class VmHandle {
      *  the daemon self-terminates when QEMU drops the ctrl connection (-t),
      *  so a VM stop cleans it up without tracking. */
     private async spawnSwtpm(): Promise<void> {
-        const bin = await which("swtpm");
-        if (!bin) throw new Error("security.tpm is set but swtpm isn't installed — apt install swtpm");
-        await mkdir(this.paths.tpmDir, { recursive: true });
-        await rm(this.paths.tpmSock, { force: true });
-        await run(bin, ["socket", "--tpm2", "--daemon",
-            "--tpmstate", `dir=${this.paths.tpmDir},mode=0600`,
-            "--ctrl", `type=unixio,path=${this.paths.tpmSock},mode=0600`,
-            "--pid", `file=${join(this.paths.run, "swtpm.pid")}`,
-            "--log", `file=${join(this.paths.run, "swtpm.log")},level=1`,
-            "--flags", "not-need-init,startup-clear",
-            "-t",
-        ]);
+        await spawnSwtpm(this.paths);
     }
 
     /** org.cruiser.urlopen.0 bridge: the guest writes one URL per line to the
@@ -1023,4 +1012,25 @@ done
     private async tc(): Promise<Toolchain> {
         return this.toolchain ??= await resolveToolchain();
     }
+}
+
+/** swtpm daemon for security.tpm — TPM 2.0 state persists at <vm>/tpm/;
+ *  the daemon self-terminates when QEMU drops the ctrl connection (-t),
+ *  so a VM stop (or an owned install QEMU exiting) cleans it up without
+ *  tracking. Shared by VmHandle.start() and the windows install runner —
+ *  QEMU's tpm-emulator chardev connects at machine init, so the daemon
+ *  must be listening first. */
+export async function spawnSwtpm(paths: VmPaths): Promise<void> {
+    const bin = await which("swtpm");
+    if (!bin) throw new Error("security.tpm is set but swtpm isn't installed — apt install swtpm");
+    await mkdir(paths.tpmDir, { recursive: true });
+    await rm(paths.tpmSock, { force: true });
+    await run(bin, ["socket", "--tpm2", "--daemon",
+        "--tpmstate", `dir=${paths.tpmDir},mode=0600`,
+        "--ctrl", `type=unixio,path=${paths.tpmSock},mode=0600`,
+        "--pid", `file=${join(paths.run, "swtpm.pid")}`,
+        "--log", `file=${join(paths.run, "swtpm.log")},level=1`,
+        "--flags", "not-need-init,startup-clear",
+        "-t",
+    ]);
 }

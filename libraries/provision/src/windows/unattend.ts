@@ -128,6 +128,11 @@ export function autounattendXml(o: UnattendOpts): string {
     return `<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
   <settings pass="windowsPE">
+    ${comp("Microsoft-Windows-PnpCustomizationsWinPE", `
+      <DriverPaths>
+        ${["E:\\drivers", "F:\\drivers", "D:\\drivers"]
+            .map((p, i) => `<PathAndCredentials wcm:key="${i + 1}" wcm:action="add"><Path>${p}</Path></PathAndCredentials>`).join("\n        ")}
+      </DriverPaths>`)}
     ${comp("Microsoft-Windows-International-Core-WinPE", `
       <SetupUILanguage><UILanguage>${loc}</UILanguage></SetupUILanguage>
       <InputLocale>${loc}</InputLocale>
@@ -162,7 +167,15 @@ export function autounattendXml(o: UnattendOpts): string {
         <FullName>${user}</FullName>
         <Organization>cruiser</Organization>
         ${o.productKey ? `<ProductKey><Key>${xesc(o.productKey)}</Key><WillShowUI>Never</WillShowUI></ProductKey>` : ""}
-      </UserData>`)}
+      </UserData>
+      <RunSynchronous>
+        ${["BypassTPMCheck", "BypassSecureBootCheck", "BypassRAMCheck", "BypassCPUCheck"]
+            .map((v, i) => `<RunSynchronousCommand wcm:action="add">
+          <Order>${i + 1}</Order>
+          <Path>reg.exe add HKLM\\SYSTEM\\Setup\\LabConfig /v ${v} /t REG_DWORD /d 1 /f</Path>
+          ${i === 0 ? "<Description>cruiser: relax windows 11 hardware gates</Description>" : ""}
+        </RunSynchronousCommand>`).join("\n        ")}
+      </RunSynchronous>`)}
   </settings>
   <settings pass="specialize">
     ${comp("Microsoft-Windows-International-Core", `
@@ -177,11 +190,12 @@ export function autounattendXml(o: UnattendOpts): string {
       <RegisteredOrganization>cruiser</RegisteredOrganization>`)}
     ${comp("Microsoft-Windows-Deployment", `
       <RunSynchronous>
-        <RunSynchronousCommand wcm:action="add">
-          <Order>1</Order>
-          <Path>cmd.exe /c "for %i in (d e f g h i j k l m n o p q r s t u v w) do if exist %i:\\cruiser-setup.cmd call %i:\\cruiser-setup.cmd"</Path>
-          <Description>cruiser guest setup</Description>
-        </RunSynchronousCommand>
+        ${["bcdedit /ems {current} on", "bcdedit /emssettings EMSPORT:1"]
+            .map((c, i) => `<RunSynchronousCommand wcm:action="add">
+          <Order>${i + 1}</Order>
+          <Path>${c}</Path>
+          ${i === 0 ? "<Description>cruiser: EMS on COM1 for serial observability</Description>" : ""}
+        </RunSynchronousCommand>`).join("\n        ")}
       </RunSynchronous>`)}
   </settings>
   <settings pass="oobeSystem">
@@ -215,6 +229,11 @@ export function autounattendXml(o: UnattendOpts): string {
       <FirstLogonCommands>
         <SynchronousCommand wcm:action="add">
           <Order>1</Order>
+          <CommandLine>cmd.exe /c "for %i in (d e f g h i j k l m n o p q r s t u v w) do if exist %i:\\cruiser-setup.cmd call %i:\\cruiser-setup.cmd"</CommandLine>
+          <Description>cruiser guest setup (drivers, rdp, ems — first real logon, not specialize)</Description>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>2</Order>
           <CommandLine>cmd.exe /c "for %i in (d e f g h i j k l m n o p q r s t u v w) do if exist %i:\\cruiser-done.cmd call %i:\\cruiser-done.cmd"</CommandLine>
           <Description>cruiser install completion</Description>
         </SynchronousCommand>
@@ -224,16 +243,18 @@ export function autounattendXml(o: UnattendOpts): string {
 `;
 }
 
-/** specialize-pass entry — the cmd shim only exists because unattend's
- *  RunSynchronous wants a literal path; it hands off to the ps1 (which is
- *  where anything worth logging/debugging lives). */
+/** FirstLogon entry — the cmd shim only exists because unattend's
+ *  SynchronousCommand wants a literal path; it hands off to the ps1 (which
+ *  is where anything worth logging/debugging lives). Driver installs run
+ *  HERE, not in specialize: session-0 specialize wedges real installers
+ *  (virtio-win-guest-tools' burn chain spins silently for an hour). */
 function cruiserSetupCmd(): string {
-    return `@echo off\r\nrem specialize-pass entry — finds the seed ISO (this file's own drive)\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0cruiser-setup.ps1" "%~d0" >> C:\\cruiser-setup.log 2>&1\r\n`;
+    return `@echo off\r\nrem first-logon entry — finds the seed ISO (this file's own drive)\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0cruiser-setup.ps1" "%~d0" >> C:\\cruiser-setup.log 2>&1\r\n`;
 }
 
 /**
- * The specialize-pass provisioning script — everything that must be baked
- * into the image before first logon. Runs as SYSTEM in the installed OS.
+ * The first-logon provisioning script — drivers + features baked before
+ * the completion shutdown. Runs in the autologged admin session.
  * `args[0]` = the seed ISO's drive letter (from the cmd shim).
  */
 export function cruiserSetupPs1(o: UnattendOpts): string {
@@ -266,7 +287,7 @@ if (Test-Path $yt) {
 ` : "";
     return `param([string]$seed = "")
 $ErrorActionPreference = "Continue"
-Write-Output "[cruiser] specialize setup starting (seed=$seed)"
+Write-Output "[cruiser] first-logon setup starting (seed=$seed)"
 
 # ── virtio-win guest tools: all virtio drivers (viostor/NetKVM/vioinput/
 # balloon/viosock) + qemu-ga + spice agent + virtiofs. Finds the driver CD
@@ -294,9 +315,16 @@ Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyConti
 & powercfg /change standby-timeout-ac 0 | Out-Null
 & powercfg /change monitor-timeout-ac 0 | Out-Null
 
+# ── hostname: unattend ComputerName is honored only some of the time on
+# eval media (it can keep the DESKTOP-/ORG- random name) — Rename-Computer
+# queues a rename that applies on the post-install boot. ──
+if ($env:COMPUTERNAME -ine "${windowsHostname(o.hostname)}") {
+    Rename-Computer -NewName "${windowsHostname(o.hostname)}" -Force -ErrorAction SilentlyContinue
+}
+
 New-Item "C:\\cruiser-installed" -ItemType File -Force | Out-Null
 Set-Content "C:\\cruiser-installed" -Value (Get-Date -Format o)
-Write-Output "[cruiser] specialize setup done"
+Write-Output "[cruiser] first-logon setup done"
 `;
 }
 
@@ -311,11 +339,24 @@ function cruiserDoneCmd(): string {
 }
 
 /** Write autounattend + scripts (+ optional yttrium payload) → Joliet ISO. */
-export async function buildUnattendIso(workDir: string, o: UnattendOpts & { yttriumZip?: string }): Promise<string> {
+/** Virtio drivers copied onto the seed ISO for the windowsPE
+ *  PnpCustomizationsWinPE DriverPaths — WinPE loads viostor from these
+ *  so the install disk can be REAL virtio (the production path), and the
+ *  staged drivers carry into the installed image's store as boot drivers.
+ *  Without this a windows install done on IDE dies 0x7B on the first
+ *  virtio boot; installing the drivers post-boot doesn't retro-fix the
+ *  CriticalDeviceDatabase. */
+const WINPE_DRIVER_DIRS = [
+    "viostor", "vioscsi", "NetKVM", "Balloon", "vioinput", "viorng",
+    "vioserial", "viosock", "pvpanic", "viofs", "viogpudo",
+];
+
+export async function buildUnattendIso(workDir: string, o: UnattendOpts & { yttriumZip?: string; driverIso?: string; winDir?: string }): Promise<string> {
     await mkdir(workDir, { recursive: true });
     await writeFile(join(workDir, "autounattend.xml"), autounattendXml(o));
     await writeFile(join(workDir, "cruiser-setup.cmd"), cruiserSetupCmd());
-    await writeFile(join(workDir, "cruiser-setup.ps1"), cruiserSetupPs1(o));
+    await writeFile(join(workDir, "cruiser-setup.ps1"),
+        cruiserSetupPs1({ ...o, yttriumDir: o.yttriumZip ? "yttrium" : undefined }));
     await writeFile(join(workDir, "cruiser-done.cmd"), cruiserDoneCmd());
     if (o.yttriumZip) {
         const yt = join(workDir, "yttrium");
@@ -330,6 +371,23 @@ export async function buildUnattendIso(workDir: string, o: UnattendOpts & { yttr
     const files = ["autounattend.xml", "cruiser-setup.cmd", "cruiser-setup.ps1", "cruiser-done.cmd"];
     const grafts = files.map((f) => `${f}=${join(workDir, f)}`);
     if (o.yttriumZip) grafts.push(`yttrium=${join(workDir, "yttrium")}`);
+    // extract the boot-critical virtio drivers off the virtio-win ISO into
+    // /drivers so the answer file's DriverPaths can load viostor in WinPE.
+    // isoinfo reads ISO9660 without a mount; each dir flattens to inf+sys+cat.
+    if (o.driverIso && await which("isoinfo")) {
+        const winVer = o.winDir ?? "w11";
+        const list = await run("isoinfo", ["-f", "-i", o.driverIso]).then((r) => r.stdout).catch(() => "");
+        const wanted = new Set(WINPE_DRIVER_DIRS.map((d) => d.toLowerCase()));
+        for (const line of list.split("\n")) {
+            const m = line.trim().match(/^\/([^/]+)\/(w1[01])\/(amd64)\/([^/]+)$/i);
+            if (!m || !wanted.has(m[1].toLowerCase()) || m[2].toLowerCase() !== winVer) continue;
+            const dst = join(workDir, "drivers", m[1].toLowerCase());
+            await mkdir(dst, { recursive: true });
+            await run("sh", ["-c", `isoinfo -i "$1" -x "$2" > "$3"`, "--",
+                o.driverIso, line.trim(), join(dst, m[4])]).catch(() => {});
+        }
+        grafts.push(`drivers=${join(workDir, "drivers")}`);
+    }
     if (await which("genisoimage")) {
         await run("genisoimage", ["-output", iso, "-volid", "CRUISER", "-joliet", "-rock",
             "-graft-points", ...grafts]);

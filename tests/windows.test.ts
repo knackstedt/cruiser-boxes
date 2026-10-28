@@ -92,7 +92,10 @@ describe("windows qemu argv", () => {
                 extraCds: ["/media/virtio-win.iso"], sata: true,
             },
         });
-        expect(a).toContain("disk.qcow2,if=ide");
+        // disk stays virtio — install.sata scopes to cds only; IDE install
+        // + virtio boot = INACCESSIBLE_BOOT_DEVICE. WinPE sees the virtio
+        // disk via the seed ISO's DriverPaths (viostor).
+        expect(a).toContain("disk.qcow2,if=virtio");
         expect(a).toContain("file=/media/win.iso,media=cdrom,if=ide");
         expect(a).toContain("file=/media/seed.iso,media=cdrom,if=ide");
         expect(a).toContain("file=/media/virtio-win.iso,media=cdrom,if=ide");
@@ -192,6 +195,25 @@ describe("autounattend.xml", () => {
         const x = autounattendXml({ hostname: "v", username: "u", password: "p", productKey: "AAAAA-BBBBB" });
         expect(x).toContain("AAAAA-BBBBB");
         expect(xml).not.toContain("<ProductKey>");
+    });
+
+    // a malformed answer file fails the whole install deep inside WinPE
+    // (0x80070001/0x40030) — assert well-formedness for every emission
+    // shape so a raw `&`/`<` in a literal command can't regress it.
+    test("the whole document is well-formed XML in every emission shape", () => {
+        [
+            { hostname: "v", username: "u", password: "p" },
+            { hostname: "v", username: "a<b&c", password: `p"&'`, edition: "W & E", productKey: "K&" },
+            { hostname: "v", username: "u", password: "p", testsigning: true },
+        ].forEach((o) => {
+            const x = autounattendXml(o);
+            expect(x).toMatch(/^<\?xml/);
+            expect(x.match(/&(?!amp;|lt;|gt;|quot;|apos;|#)/g)).toBeNull();
+            // balance check — every open tag closed
+            const opens = x.match(/<[A-Za-z]/g)?.length ?? 0;
+            const closes = (x.match(/<\//g)?.length ?? 0) + (x.match(/\/>/g)?.length ?? 0);
+            expect(closes).toBe(opens);
+        });
     });
 });
 
