@@ -60,7 +60,9 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   the appdir launcher.
 - CI does NOT use the sibling engine checkout — deps are already npm specs;
   `.github/actions/downdraft-deps` can still pin `@downdraft/*` to a chosen
-  published version (`downdraft-version` input, `^0.5.0` default). Engine
+  published version (`downdraft-version` input — empty default = keep
+  package.json's specs; never a stale hard default — the old `^0.5.0`
+  shipped engine 0.5.2 in releases and broke shifted key input). Engine
   changes must be **published to npm** before cruiser CI can see them;
   typecheck fails on unreleased APIs (e.g. `PanelSpec.smoothWheel` existed
   locally long before npm had it).

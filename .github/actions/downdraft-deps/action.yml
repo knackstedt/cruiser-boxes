@@ -7,9 +7,9 @@ description: >
   downdraft-version input is provided.
 inputs:
   downdraft-version:
-    description: "npm version spec for @downdraft/* packages"
+    description: "npm version spec for @downdraft/* packages — empty keeps package.json's specs"
     required: false
-    default: "^0.5.0"
+    default: ""
 runs:
   using: "composite"
   steps:
@@ -23,6 +23,9 @@ runs:
           const path = "package.json";
           const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
           const want = process.env.DD_VERSION;
+          // Empty = no pin: package.json's own specs stand (a hard default
+          // like ^0.5.0 froze every release to a stale engine).
+          if (!want) { console.log("no downdraft-version pin — keeping package.json specs"); process.exit(0); }
           for (const sec of ["dependencies", "devDependencies"]) {
             for (const [name, spec] of Object.entries(pkg[sec] ?? {})) {
               if (name.startsWith("@downdraft/")) {
