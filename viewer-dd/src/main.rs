@@ -52,8 +52,35 @@ struct ScanFd {
     poff: u32, stride: u32, bw: u32, bh: u32,
     fourcc: u32, modifier: u64, y0_top: bool,
 }
+/// CPU-path scanout payload — the fallback for consoles QEMU exports as
+/// guest-RAM surfaces instead of dma-bufs (Windows virtio-2d, VGA boot,
+/// software gpu). Raw Scanout carries the pixels inline; ScanoutMap hands
+/// an fd+offset into shareable memory so the frame crosses p2p with no
+/// copy — only the GL texture upload still costs one.
+enum CpuSrc {
+    Pixels(Vec<u8>),
+    Mapped(std::os::fd::OwnedFd, u32),
+}
+struct CpuScan {
+    ci: usize,
+    src: CpuSrc,
+    w: u32, h: u32, stride: u32, fmt: u32,
+}
+/// Damage on a CPU-path console: `data` = raw Update pixels covering just
+/// the rect; None = UpdateMap (the rect is re-read from the stored mmap).
+struct CpuDmg {
+    ci: usize,
+    x: i32, y: i32, w: i32, h: i32,
+    stride: u32, fmt: u32,
+    data: Option<Vec<u8>>,
+}
 enum XJob {
     Fd(ScanFd),
+    /// Full CPU-frame scanout (raw Scanout or ScanoutMap) — replaces the
+    /// console's texture.
+    Cpu(CpuScan),
+    /// Damage on a CPU-frame console (raw Update or UpdateMap).
+    CpuDamage(CpuDmg),
     /// Damage rect on a console (scanout px) — QEMU emits one UpdateDMABUF
     /// per damaged region, so a frame's damage arrives as a serialized burst.
     Nudge(usize, i32, i32, i32, i32),
@@ -119,6 +146,50 @@ struct ViewerConsole {
 }
 
 impl ddproto::ConsoleEvents for ViewerConsole {
+    /// Raw (non-dmabuf) scanout — pixels inline in the method call.
+    fn scanout(&mut self, w: u32, h: u32, stride: u32, fmt: u32, data: Vec<u8>) {
+        let resized = self.dims.w.swap(w as u64, Ordering::Relaxed) != w as u64
+            || self.dims.h.swap(h as u64, Ordering::Relaxed) != h as u64;
+        static NS: AtomicU64 = AtomicU64::new(0);
+        let n = NS.fetch_add(1, Ordering::Relaxed) + 1;
+        if n % 120 == 1 || resized {
+            eprintln!("[listener:{}] Scanout#{n} {w}x{h} stride={stride} fmt={fmt:#x} bytes={}",
+                self.id, data.len());
+        }
+        let _ = self.tx.send(XJob::Cpu(CpuScan {
+            ci: self.idx, src: CpuSrc::Pixels(data), w, h, stride, fmt }));
+    }
+    /// Raw damage — `data` covers just the rect at `stride`.
+    fn update(&mut self, x: i32, y: i32, w: i32, h: i32, stride: u32, fmt: u32,
+              data: Vec<u8>) {
+        UPDATES.fetch_add(1, Ordering::Relaxed);
+        let _ = self.tx.send(XJob::CpuDamage(CpuDmg {
+            ci: self.idx, x, y, w, h, stride, fmt, data: Some(data) }));
+    }
+    /// memfd/mmap scanout — the frame lives in shared memory (guest-RAM
+    /// memfd), only the GL upload costs a copy.
+    fn scanout_map(&mut self, fd: zvariant::OwnedFd, off: u32, w: u32, h: u32,
+                   stride: u32, fmt: u32) {
+        let resized = self.dims.w.swap(w as u64, Ordering::Relaxed) != w as u64
+            || self.dims.h.swap(h as u64, Ordering::Relaxed) != h as u64;
+        static NM: AtomicU64 = AtomicU64::new(0);
+        let n = NM.fetch_add(1, Ordering::Relaxed) + 1;
+        if n % 120 == 1 || resized {
+            eprintln!("[listener:{}] ScanoutMap#{n} off={off} {w}x{h} stride={stride} fmt={fmt:#x}",
+                self.id);
+        }
+        // dup before returning — the callback fd's backing can go stale
+        let d = unsafe { std::os::fd::OwnedFd::from_raw_fd(libc::dup(fd.as_raw_fd())) };
+        let _ = self.tx.send(XJob::Cpu(CpuScan {
+            ci: self.idx, src: CpuSrc::Mapped(d, off), w, h, stride, fmt }));
+    }
+    /// Damage on the mapped scanout — no payload, the GL worker re-reads
+    /// the rect out of its live mmap.
+    fn update_map(&mut self, x: i32, y: i32, w: i32, h: i32) {
+        UPDATES.fetch_add(1, Ordering::Relaxed);
+        let _ = self.tx.send(XJob::CpuDamage(CpuDmg {
+            ci: self.idx, x, y, w, h, stride: 0, fmt: 0, data: None }));
+    }
     fn update_dmabuf(&mut self, x: i32, y: i32, w: i32, h: i32) {
         UPDATES.fetch_add(1, Ordering::Relaxed);
         // reply fast — QEMU gl-blocks the guest until this returns
@@ -173,7 +244,11 @@ impl ddproto::ConsoleEvents for ViewerConsole {
         }));
     }
     fn interfaces(&self) -> Vec<String> {
-        vec![ddproto::IFACE_LISTENER_DMABUF2.to_string()]
+        // DMABUF2 for GL scanouts (venus/yttrium path); Unix.Map so QEMU
+        // prefers the zero-copy-over-p2p memfd scanout for CPU consoles —
+        // raw Scanout/Update on the base iface needs no advertisement.
+        vec![ddproto::IFACE_LISTENER_DMABUF2.to_string(),
+             ddproto::IFACE_LISTENER_MAP.to_string()]
     }
 }
 
@@ -1168,11 +1243,17 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                 eprintln!("[xegl] worker ready ({t})");
                 let mut fps_n = 0u64;
                 let mut fps_t = std::time::Instant::now();
-                // newest fd per console — coalescing collapses nudges and
-                // supersedes stale scanouts so one redraw+swap serves all heads
-                let mut latest: Vec<Option<ScanFd>> = (0..nheads).map(|_| None).collect();
+                // newest scanout per console — one slot for both kinds so a
+                // mid-run mode switch (VGA cpu → virtio-gpu dmabuf) applies
+                // in wire order; coalescing collapses nudges and supersedes
+                // stale scanouts so one redraw+swap serves all heads
+                enum HeadSrc { Dmabuf(ScanFd), Cpu(CpuScan) }
+                let mut latest: Vec<Option<HeadSrc>> = (0..nheads).map(|_| None).collect();
                 // per-console damage queue in scanout px — merged/capped by add_rect
                 let mut damage: Vec<Vec<WRect>> = (0..nheads).map(|_| Vec::new()).collect();
+                // cpu-scanout damage needing a pixel re-upload — drained
+                // after `latest` so a fresh scanout's texture exists first
+                let mut cpu_dmg: Vec<CpuDmg> = Vec::new();
                 let mut last_ext: Option<(i64, i64)> = None;
                 let mut last_geom = (0i32, 0i32);
                 let mut last_swap = std::time::Instant::now() - std::time::Duration::from_secs(1);
@@ -1182,8 +1263,9 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                 // remap/expose → full repaint next present (see XJob::Repaint)
                 let mut force_full = false;
                 let pump = |first: Option<XJob>,
-                                latest: &mut Vec<Option<ScanFd>>,
+                                latest: &mut Vec<Option<HeadSrc>>,
                                 damage: &mut Vec<Vec<WRect>>,
+                                cpu_dmg: &mut Vec<CpuDmg>,
                                 force_full: &mut bool| {
                     for j in first.into_iter().chain(std::iter::from_fn(|| jrx.try_recv().ok())) {
                         match j {
@@ -1196,7 +1278,24 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                                         .min(i32::MAX as u64).max(1) as i32;
                                     add_rect(&mut damage[s.ci], (0, 0, iw, ih));
                                     let ci = s.ci;
-                                    latest[ci] = Some(s);
+                                    latest[ci] = Some(HeadSrc::Dmabuf(s));
+                                }
+                            }
+                            XJob::Cpu(s) => {
+                                if s.ci < nheads {
+                                    let iw = gh.dims[s.ci].w.load(Ordering::Relaxed)
+                                        .min(i32::MAX as u64).max(1) as i32;
+                                    let ih = gh.dims[s.ci].h.load(Ordering::Relaxed)
+                                        .min(i32::MAX as u64).max(1) as i32;
+                                    add_rect(&mut damage[s.ci], (0, 0, iw, ih));
+                                    let ci = s.ci;
+                                    latest[ci] = Some(HeadSrc::Cpu(s));
+                                }
+                            }
+                            XJob::CpuDamage(d) => {
+                                if d.ci < nheads {
+                                    add_rect(&mut damage[d.ci], (d.x, d.y, d.w, d.h));
+                                    cpu_dmg.push(d);
                                 }
                             }
                             XJob::Nudge(ci, x, y, w, h) => {
@@ -1206,22 +1305,41 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                         }
                     }
                 };
-                let import_all = |latest: &mut Vec<Option<ScanFd>>,
+                let import_all = |latest: &mut Vec<Option<HeadSrc>>,
                                       xegl: &mut egl::XEgl| -> bool {
                     let mut imported = false;
                     for (ci, slot) in latest.iter_mut().enumerate() {
-                        if let Some(s) = slot.take() {
-                            if let Err(e) = egl::x11_import(xegl, ci, s.fd.as_raw_fd(),
-                                s.x, s.y, s.w, s.h, s.poff, s.stride, s.fourcc,
-                                s.bw, s.bh, s.modifier, s.y0_top) {
-                                static XF: AtomicU64 = AtomicU64::new(0);
-                                let n = XF.fetch_add(1, Ordering::Relaxed) + 1;
-                                if n % 120 == 1 { eprintln!("[xegl] import failed x{n}: {e:#}"); }
-                            }
-                            imported = true;
+                        let r = match slot.take() {
+                            Some(HeadSrc::Dmabuf(s)) => egl::x11_import(xegl, ci,
+                                s.fd.as_raw_fd(), s.x, s.y, s.w, s.h, s.poff,
+                                s.stride, s.fourcc, s.bw, s.bh, s.modifier, s.y0_top),
+                            Some(HeadSrc::Cpu(s)) => match s.src {
+                                CpuSrc::Pixels(px) => egl::x11_cpu_upload(xegl, ci,
+                                    Some(&px), None, s.w, s.h, s.stride, s.fmt),
+                                CpuSrc::Mapped(fd, off) => egl::x11_cpu_upload(xegl, ci,
+                                    None, Some((fd.as_raw_fd(), off)),
+                                    s.w, s.h, s.stride, s.fmt),
+                            },
+                            None => continue,
+                        };
+                        if let Err(e) = r {
+                            static XF: AtomicU64 = AtomicU64::new(0);
+                            let n = XF.fetch_add(1, Ordering::Relaxed) + 1;
+                            if n % 120 == 1 { eprintln!("[xegl] import failed x{n}: {e:#}"); }
                         }
+                        imported = true;
                     }
                     imported
+                };
+                let apply_cpu_dmg = |cpu_dmg: &mut Vec<CpuDmg>, xegl: &mut egl::XEgl| {
+                    for d in cpu_dmg.drain(..) {
+                        if let Err(e) = egl::x11_cpu_update(xegl, d.ci, d.x, d.y,
+                            d.w, d.h, d.stride, d.fmt, d.data.as_deref()) {
+                            static CU: AtomicU64 = AtomicU64::new(0);
+                            let n = CU.fetch_add(1, Ordering::Relaxed) + 1;
+                            if n % 120 == 1 { eprintln!("[xegl] cpu update failed x{n}: {e:#}"); }
+                        }
+                    }
                 };
                 while let Ok(first) = jrx.recv() {
                     fps_n += 1;
@@ -1242,8 +1360,10 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                     }
                     // drain the burst — QEMU emits one UpdateDMABUF call per
                     // damage rect, serialized by its guest-side gl-block
-                    pump(Some(first), &mut latest, &mut damage, &mut force_full);
+                    pump(Some(first), &mut latest, &mut damage, &mut cpu_dmg,
+                         &mut force_full);
                     let mut imported = import_all(&mut latest, &mut xegl);
+                    apply_cpu_dmg(&mut cpu_dmg, &mut xegl);
                     // windowed single-head: track the guest resolution like
                     // the old per-console windows did — spans are
                     // monitor-locked and multi-head windowed letterboxes.
@@ -1264,8 +1384,10 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                         if let Some(rem) = PACE.checked_sub(last_swap.elapsed()) {
                             if !rem.is_zero() {
                                 std::thread::sleep(rem);
-                                pump(None, &mut latest, &mut damage, &mut force_full);
+                                pump(None, &mut latest, &mut damage, &mut cpu_dmg,
+                                     &mut force_full);
                                 imported = import_all(&mut latest, &mut xegl) || imported;
+                                apply_cpu_dmg(&mut cpu_dmg, &mut xegl);
                             }
                         }
                         let (ww, wh) = egl::x11_geom(&xegl);

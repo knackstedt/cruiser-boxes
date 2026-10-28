@@ -36,7 +36,11 @@ export async function hostMirroredGuestMonitors(spec: VmSpec): Promise<GuestMoni
     const host = await detectAdapter().monitors().catch(() => [] as MonitorInfo[]);
     const sel = spec.display.monitors;
     const picked = sel === "all" ? host : host.filter((m) => sel.includes(m.name));
-    return picked.length ? guestLayoutFromHost(spec.name, picked).monitors : undefined;
+    // Windows is single-head for now — viogpudo is one VidPN target and
+    // viogpu3d multi-head is unverified; extra outputs would just show as
+    // dead consoles (the rdp viewer does real multimon guest-side anyway).
+    const maxOut = spec.os.family === "windows" ? 1 : 4;
+    return picked.length ? guestLayoutFromHost(spec.name, picked, maxOut).monitors : undefined;
 }
 
 /**

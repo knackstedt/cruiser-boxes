@@ -28,6 +28,7 @@ export interface ShareRow {
 export interface VmSummary {
     name: string;
     state: VmState;
+    osFamily: string;              // spec.os.family — ubuntu|debian|fedora|windows
     gpuMode: string;
     swVk: boolean;                 // spec.gpu.softwareVk — host lavapipe over Venus
     headMode: string;
@@ -95,9 +96,11 @@ export type CreateForm = SyncFormFields & {
     persist: string;               // daemonize|owned|ephemeral
     autostart: boolean;            // spec.autostart — boot unit + start with the app
     netMode: string;               // spec.network.mode — nat|restricted|isolated|vmnet
-    method: string;                // none|cloudimg|iso|imported
-    distro: string;                // ubuntu|debian|fedora
-    release: string;               // cloudimg release
+    method: string;                // none|cloudimg|iso|windows|imported
+    distro: string;                // ubuntu|debian|fedora|windows
+    release: string;               // cloudimg release (or windows 10|11)
+    winDriver: string;             // yttrium|virtio2d — windows display driver
+    winEdition: string;            // unattend edition key ("" = ISO's default)
     desktop: string;               // gnome|kde
     browser: string;               // none|firefox|chrome|chromium|vivaldi|brave
     snap: boolean;                 // install snapd (off → flatpak only)
@@ -354,6 +357,7 @@ const defaultCreate = (): CreateForm => ({
     gpu: "venus", swVk: false, headMode: "virtual-desktop", viewer: "dmabuf", persist: "daemonize",
     autostart: false, netMode: "nat",
     method: "cloudimg", distro: "ubuntu", release: "26.04", desktop: "gnome",
+    winDriver: "yttrium", winEdition: "",
     browser: "none", snap: false, extraFonts: false, autologin: true,
     preset: "standard", devtools: [],
     ...syncFormDefaults(),

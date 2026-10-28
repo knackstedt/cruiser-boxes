@@ -1002,6 +1002,16 @@ done
     async guestSh(script: string, timeoutMs = 60_000) {
         return this.withQga((g) => g.sh(script, { timeoutMs }));
     }
+    /** Run a PowerShell script in a windows guest via QGA — the analogue of
+     *  guestSh. UTF-16LE+base64 encoded per -EncodedCommand's contract so
+     *  quoting/escaping never reaches the command line. Windows qemu-ga
+     *  execs as SYSTEM. */
+    async guestPs(script: string, timeoutMs = 60_000) {
+        const b64 = Buffer.from(script, "utf16le").toString("base64");
+        return this.guestExec("powershell.exe",
+            ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", b64],
+            timeoutMs);
+    }
 
     /** Restart the display manager in the guest (connector-probe race fix — the old fixdisplays). */
     async fixDisplays() {

@@ -570,6 +570,7 @@ function create(s: CruiserState): string {
             <div class="hint">the viewer window lands on this desktop (${s.vdRows > 1 ? `${s.vdRows}×${Math.ceil(s.desktops.length / s.vdRows)} grid` : "row"} layout) — • is where you are now</div>`
         : "";
     const kdeOk = f.distro in DISTROS && supportsKrdp(f.distro as keyof typeof DISTROS, f.release);
+    const winGuest = f.method === "windows" || f.distro === "windows";
     const provRows =
         f.method === "cloudimg" ? `
             <div class="hint">A <b>cloud image</b> is a prebuilt disk published by the distro — cruiser downloads it once, resizes it to your disk size, and injects a cloud-init seed that creates your user, sets the password, and enables SSH/RDP. Fastest path to a working VM — no installer.</div>
@@ -577,10 +578,21 @@ function create(s: CruiserState): string {
             ${optRow("Release", "release", f.release, (DISTROS[f.distro as keyof typeof DISTROS]?.releases ?? []).map((r) => [r.id, r.label] as [string, string]))}` :
         f.method === "iso" ? `${field("ISO path or URL", "iso", f.iso, 340)}
             <div class="hint">Boots the ISO with a NoCloud autoinstall seed — slower (~20 min) but runs the real installer unattended. Ubuntu ISOs only for now.</div>` :
+        f.method === "windows" ? `
+            ${optRow("Release", "release", f.release, DISTROS.windows.releases.map((r) => [r.id, r.label] as [string, string]))}
+            ${optRow("Display driver", "winDriver", f.winDriver, [["yttrium", "yttrium (viogpu3d)"], ["virtio2d", "virtio-win 2D"]])}
+            ${f.winDriver === "yttrium"
+                ? `<div class="hint"><b>experimental</b> — Venus GPU + test-signed driver: the zero-copy dmabuf path (best latency, D3D9–11/Vulkan). Turns on test-signing, so Secure Boot must stay off.</div>`
+                : `<div class="hint">stock virtio-win display driver — one extra copy per frame but stable and signed; works with Secure Boot.</div>`}
+            ${field("Edition", "winEdition", f.winEdition, 220)}
+            <div class="hint">unattend edition key — blank installs the ISO's default (Pro).</div>
+            ${field("ISO path or URL", "iso", f.iso, 340)}
+            <div class="hint">blank → cruiser resolves the official ISO from Microsoft's software-download service (a Windows <b>evaluation</b>-equivalent consumer ISO — unactivated, time-limited; bring your own key/ISO for production). Downloads are ~5 GB and the install runs ~30–60 min fully unattended.</div>` :
         f.method === "imported" ? `
             <div class="row"><div class="lbl">Image file</div>
                 <input data-field="importPath" value="${esc(f.importPath)}" style="width:340px">
                 <div class="opt" data-action="pick-import">Browse…</div></div>
+            ${optRow("Guest OS", "distro", f.distro, [["ubuntu", "Ubuntu"], ["debian", "Debian"], ["fedora", "Fedora"], ["windows", "Windows"]], "set-distro")}
             <div class="hint">Boots an existing disk image in place (qcow2/raw/vmdk/… — format is auto-detected). Use for images you've already installed elsewhere.</div>` : "";
     const syncSection = `<div class="h2">Host → guest sync ${aptag("live")}</div>
         <div class="hint" style="margin-left:0">mirrored into the guest while a viewer session is open (and at provision). Turn off per channel.</div>
@@ -719,9 +731,9 @@ function create(s: CruiserState): string {
         ${field("Keep", "snapKeep", f.snapKeep, 80)}
         <div class="hint">auto snapshots are named <b>auto-*</b> and rotate down to the keep count — manual snapshots are never pruned. Only a clean edge can snapshot (qemu-img needs the disk offline): a kill or a host power loss can't.</div>`}
         ${editing ? "" : `<div class="h2">Provisioning</div>
-        ${optRow("Method", "method", f.method, [["none", "none"], ["cloudimg", "cloud image"], ["iso", "ISO autoinstall"], ["imported", "import existing"]])}
+        ${optRow("Method", "method", f.method, [["none", "none"], ["cloudimg", "cloud image"], ["iso", "ISO autoinstall"], ["windows", "Windows"], ["imported", "import existing"]])}
         ${provRows}
-        ${f.method === "none" ? "" : `<div class="h2">Guest software</div>
+        ${f.method === "none" || winGuest ? "" : `<div class="h2">Guest software</div>
         ${optRow("Desktop", "desktop", f.desktop, [["gnome", "GNOME"], ["kde", "KDE Plasma"]])}
         ${f.method === "cloudimg" && f.desktop === "kde" && !kdeOk ? `<div class="hint">KDE needs a guest release that ships krdp — ${esc(f.distro)} ${esc(f.release)} doesn't have one; pick a newer release.</div>` : ""}
         ${optRow("Browser", "browser", f.browser, [["none", "none"], ["firefox", "Firefox"], ["chrome", "Chrome"], ["chromium", "Chromium"], ["vivaldi", "Vivaldi"], ["brave", "Brave"]])}
@@ -732,7 +744,7 @@ function create(s: CruiserState): string {
         ${optRow("Preset", "preset", f.preset, [["standard", "Standard"], ["developer", "Developer"]], "set-preset")}
         ${devtoolsSection}
         <div class="hint">The base bundle — desktop, RDP/audio/GPU stack, flatpak + software store, fonts — is always installed.</div>`}`}
-        ${syncSection}
+        ${winGuest ? "" : syncSection}
         ${usbSection}
         ${editing ? "" : `<div class="h2">Credentials</div>
         ${field("Username", "username", f.username)}

@@ -233,6 +233,7 @@ export class CruiserService {
         const s = h.spec;
         return {
             name: s.name, state,
+            osFamily: s.os.family,
             gpuMode: s.gpu.mode, swVk: s.gpu.softwareVk, headMode: s.display.headMode,
             viewer: s.display.viewer,
             cpus: s.resources.cpus, memMiB: s.resources.memoryMiB,
@@ -526,9 +527,12 @@ export class CruiserService {
             spec.credentials.username = f.username;
             // the ISO autoinstall path is subiquity — ubuntu-only for now;
             // in-guest os-release detection rescues a stale family anyway
-            spec.os.family = (f.method === "iso" ? "ubuntu" : f.distro) as VmSpec["os"]["family"];
-            spec.os.release = f.method === "cloudimg" ? f.release : "";
-            spec.os.desktop = f.desktop as VmSpec["os"]["desktop"];
+            const winGuest = f.method === "windows" || f.distro === "windows";
+            spec.os.family = (f.method === "iso" ? "ubuntu" : winGuest ? "windows" : f.distro) as VmSpec["os"]["family"];
+            spec.os.release = f.method === "cloudimg" || f.method === "windows" ? f.release : "";
+            spec.os.desktop = (winGuest ? "windows" : f.desktop) as VmSpec["os"]["desktop"];
+            spec.os.winDriver = f.winDriver as VmSpec["os"]["winDriver"];
+            if (f.winEdition) spec.os.winEdition = f.winEdition;
             spec.os.browser = f.browser as VmSpec["os"]["browser"];
             spec.os.snap = f.snap;
             spec.os.extraFonts = f.extraFonts;
@@ -589,6 +593,9 @@ export class CruiserService {
             } else if (f.method === "iso") {
                 const { provisionVmIso } = await import("../../provision/src/provision");
                 await provisionVmIso(h, { iso: f.iso, username: f.username, password: pw, onLog });
+            } else if (f.method === "windows") {
+                const { provisionVmWindows } = await import("../../provision/src/windows/provision");
+                await provisionVmWindows(h, { iso: f.iso || undefined, username: f.username, password: pw, onLog });
             } else if (f.method === "imported") {
                 spec.provisioned = { method: "imported", source: f.importPath, completedAt: new Date().toISOString() };
                 if (pw) {

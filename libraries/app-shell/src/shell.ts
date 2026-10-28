@@ -195,6 +195,13 @@ export class CruiserShell {
                 else if (gpuChanged && st().create.viewer === "rdp")
                     st().setField("viewer", "dmabuf");
             }
+            // picking a windows install/disk re-scopes release + forces the
+            // gpu the chosen driver needs (yttrium = venus blob scanouts).
+            if ((k === "method" && v === "windows") || (k === "distro" && v === "windows")) {
+                st().setField("release", DISTROS.windows.releases[0]!.id);
+                if (st().create.winDriver === "yttrium") st().setField("gpu", "venus");
+            }
+            if (k === "winDriver" && v === "yttrium") st().setField("gpu", "venus");
         });
         this.host.onAction("set-distro", (d) => {
             const fam = d.value as keyof typeof DISTROS;
@@ -246,6 +253,9 @@ export class CruiserShell {
             Object.assign(st().create, {
                 name: vm.name, cpus: vm.cpus, memMiB: vm.memMiB, diskGiB: vm.diskGiB,
                 nestedVirt: vm.nestedVirt,
+                // family only re-scopes which linux-only sections render —
+                // provisioning fields are frozen for an existing VM anyway.
+                distro: vm.osFamily,
                 gpu: vm.gpuMode, swVk: vm.swVk, headMode: vm.headMode,
                 // dmabuf is preselected whenever the gpu can export scanouts
                 // — a saved rdp only survives an explicit re-pick.

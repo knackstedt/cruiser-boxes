@@ -33,6 +33,11 @@ extern "C" {
     fn glViewport(x: i32, y: i32, w: i32, h: i32);
     fn glDrawArrays(mode: u32, first: i32, count: i32);
     fn glTexParameteri(t: u32, n: u32, v: i32);
+    fn glTexImage2D(t: u32, level: i32, internal: i32, w: i32, h: i32,
+                    border: i32, format: u32, ty: u32, pixels: *const c_void);
+    fn glTexSubImage2D(t: u32, level: i32, xo: i32, yo: i32, w: i32, h: i32,
+                       format: u32, ty: u32, pixels: *const c_void);
+    fn glGetString(n: u32) -> *const u8;
     fn glClearColor(r: f32, g: f32, b: f32, a: f32);
     fn glClear(mask: u32);
     fn glEnable(cap: u32);
@@ -80,19 +85,54 @@ struct ImgKey {
     fourcc: u32, bw: u32, bh: u32, modifier: u64, y0_top: bool,
 }
 
-/// Per-console scanout state — one texture + the EGLImage that refs the
-/// current GEM. `img: None` until the console's first ScanoutDMABUF2.
+/// Per-console scanout state — one external texture + the EGLImage that
+/// refs the current GEM (zero-copy path), plus a plain GL_TEXTURE_2D for
+/// the CPU path (raw Scanout / ScanoutMap consoles — Windows 2D virtio-gpu,
+/// VGA boot, software gpu). `img: None` until the first ScanoutDMABUF2,
+/// `cpu: None` until the first CPU scanout; `kind_cpu` picks which source
+/// the draw samples — a console can flip kinds mid-run (VGA → virtio-gpu).
 struct HeadSlot {
     tex: u32,
+    ctex: u32,
     img: Option<egl::Image>,
+    cpu: Option<CpuHead>,
     key: Option<ImgKey>,
     w: i32,
     h: i32,
-    /// scanout subrect inside the EGLImage as texture coords:
+    /// scanout subrect inside the source as texture coords:
     /// [u_left, v_bottom, u_right, v_top] (v in GL's bottom-up convention —
-    /// !y0_top scanouts come out flipped).
+    /// !y0_top dmabufs and top-down cpu rows both come out flipped).
     uv: [f32; 4],
     linear: bool,
+    kind_cpu: bool,
+}
+
+/// Live mmap of a ScanoutMap fd — kept per console so UpdateMap damage can
+/// re-read the shared region without a new transfer. `adj` is the
+/// sub-page offset of the surface data inside the mapping.
+struct Mmap { base: *mut u8, len: usize, adj: usize }
+impl Drop for Mmap {
+    fn drop(&mut self) {
+        unsafe { libc::munmap(self.base as *mut c_void, self.len); }
+    }
+}
+unsafe impl Send for Mmap {}
+
+/// Byte transform applied while packing source rows into the texture —
+/// only ever needed on 32bpp layouts (see cpu_fmt).
+#[derive(Clone, Copy)]
+enum Swz { Noop, Swap02, Rev4, Shift1 }
+
+/// CPU-scanout bookkeeping — the GL upload format/swizzle chosen at
+/// scanout time (UpdateMap carries no fmt, so it's stored here) plus the
+/// source stride + optional live mapping.
+struct CpuHead {
+    map: Option<Mmap>,
+    gl_fmt: u32,
+    gl_ty: u32,
+    swz: Swz,
+    bpp: usize,
+    stride: usize,
 }
 
 /// Single-window EGL state — all guest consoles present into the one
@@ -106,7 +146,14 @@ pub struct XEgl {
     prog: u32,
     pa: i32,
     pu: i32,
+    /// CPU-path program — same vertex shader, sampler2D fragment.
+    cprog: u32,
+    cpa: i32,
+    cpu_uv: i32,
     buffer_age: bool,
+    /// GL_EXT_texture_format_BGRA8888 — decides direct-vs-swizzled upload
+    /// for the byte layouts that don't have a core GLES2 format.
+    has_bgra: bool,
     heads: Vec<HeadSlot>,
 }
 
@@ -174,8 +221,20 @@ pub fn x11_present_init(window: u64, w: i32, h: i32, nheads: usize) -> Result<XE
         glAttachShader(prog, vs); glAttachShader(prog, fs); glLinkProgram(prog);
         let mut ok = 0; glGetProgramiv(prog, 0x8B82, &mut ok);
         if ok == 0 { bail!("xegl program link failed"); }
-        let mut texs = vec![0u32; nheads];
-        glGenTextures(nheads as i32, texs.as_mut_ptr());
+        // CPU path — sampler2D variant sharing the vertex shader. Alpha is
+        // forced: x8* guest formats leave the byte undefined.
+        let cfs = mk(0x8B30, b"#version 100\nprecision mediump float; varying vec2 vUV; uniform sampler2D uTex; void main(){ vec4 c=texture2D(uTex,vUV); gl_FragColor=vec4(c.rgb,1.); }\0");
+        let cprog = glCreateProgram();
+        glAttachShader(cprog, vs); glAttachShader(cprog, cfs); glLinkProgram(cprog);
+        glGetProgramiv(cprog, 0x8B82, &mut ok);
+        if ok == 0 { bail!("xegl cpu program link failed"); }
+        let ext_c = glGetString(0x1F03); // GL_EXTENSIONS
+        let has_bgra = !ext_c.is_null()
+            && std::ffi::CStr::from_ptr(ext_c as *const i8).to_string_lossy()
+                .contains("GL_EXT_texture_format_BGRA8888");
+        let mut texs = vec![0u32; 2 * nheads];
+        glGenTextures(2 * nheads as i32, texs.as_mut_ptr());
+        let ctexs = texs.split_off(nheads);
         const GL_TEXTURE_EXTERNAL_OES: u32 = 0x8D65;
         for &tex in &texs {
             glBindTexture(GL_TEXTURE_EXTERNAL_OES, tex);
@@ -184,14 +243,16 @@ pub fn x11_present_init(window: u64, w: i32, h: i32, nheads: usize) -> Result<XE
         }
         let pa = glGetAttribLocation(prog, c"aPos".as_ptr().cast());
         let pu = glGetAttribLocation(prog, c"aUV".as_ptr().cast());
+        let cpa = glGetAttribLocation(cprog, c"aPos".as_ptr().cast());
+        let cpu_uv = glGetAttribLocation(cprog, c"aUV".as_ptr().cast());
         let f = inst.get_proc_address("glEGLImageTargetTexture2DOES").context("glEGLImageTargetTexture2DOES")?;
         IMG_TARGET = Some(std::mem::transmute::<extern "system" fn(), ImgTargetFn>(f));
         Ok(XEgl {
             xdisp: display, xwin: window,
-            inst, dpy, surf, prog, pa, pu, buffer_age,
-            heads: texs.into_iter().map(|tex| HeadSlot {
-                tex, img: None, key: None, w: 0, h: 0,
-                uv: [0.0, 0.0, 1.0, 1.0], linear: false,
+            inst, dpy, surf, prog, pa, pu, cprog, cpa, cpu_uv, buffer_age, has_bgra,
+            heads: texs.into_iter().zip(ctexs).map(|(tex, ctex)| HeadSlot {
+                tex, ctex, img: None, cpu: None, key: None, w: 0, h: 0,
+                uv: [0.0, 0.0, 1.0, 1.0], linear: false, kind_cpu: false,
             }).collect(),
         })
     }
@@ -281,13 +342,184 @@ pub fn x11_import(e: &mut XEgl, ci: usize, fd: RawFd, x: u32, y: u32, w: u32, h:
         let (vb, vt) = if y0_top { (v(y), v(y + h)) } else { (v(y + h), v(y)) };
         head.uv = [x as f32 / bf, vb, (x + w) as f32 / bf, vt];
         head.key = key;
+        head.kind_cpu = false;
         let old = head.img.replace(img);
         if let Some(oi) = old { let _ = e.inst.destroy_image(e.dpy, oi); }
     }
     Ok(())
 }
 
-/// Draw every console's scanout into its window-space rect (top-left
+// ── CPU scanout path (raw Scanout + ScanoutMap) ──
+// The fallback for consoles QEMU exports as guest-RAM surfaces rather
+// than dma-bufs — Windows virtio-2d, VGA text boot, software gpu. QEMU
+// reports PIXMAN format codes; we pack rows (with a byte transform for
+// the layouts GLES2 has no direct format for) into a GL_TEXTURE_2D.
+
+/// mmap `need` bytes of `fd` starting at `off` (rounded down to the page —
+/// `adj` recovers the sub-page offset). fstat-verified so a bad QEMU
+/// offset can't SIGBUS the GL thread.
+fn mmap_region(fd: RawFd, off: usize, need: usize) -> Result<Mmap> {
+    unsafe {
+        let mut st: libc::stat = std::mem::zeroed();
+        if libc::fstat(fd, &mut st) != 0 { bail!("fstat scanout fd"); }
+        if st.st_size < 0 || (off + need) as u64 > st.st_size as u64 {
+            bail!("scanout map out of bounds: off={off} need={need} size={}", st.st_size);
+        }
+        let moff = off & !0xfffusize;
+        let adj = off - moff;
+        let len = adj + need;
+        let p = libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ,
+                           libc::MAP_PRIVATE, fd, moff as i64);
+        if p == libc::MAP_FAILED { bail!("mmap scanout fd"); }
+        Ok(Mmap { base: p as *mut u8, len, adj })
+    }
+}
+
+/// PIXMAN_* code → (GL internal, GL format, GL type, byte transform,
+/// bytes/px). The wire value is (bpp<<24|type<<16|a<<12|r<<8|g<<4|b);
+/// only the 16/32bpp layouts a console actually emits are decoded —
+/// anything else is logged and skipped rather than guessed.
+fn cpu_fmt(fmt: u32, has_bgra: bool) -> Option<(i32, u32, u32, Swz, usize)> {
+    const GL_BGRA_EXT: u32 = 0x80E1;
+    const GL_RGBA_: u32 = 0x1908;
+    const GL_RGB_: u32 = 0x1907;
+    const GL_UNSIGNED_BYTE_: u32 = 0x1401;
+    const GL_UNSIGNED_SHORT_5_6_5_: u32 = 0x8363;
+    Some(match fmt {
+        // a8r8g8b8 / x8r8g8b8 — LE bytes B G R A|X
+        0x02028888 | 0x02020888 =>
+            if has_bgra { (GL_RGBA_ as i32, GL_BGRA_EXT, GL_UNSIGNED_BYTE_, Swz::Noop, 4) }
+            else { (GL_RGBA_ as i32, GL_RGBA_, GL_UNSIGNED_BYTE_, Swz::Swap02, 4) },
+        // a8b8g8r8 / x8b8g8r8 — LE bytes R G B A|X
+        0x02038888 | 0x02030888 =>
+            (GL_RGBA_ as i32, GL_RGBA_, GL_UNSIGNED_BYTE_, Swz::Noop, 4),
+        // b8g8r8a8 / b8g8r8x8 — LE bytes A|X R G B
+        0x02088888 | 0x02080888 =>
+            if has_bgra { (GL_RGBA_ as i32, GL_BGRA_EXT, GL_UNSIGNED_BYTE_, Swz::Rev4, 4) }
+            else { (GL_RGBA_ as i32, GL_RGBA_, GL_UNSIGNED_BYTE_, Swz::Shift1, 4) },
+        // r8g8b8a8 / r8g8b8x8 — LE bytes A|X B G R
+        0x02098888 | 0x02090888 =>
+            (GL_RGBA_ as i32, GL_RGBA_, GL_UNSIGNED_BYTE_, Swz::Rev4, 4),
+        // r5g6b5
+        0x01020565 =>
+            (GL_RGB_ as i32, GL_RGB_, GL_UNSIGNED_SHORT_5_6_5_, Swz::Noop, 2),
+        _ => return None,
+    })
+}
+
+/// Copy `h` rows of `w*bpp` pixels out of a strided source into a packed
+/// Vec, applying the pixel transform for swizzled layouts.
+fn pack_rows(src: &[u8], src_off: usize, stride: usize, w: usize, h: usize,
+             bpp: usize, swz: Swz) -> Result<Vec<u8>> {
+    let rb = w * bpp;
+    let need = src_off + stride.saturating_mul(h.saturating_sub(1)) + rb;
+    if src.len() < need { bail!("scanout data short: {} < {need}", src.len()); }
+    let mut out = vec![0u8; rb * h];
+    for y in 0..h {
+        let so = src_off + y * stride;
+        let d = &mut out[y * rb..(y + 1) * rb];
+        let s = &src[so..so + rb];
+        match swz {
+            Swz::Noop => d.copy_from_slice(s),
+            _ => for (dpx, spx) in d.chunks_exact_mut(4).zip(s.chunks_exact(4)) {
+                dpx.copy_from_slice(&match swz {
+                    Swz::Swap02 => [spx[2], spx[1], spx[0], spx[3]],
+                    Swz::Rev4 => [spx[3], spx[2], spx[1], spx[0]],
+                    Swz::Shift1 => [spx[1], spx[2], spx[3], spx[0]],
+                    Swz::Noop => unreachable!(),
+                });
+            },
+        }
+    }
+    Ok(out)
+}
+
+/// Replace console `ci`'s scanout with CPU-side pixels — `pixels` is a
+/// raw Scanout's inline buffer, `map_fd` a ScanoutMap fd+offset into
+/// shareable memory (guest-RAM memfd; the map is kept for UpdateMap).
+/// Must run on the GL thread.
+#[allow(clippy::too_many_arguments)]
+pub fn x11_cpu_upload(e: &mut XEgl, ci: usize, pixels: Option<&[u8]>,
+                      map_fd: Option<(RawFd, u32)>, w: u32, h: u32,
+                      stride: u32, fmt: u32) -> Result<()> {
+    let (internal, gl_fmt, gl_ty, swz, bpp) = cpu_fmt(fmt, e.has_bgra)
+        .with_context(|| format!("unsupported pixman fmt {fmt:#x} (cpu scanout {w}x{h})"))?;
+    let (w, h) = (w.max(1) as usize, h.max(1) as usize);
+    let stride = (stride as usize).max(w * bpp);
+    let map = match map_fd {
+        Some((fd, off)) => Some(mmap_region(fd, off as usize, stride * h)?),
+        None => None,
+    };
+    let packed = match (&map, pixels) {
+        (Some(m), _) => pack_rows(unsafe { std::slice::from_raw_parts(m.base, m.len) },
+                                 m.adj, stride, w, h, bpp, swz)?,
+        (None, Some(px)) => pack_rows(px, 0, stride, w, h, bpp, swz)?,
+        _ => bail!("cpu scanout with no pixel source"),
+    };
+    let Some(head) = e.heads.get_mut(ci) else { return Ok(()) };
+    unsafe {
+        const GL_TEXTURE_2D_: u32 = 0x0DE1;
+        glBindTexture(GL_TEXTURE_2D_, head.ctex);
+        glTexParameteri(GL_TEXTURE_2D_, 0x2801, 0x2600); // NEAREST min/mag
+        glTexParameteri(GL_TEXTURE_2D_, 0x2800, 0x2600);
+        glTexParameteri(GL_TEXTURE_2D_, 0x2802, 0x812F); // WRAP_S CLAMP_TO_EDGE
+        glTexParameteri(GL_TEXTURE_2D_, 0x2803, 0x812F); // WRAP_T
+        glTexImage2D(GL_TEXTURE_2D_, 0, internal, w as i32, h as i32, 0,
+                     gl_fmt, gl_ty, packed.as_ptr() as *const c_void);
+    }
+    head.w = w as i32;
+    head.h = h as i32;
+    // texel row0 holds screen row0 → v flips vs the dmabuf bottom-up case
+    head.uv = [0.0, 1.0, 1.0, 0.0];
+    head.linear = false;
+    head.kind_cpu = true;
+    head.cpu = Some(CpuHead { map, gl_fmt, gl_ty, swz, bpp, stride });
+    Ok(())
+}
+
+/// Damage rect on a CPU scanout. `data` is a raw Update's payload (rows
+/// at `stride`, covering just the rect); `None` = UpdateMap — the rect is
+/// re-read from the stored mapping. Must run on the GL thread.
+#[allow(clippy::too_many_arguments)]
+pub fn x11_cpu_update(e: &mut XEgl, ci: usize, x: i32, y: i32, w: i32, h: i32,
+                      stride: u32, fmt: u32, data: Option<&[u8]>) -> Result<()> {
+    let (ctex, iw, ih) = match e.heads.get(ci) {
+        Some(hd) if hd.kind_cpu => (hd.ctex, hd.w.max(0) as usize, hd.h.max(0) as usize),
+        _ => return Ok(()),
+    };
+    let (x, y) = (x.max(0) as usize, y.max(0) as usize);
+    // clamp to the uploaded image — damage can overshoot a resize
+    let w = (w.max(0) as usize).min(iw.saturating_sub(x));
+    let h = (h.max(0) as usize).min(ih.saturating_sub(y));
+    if w == 0 || h == 0 { return Ok(()); }
+    let cpu = match e.heads.get(ci).and_then(|hd| hd.cpu.as_ref()) {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+    let packed = match data {
+        Some(px) => {
+            let Some((_, _, _, swz, bpp)) = cpu_fmt(fmt, e.has_bgra) else {
+                bail!("unsupported pixman fmt {fmt:#x} (cpu update)")
+            };
+            pack_rows(px, 0, (stride as usize).max(w * bpp), w, h, bpp, swz)?
+        }
+        None => {
+            let Some(map) = &cpu.map else { return Ok(()) };
+            let src = unsafe { std::slice::from_raw_parts(map.base, map.len) };
+            pack_rows(src, map.adj + y * cpu.stride + x * cpu.bpp, cpu.stride,
+                      w, h, cpu.bpp, cpu.swz)?
+        }
+    };
+    unsafe {
+        const GL_TEXTURE_2D_: u32 = 0x0DE1;
+        glBindTexture(GL_TEXTURE_2D_, ctex);
+        glTexSubImage2D(GL_TEXTURE_2D_, 0, x as i32, y as i32, w as i32, h as i32,
+                        cpu.gl_fmt, cpu.gl_ty, packed.as_ptr() as *const c_void);
+    }
+    Ok(())
+}
+
+
 /// coords — glViewport's bottom-left origin is converted here) and swap.
 /// `geom` is the current drawable size (the caller queries it once for its
 /// layout math too). `need` bounds the repaint when non-empty (buffer-age
@@ -302,30 +534,44 @@ pub fn x11_redraw(e: &mut XEgl, rects: &[(i32, i32, i32, i32)], geom: (i32, i32)
         let (_ww, wh) = geom;
         glClearColor(0.0, 0.0, 0.0, 1.0);
         if need.is_empty() { glClear(0x4000); } // GL_COLOR_BUFFER_BIT
-        glUseProgram(e.prog);
-        let (pa, pu, nh) = (e.pa, e.pu, e.heads.len());
+        let (prog, pa, pu, cprog, cpa, cpu_uv, nh) =
+            (e.prog, e.pa, e.pu, e.cprog, e.cpa, e.cpu_uv, e.heads.len());
         let heads = &mut e.heads;
         glEnableVertexAttribArray(pa as u32);
         glEnableVertexAttribArray(pu as u32);
+        glEnableVertexAttribArray(cpa as u32);
+        glEnableVertexAttribArray(cpu_uv as u32);
         const GL_TEXTURE_EXTERNAL_OES: u32 = 0x8D65;
+        const GL_TEXTURE_2D_: u32 = 0x0DE1;
         const GL_SCISSOR_TEST: u32 = 0x0C11;
         const GL_LINEAR: i32 = 0x2601;
         const GL_NEAREST: i32 = 0x2600;
         let mut draw_head = |i: usize| {
             let Some(&(rx, ry, rw, rh)) = rects.get(i) else { return };
             let head = &mut heads[i];
-            if rw <= 0 || rh <= 0 || head.img.is_none() { return; }
+            if rw <= 0 || rh <= 0 { return; }
+            // cpu heads sample the GL_TEXTURE_2D + sampler2D program;
+            // dmabuf heads the external texture + samplerExternalOES one.
+            let (target, tex, pa2, pu2) = if head.kind_cpu {
+                if head.cpu.is_none() { return }
+                glUseProgram(cprog);
+                (GL_TEXTURE_2D_, head.ctex, cpa, cpu_uv)
+            } else {
+                if head.img.is_none() { return }
+                glUseProgram(prog);
+                (GL_TEXTURE_EXTERNAL_OES, head.tex, pa, pu)
+            };
             let (vx, vy, vw, vh) = fit_viewport(rw as u32, rh as u32, head.w, head.h);
             glViewport(rx + vx, wh - (ry + vy) - vh, vw, vh);
-            glBindTexture(GL_TEXTURE_EXTERNAL_OES, head.tex);
+            glBindTexture(target, tex);
             // NEAREST is exact at 1:1 (span mode); anything scaled reads
             // better linear — swap filter only on transitions.
             let lin = vw != head.w || vh != head.h;
             if head.linear != lin {
                 head.linear = lin;
                 let f = if lin { GL_LINEAR } else { GL_NEAREST };
-                glTexParameteri(GL_TEXTURE_EXTERNAL_OES, 0x2801, f);
-                glTexParameteri(GL_TEXTURE_EXTERNAL_OES, 0x2800, f);
+                glTexParameteri(target, 0x2801, f);
+                glTexParameteri(target, 0x2800, f);
             }
             let [u0, v0, u1, v1] = head.uv;
             let quad: [f32; 16] = [
@@ -334,8 +580,8 @@ pub fn x11_redraw(e: &mut XEgl, rects: &[(i32, i32, i32, i32)], geom: (i32, i32)
                 -1.0,  1.0, u0, v1,
                  1.0,  1.0, u1, v1,
             ];
-            glVertexAttribPointer(pa as u32, 2, 0x1406, 0, 16, quad.as_ptr() as *const c_void);
-            glVertexAttribPointer(pu as u32, 2, 0x1406, 0, 16, quad.as_ptr().offset(2) as *const c_void);
+            glVertexAttribPointer(pa2 as u32, 2, 0x1406, 0, 16, quad.as_ptr() as *const c_void);
+            glVertexAttribPointer(pu2 as u32, 2, 0x1406, 0, 16, quad.as_ptr().offset(2) as *const c_void);
             glDrawArrays(0x0005, 0, 4);
         };
         if need.is_empty() {

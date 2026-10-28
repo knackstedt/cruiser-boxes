@@ -34,19 +34,23 @@ export async function openVmSession(h: VmHandle, opts: VmSessionOpts = {}): Prom
     const viewer = new ViewerSession(h.spec, opts);
     await viewer.open();
 
-    const syncs = new SessionSyncs(h, opts.log);
-    syncs.start();
-    const filesyncs = new FileSyncs(h, opts.log);
-    filesyncs.start();
-    const notify = NotifyBridge.enabled(h.spec) ? new NotifyBridge(h, opts.log) : null;
+    // windows guests: every session channel is bash/ssh-shaped — the sync
+    // engines would just log-fail in a loop. (Clipboard still works —
+    // that's the vdagent wire, not a session script.)
+    const linuxGuest = h.spec.os.family !== "windows";
+    const syncs = linuxGuest ? new SessionSyncs(h, opts.log) : null;
+    syncs?.start();
+    const filesyncs = linuxGuest ? new FileSyncs(h, opts.log) : null;
+    filesyncs?.start();
+    const notify = linuxGuest && NotifyBridge.enabled(h.spec) ? new NotifyBridge(h, opts.log) : null;
     void notify?.start().catch(() => {});
 
     let disposed = false;
     const disposeSyncs = () => {
         if (disposed) return;
         disposed = true;
-        syncs.dispose();
-        filesyncs.dispose();
+        syncs?.dispose();
+        filesyncs?.dispose();
         notify?.dispose();
     };
     viewer.on("closed", disposeSyncs);

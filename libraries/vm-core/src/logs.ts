@@ -199,6 +199,8 @@ export interface JournalResult {
 
 /** Read the guest's systemd journal with filters. Throws on hard failure. */
 export async function guestJournal(h: VmHandle, f: JournalFilters = {}, timeoutMs = 45_000): Promise<JournalResult> {
+    if (h.spec.os.family === "windows")
+        throw new Error("no systemd journal in a windows guest — the Logs screen shows run/ files (serial.log captures EMS output)");
     const argv = journalArgs(f);
     const r = await guestRun(h, argv, timeoutMs);
     if (r.code !== 0 && r.transport === "qga") {
@@ -214,6 +216,7 @@ export async function guestJournal(h: VmHandle, f: JournalFilters = {}, timeoutM
 
 /** Unit names logged in the current boot — for the unit filter picker. */
 export async function guestJournalUnits(h: VmHandle, timeoutMs = 30_000): Promise<{ units: string[]; transport: LogTransport }> {
+    if (h.spec.os.family === "windows") return { units: [], transport: "qga" };
     const r = await guestRun(h, journalUnitsArgs(), timeoutMs);
     if (r.code !== 0) throw new Error(`journalctl -F exited ${r.code}: ${(r.stderr || r.stdout).slice(-400)}`);
     const units = r.stdout.split("\n").map((s) => s.trim()).filter(Boolean).sort();

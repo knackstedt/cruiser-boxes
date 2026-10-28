@@ -47,7 +47,17 @@ export interface BuildOpts {
     /** virtiofsd socket per share when virtiofsd is available; else 9p. */
     virtiofs?: boolean;
     /** iso omitted → seed-only boot (cloudimg first-boot provisioning). */
-    install?: { iso?: string; seedIso: string; kernel?: string; initrd?: string; serialLog?: string };
+    install?: {
+        iso?: string; seedIso: string; kernel?: string; initrd?: string; serialLog?: string;
+        /** Additional cdrom drives attached after iso+seedIso — the windows
+         *  install uses this for the virtio-win driver disc. */
+        extraCds?: string[];
+        /** Attach the system disk + all cdroms on the q35's native AHCI
+         *  instead of virtio — required for guests whose installer has no
+         *  virtio storage drivers (Windows PE). Production boots still get
+         *  virtio-blk once the image has viostor injected. */
+        sata?: boolean;
+    };
     /** display.viewer=dmabuf: rendernode QEMU exports scanouts from — must be
      *  the host display GPU (resolved by the lifecycle, auto-detected). */
     dbusRenderNode?: string;
@@ -116,7 +126,14 @@ export function buildArgs(
     push("-object", `memory-backend-memfd,share=on,id=mem0,size=${memBytes}`);
     push("-accel", "kvm");
     const nestedFlag = spec.resources.nestedVirt ? hostVirtFlag() : null;
-    push("-cpu", `host${nestedFlag ? `,+${nestedFlag}` : ""}`);
+    // Windows guests get the standard Hyper-V enlightenments — the same
+    // flags every libvirt/win guest ships; measurable win on scheduling,
+    // timers and TLB shootdowns. Linux -cpu host already gets them via
+    // the kernel's own detection so they're omitted there.
+    const winHv = spec.os.family === "windows"
+        ? ",hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_vpindex,hv_runtime,hv_synic,hv_stimer"
+        : "";
+    push("-cpu", `host${winHv}${nestedFlag ? `,+${nestedFlag}` : ""}`);
     push("-smp", `${cpus},sockets=${spec.resources.sockets},cores=${cpus},threads=${spec.resources.threads}`);
     push("-drive", `if=pflash,format=raw,unit=0,readonly=on,file=${ovmfCode(sb)}`);
     push("-drive", `if=pflash,format=raw,unit=1,file=${paths.ovmfVars}`);
@@ -139,7 +156,10 @@ export function buildArgs(
         if (enc === "full" && spec.disk.format !== "qcow2")
             throw new Error(`disk.encrypt=full requires disk.format=qcow2 (got ${spec.disk.format})`);
     }
-    push("-drive", `file=${disk},if=virtio,format=${spec.disk.format},discard=unmap` +
+    // install.sata → the system disk attaches on the native AHCI for a
+    // driverless installer (Windows PE); normal boots keep virtio-blk.
+    const diskIf = opts.mode === "install" && opts.install?.sata ? "ide" : "virtio";
+    push("-drive", `file=${disk},if=${diskIf},format=${spec.disk.format},discard=unmap` +
         (enc === "full" ? `,encrypt.key-secret=${DISK_SECRET_ID}` : ""));
     if (enc === "home") {
         push("-drive", `if=none,id=home0,file=${homeDiskPath(spec, paths.dir)},format=qcow2,discard=unmap,encrypt.key-secret=${DISK_SECRET_ID}`);
@@ -300,13 +320,21 @@ export function buildArgs(
     // ── install-mode extras (autoinstall ISO path) ──
     if (opts.mode === "install" && opts.install) {
         const ins = opts.install;
-        push("-device", "virtio-scsi-pci,id=scsi0");
-        if (ins.iso) {
-            push("-drive", `file=${ins.iso},media=cdrom,if=none,id=cd0,readonly=on`);
-            push("-device", "scsi-cd,drive=cd0");
+        // index-stable ids: iso=cd0, seedIso=cd1, extraCds=cd2… — a missing
+        // earlier slot keeps the later ids (seed is always cd1).
+        const cds = [ins.iso, ins.seedIso, ...(ins.extraCds ?? [])];
+        if (ins.sata) {
+            // native AHCI cdroms — see install.sata above (Windows PE sees
+            // them out of the box; a virtio-scsi cd is invisible to it).
+            cds.forEach((cd) => { if (cd) push("-drive", `file=${cd},media=cdrom,if=ide,readonly=on`); });
+        } else {
+            push("-device", "virtio-scsi-pci,id=scsi0");
+            cds.forEach((cd, i) => {
+                if (!cd) return;
+                push("-drive", `file=${cd},media=cdrom,if=none,id=cd${i},readonly=on`);
+                push("-device", `scsi-cd,drive=cd${i}`);
+            });
         }
-        push("-drive", `file=${ins.seedIso},media=cdrom,if=none,id=cd1,readonly=on`);
-        push("-device", "scsi-cd,drive=cd1");
         if (ins.kernel && ins.initrd) {
             push("-kernel", ins.kernel, "-initrd", ins.initrd);
             push("-append", "boot=casper autoinstall ds=nocloud console=ttyS0,115200n8 ---");

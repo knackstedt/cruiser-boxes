@@ -1,6 +1,8 @@
 # cruiser — agent notes
 
-WinBoat-style QEMU/KVM VM manager for **Linux guests only**, on the DownDraft
+WinBoat-style QEMU/KVM VM manager for **Linux guests plus a Windows target**
+(`os.family=windows` — unattend ISO install + virtio-win/yttrium drivers;
+linux-only features are schema- and UI-gated), on the DownDraft
 native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 
 ## Commands
@@ -271,6 +273,16 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   y0_top=false sample upright ONLY with the v-flip (v_bottom=(y+h)/bh);
   treating the flag literally renders every head upside-down (observed on
   NVIDIA EGL). Imports dedupe on fstat (dev,ino) + full attrib tuple.
+  Non-dmabuf scanouts (any guest without GL exports — stock virtio-win
+  viogpudo, WinPE, unaccelerated Linux): the listener also implements
+  `Scanout`/`Update` (inline pixels) and `ScanoutMAP`/`UpdateMAP`
+  (`Listener.Unix.Map` memfd → mmap), uploading into per-head GL textures
+  with damage-scissored `glTexSubImage2D`. Each head carries a live
+  kind (Dmabuf|Cpu|Mapped) and the worker holds ONE latest-job slot per
+  console, so a scanout-kind flip can't reorder a stale dma-buf over a
+  newer CPU frame; presents switch shader program/texture target per
+  head. One extra copy vs. dmabuf — the fallback keeps windows guests
+  and the installer visible on the same viewer.
   Clipboard (dmabuf): `-chardev qemu-vdagent,clipboard=on,mouse=off` +
   virtserialport `com.redhat.spice.0` (args.ts, gated on display.clipboard +
   a `-chardev help` probe — backend needs CONFIG_SPICE_PROTOCOL). Guest side
@@ -547,6 +559,35 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   watermarks in dead space. `shortcutsDoc` is viewer-aware (`display.viewer`
   rdp→freerdp text, dmabuf→viewer-dd) and drops the escape list when the
   host adapter can't bind shortcuts.
+  `windows/` — the `os.family=windows` pipeline
+  (`provision windows <vm> [iso]` / create-form "Windows" method):
+  `isos.ts` resolves three artifacts — the Windows ISO (Microsoft's
+  software-download-connector API: session-id'd tags→SKU→link flow with a
+  `Referer`, IP-sentinel-blocked on some networks → manual ISO path/URL
+  override), the virtio-win ISO (Fedora mirror, versioned dir → latest
+  fallback; CHECKSUM sidecar when published), and the yttrium release zip
+  (arehnman/yttrium-virtio-gpu GitHub releases) — all through
+  `ensureDownload`'s atomic cache. `unattend.ts` generates
+  autounattend.xml (EFI/MSR/Primary partition table, WinPE DriverPaths,
+  specialize RunSynchronous → cruiser-setup.ps1, OOBE autologon →
+  cruiser-done.cmd's shutdown = the host's install-complete signal) and
+  packs it + scripts + the yttrium payload into a Joliet seed ISO
+  (`buildSeedIso`). `install.ts` runs an OWNED QEMU with
+  `install.sata` — the system disk AND all three CDs on native AHCI so
+  driverless WinPE sees everything (production virtio comes from the
+  virtio-win ISO installed during specialize); waits for the
+  FirstLogonCommands shutdown. `provision.ts` orchestrates: downloads →
+  seed ISO → install run → normal boot → QGA wait → `setup.ts`
+  PowerShell-over-`guestPs` (virtiofs→drive-letter mapping, vdagent
+  clipboard service, wallpaper, RDP) → `provisioned.method=windows-iso`.
+  Schema: `os.winDriver=yttrium|virtio2d` (yttrium needs
+  `gpu.mode=venus` + Secure Boot OFF — test-signed driver; virtio2d is
+  the stock signed fallback), `os.winEdition` selects the /IMAGE/NAME.
+  The unattend password lives only in the transient seed ISO — never
+  the spec. QGA-on-windows is SYSTEM session 0: `guestPs` exec works but
+  `vm screenshot --guest` can't see the interactive desktop (schema/
+  screen.ts guard). CPU flags: windows specs get the hv_* enlightenment
+  set on -cpu host.
 - `libraries/app-mode` — waypipe over vsock (socat bridge) / ssh fallback.
   guestAppCatalog also scans flatpak export dirs (system+user), /usr/local,
   and snapd's, deduped by desktop id in XDG precedence order (user first);

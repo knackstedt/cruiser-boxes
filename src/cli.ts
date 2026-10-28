@@ -42,7 +42,12 @@ usage: cruiser <area> <command> [args]
                    [--net nat|restricted|isolated|vmnet]   restricted = host-only (sandbox),
                                                         isolated = no netdev, vmnet = nat +
                                                         shared L2 with other vmnet VMs
-                   [--distro ubuntu|debian|fedora] [--desktop gnome|kde]
+                   [--distro ubuntu|debian|fedora|windows] [--desktop gnome|kde]
+                   [--win-driver yttrium|virtio2d]    windows only — yttrium = venus gpu +
+                                                      test-signed viogpu3d (fast path);
+                                                      virtio2d = stock virtio-win display
+                   [--win-edition <name>]            windows only — unattend edition key
+                                                      (default: the ISO's first edition)
                    [--browser none|firefox|chrome|chromium|vivaldi|brave]
                    [--snap] [--xfonts] [--no-autologin] [--devtools toolchain,python,rust,…]
                    [--provision-script <host-path>]  run at end of guest-setup (root, idempotent)
@@ -151,6 +156,10 @@ usage: cruiser <area> <command> [args]
   app uninstall <vm>                    remove the VM's host launchers
   provision cloudimg <vm> [release]   [--user u] [--password p]  (release defaults to the VM's distro default)
   provision iso <vm> <iso-or-url> [--user u] [--password p]
+  provision windows <vm> [iso-or-url] [--user u] [--password p]
+                                      unattended install from the official eval ISO (auto-
+                                      downloaded; pass a local ISO/URL to override) +
+                                      virtio-win drivers + the spec's winDriver
   provision guest-setup <vm>           re-run in-guest setup on a provisioned VM
   toolchain check|build|adopt-src [dir]
   doctor                                host dependency + permission report
@@ -314,6 +323,16 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const persist = flagVal("--persist"); if (persist) spec.persist = persist as VmSpec["persist"];
             const net = flagVal("--net"); if (net) spec.network.mode = net as VmSpec["network"]["mode"];
             const distro = flagVal("--distro"); if (distro) spec.os.family = distro as VmSpec["os"]["family"];
+            const winDriver = flagVal("--win-driver"); if (winDriver) spec.os.winDriver = winDriver as VmSpec["os"]["winDriver"];
+            const winEdition = flagVal("--win-edition"); if (winEdition) spec.os.winEdition = winEdition;
+            // windows defaults: the unattend installer runs a plain "windows"
+            // desktop identity; winDriver picks the gpu (yttrium needs venus
+            // blob scanouts for the dmabuf fast path — an explicit --gpu wins).
+            if (spec.os.family === "windows") {
+                spec.os.desktop = "windows";
+                if (!spec.os.release) spec.os.release = "11";
+                if (!gpu) spec.gpu.mode = spec.os.winDriver === "virtio2d" ? "virgl" : "venus";
+            }
             const desktop = flagVal("--desktop"); if (desktop) spec.os.desktop = desktop as VmSpec["os"]["desktop"];
             const browser = flagVal("--browser"); if (browser) spec.os.browser = browser as VmSpec["os"]["browser"];
             if (has("--nested")) spec.resources.nestedVirt = true;
@@ -389,7 +408,9 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             }
             console.log(`created ${h.spec.name} @ ${h.paths.dir}`);
             console.log(`  ssh:${h.spec.network.sshPort} rdp:${h.spec.network.rdpPort} gpu:${h.spec.gpu.mode} viewer:${h.spec.display.viewer} head:${h.spec.display.headMode}`);
-            console.log(`  next: cruiser provision cloudimg ${spec.name} <release>  (or drop a disk.qcow2 in)`);
+            console.log(`  next: ${h.spec.os.family === "windows"
+                ? `cruiser provision windows ${h.spec.name}  (downloads the eval ISO — 10-20 GB, ~30-60 min)`
+                : `cruiser provision cloudimg ${spec.name} <release>`}  (or drop a disk.qcow2 in)`);
             break;
         }
         case "start": {
@@ -830,7 +851,9 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const h = await registry.create(VmSpec.parse(spec));
             console.log(`imported '${h.spec.name}' from ${origin.url ?? origin.id} → ${h.paths.dir}`);
             console.log(`  ssh:${h.spec.network.sshPort} rdp:${h.spec.network.rdpPort} (freshly allocated)`);
-            console.log(`  next: cruiser provision cloudimg ${h.spec.name}  (or drop a disk.qcow2 in)`);
+            console.log(`  next: ${h.spec.os.family === "windows"
+                ? `cruiser provision windows ${h.spec.name}`
+                : `cruiser provision cloudimg ${h.spec.name}`}  (or drop a disk.qcow2 in)`);
             break;
         }
         case "export": {
@@ -1209,9 +1232,20 @@ switch (area) {
             timezone: flagVal("--timezone"), mirrorHostMonitors: !has("--no-monitor-mirror"),
             onLog: (m: string) => console.log(m),
         };
+        const isWin = h.spec.os.family === "windows";
+        if ((sub === "cloudimg" || sub === "iso") && isWin)
+            { console.error(`${h.spec.name} is a windows VM — use 'provision windows'`); process.exit(2); }
+        if (sub === "windows" && !isWin)
+            { console.error(`${h.spec.name} isn't a windows VM (os.family=${h.spec.os.family})`); process.exit(2); }
+        if (sub === "guest-setup" && isWin)
+            { console.error(`${h.spec.name} is a windows VM — in-guest setup runs inside 'provision windows'`); process.exit(2); }
         const { provisionVmCloudimg, provisionVmIso, reprovisionGuest } = await import("../libraries/provision/src/provision");
         if (sub === "cloudimg") await provisionVmCloudimg(h, { ...o, release: rest[1] });
         else if (sub === "iso") { if (!rest[1]) usage(); await provisionVmIso(h, { ...o, iso: rest[1] }); }
+        else if (sub === "windows") {
+            const { provisionVmWindows } = await import("../libraries/provision/src/windows/provision");
+            await provisionVmWindows(h, { ...o, iso: rest[1] });
+        }
         else if (sub === "guest-setup") await reprovisionGuest(h, o);
         else usage();
         break;

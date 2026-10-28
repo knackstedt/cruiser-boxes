@@ -48,6 +48,8 @@ fi
  *  Throws when no capture tool succeeded (locked screen counts as a
  *  failure on GNOME — the shell refuses grabs while locked). */
 export async function guestScreenshot(h: VmHandle, timeoutMs = 45_000): Promise<Buffer> {
+    if (h.spec.os.family === "windows")
+        throw new Error("no --guest screenshot in a windows guest — QGA runs in session 0 and can't see the interactive desktop (plain `vm screenshot` uses the QMP screendump)");
     const out = `/tmp/cruiser-shot-${Date.now()}.png`;
     try {
         const r = await guestRun(h, ["/bin/sh", "-c", guestShotScript(h.spec.credentials.username, out)], timeoutMs);
