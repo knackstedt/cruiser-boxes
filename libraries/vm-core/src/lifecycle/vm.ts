@@ -265,8 +265,15 @@ export class VmHandle {
                 throw new Error("display.viewer=dmabuf needs gpu.mode virgl or venus — QEMU exports no GL scanouts in software mode");
             // QEMU exports the guest scanout from this node; the viewer's EGL
             // must import same-vendor dma-bufs → always the display GPU.
+            // Exception: yttrium's venus stack is qualified on mesa/RADV —
+            // the dbus rendernode doubles as the venus GPU (virtio-vga-gl
+            // has no device-level node), so follow spec.gpu.renderNode and
+            // rely on the linear modifier=INVALID scanouts virtio produces
+            // importing fine cross-vendor.
             const { pickDisplayRenderNode } = await import("../gpu/rendernode");
-            opts.dbusRenderNode ??= (await pickDisplayRenderNode()) ?? undefined;
+            opts.dbusRenderNode ??= (this.spec.os?.winDriver === "yttrium" && this.spec.gpu.renderNode
+                ? this.spec.gpu.renderNode
+                : await pickDisplayRenderNode()) ?? undefined;
             if (!opts.dbusRenderNode)
                 throw new Error("display.viewer=dmabuf: no DRM render node found for the host display GPU");
             // Clipboard rides a qemu-vdagent chardev → org.qemu.Display1.Clipboard.

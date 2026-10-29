@@ -323,6 +323,7 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const persist = flagVal("--persist"); if (persist) spec.persist = persist as VmSpec["persist"];
             const net = flagVal("--net"); if (net) spec.network.mode = net as VmSpec["network"]["mode"];
             const distro = flagVal("--distro"); if (distro) spec.os.family = distro as VmSpec["os"]["family"];
+            const release = flagVal("--release"); if (release) spec.os.release = release;
             const winDriver = flagVal("--win-driver"); if (winDriver) spec.os.winDriver = winDriver as VmSpec["os"]["winDriver"];
             const winEdition = flagVal("--win-edition"); if (winEdition) spec.os.winEdition = winEdition;
             // windows defaults: the unattend installer runs a plain "windows"

@@ -33,13 +33,26 @@ const YTTRIUM_RELEASES = "https://api.github.com/repos/arehnman/yttrium-virtio-g
  *  eval media, and the sha256 Microsoft publishes on the eval page.
  *  Used when the consumer-ISO API's Sentinel gate blocks this IP. Single
  *  image ("Windows 11 Enterprise Evaluation"); unactivated, 90-day eval. */
-export const WIN_EVAL_ISO = {
-    url: "https://software-static.download.prss.microsoft.com/dbazure/888969d5-f34g-4e03-ac9d-1f9786c66749/" +
-        "26200.6584.250915-1905.25h2_ge_release_svc_refresh_CLIENTENTERPRISEEVAL_OEMRET_x64FRE_en-us.iso",
-    file: "windows-11-enterprise-eval-x64.iso",
-    sha256: "a61adeab895ef5a4db436e0a7011c92a2ff17bb0357f58b13bbc4062e535e7b9",
-    edition: "Windows 11 Enterprise Evaluation",
+export const WIN_EVAL_ISOS: Record<string, { url: string; file: string; sha256: string; edition: string }> = {
+    "11": {
+        url: "https://software-static.download.prss.microsoft.com/dbazure/888969d5-f34g-4e03-ac9d-1f9786c66749/" +
+            "26200.6584.250915-1905.25h2_ge_release_svc_refresh_CLIENTENTERPRISEEVAL_OEMRET_x64FRE_en-us.iso",
+        file: "windows-11-enterprise-eval-x64.iso",
+        sha256: "a61adeab895ef5a4db436e0a7011c92a2ff17bb0357f58b13bbc4062e535e7b9",
+        edition: "Windows 11 Enterprise Evaluation",
+    },
+    // 22H2 — sha256 from Microsoft's Windows10Enterprise22H2HashValues.pdf.
+    // dwm.exe on this build predates the 24H2 DComp paths that crash the
+    // yttrium UMD on Win11 — the upstream-qualified target.
+    "10": {
+        url: "https://software-static.download.prss.microsoft.com/dbazure/988969d5-f34g-4e03-ac9d-1f9786c66750/" +
+            "19045.2006.220908-0225.22h2_release_svc_refresh_CLIENTENTERPRISEEVAL_OEMRET_x64FRE_en-us.iso",
+        file: "windows-10-enterprise-eval-x64.iso",
+        sha256: "ef7312733a9f5d7d51cfa04ac497671995674ca5e1058d5164d6028f0938d668",
+        edition: "Windows 10 Enterprise Evaluation",
+    },
 };
+export const WIN_EVAL_ISO = WIN_EVAL_ISOS["11"]!;
 
 /** ISO9660 primary volume descriptor magic at sector 16. */
 export async function isoSanityCheck(path: string, minBytes = 256 * 1024 * 1024): Promise<void> {
@@ -133,13 +146,14 @@ export async function ensureWindowsIso(release: string, userIso?: string,
         } catch (e) {
             // Sentinel blocks the consumer flow from some IPs — the eval ISO
             // is the sanctioned fallback (digest-pinned, no API gate).
-            if (release === "11" && e instanceof Error && /Sentinel|manually/.test(e.message)) {
+            const evalIso = WIN_EVAL_ISOS[release];
+            if (evalIso && e instanceof Error && /Sentinel|manually/.test(e.message)) {
                 onLog?.("consumer ISO blocked by Microsoft's IP filter — using the official Enterprise Evaluation ISO instead");
-                const evalFile = join(ISO_DIR, WIN_EVAL_ISO.file);
-                await ensureDownload(WIN_EVAL_ISO.url, evalFile,
-                    { expect: { algo: "sha256", hex: WIN_EVAL_ISO.sha256 } });
+                const evalFile = join(ISO_DIR, evalIso.file);
+                await ensureDownload(evalIso.url, evalFile,
+                    { expect: { algo: "sha256", hex: evalIso.sha256 } });
                 await isoSanityCheck(evalFile);
-                return { path: evalFile, edition: WIN_EVAL_ISO.edition };
+                return { path: evalFile, edition: evalIso.edition };
             }
             throw e;
         }

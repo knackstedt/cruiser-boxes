@@ -27,6 +27,9 @@ use zvariant::Fd;
 static DM_BUFS: AtomicU64 = AtomicU64::new(0);
 static UPDATES: AtomicU64 = AtomicU64::new(0);
 static MOUSE_VERBOSE: AtomicU64 = AtomicU64::new(0);
+/// --dump <path>: after every present, overwrite <path> with a PPM of the
+/// composited frame — lets a headless session read the guest's screen.
+static DUMP_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Per-console scanout dims — the window thread's input map needs them.
 struct Dims { w: AtomicU64, h: AtomicU64 }
@@ -1447,6 +1450,13 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                             let n = XF2.fetch_add(1, Ordering::Relaxed) + 1;
                             if n % 120 == 1 { eprintln!("[xegl] redraw failed x{n}: {e:#}"); }
                         }
+                        if let Some(p) = DUMP_PATH.get() {
+                            if let Err(e) = egl::x11_dump(&mut xegl, &rects, (ww, wh), p) {
+                                static XF3: AtomicU64 = AtomicU64::new(0);
+                                let n = XF3.fetch_add(1, Ordering::Relaxed) + 1;
+                                if n % 120 == 1 { eprintln!("[xegl] dump failed x{n}: {e:#}"); }
+                            }
+                        }
                         hist.push_back(dmg);
                         if hist.len() > 4 { hist.pop_front(); }
                         last_swap = std::time::Instant::now();
@@ -2374,6 +2384,7 @@ async fn main() -> Result<()> {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--proxy" => proxy = args.next(),
+            "--dump" => { if let Some(p) = args.next() { let _ = DUMP_PATH.set(p); } }
             "--no-clipboard" => clipboard = false,
             // grab the keyboard while the window is focused (spec.display.grabKeyboard)
             "--grab" => grab = true,

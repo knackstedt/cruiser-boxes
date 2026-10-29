@@ -40,6 +40,9 @@ extern "C" {
     fn glGetString(n: u32) -> *const u8;
     fn glClearColor(r: f32, g: f32, b: f32, a: f32);
     fn glClear(mask: u32);
+    fn glReadPixels(x: i32, y: i32, w: i32, h: i32, fmt: u32, ty: u32, out: *mut c_void);
+    fn glGetError() -> u32;
+    fn glFinish();
     fn glEnable(cap: u32);
     fn glDisable(cap: u32);
     fn glScissor(x: i32, y: i32, w: i32, h: i32);
@@ -524,13 +527,11 @@ pub fn x11_cpu_update(e: &mut XEgl, ci: usize, x: i32, y: i32, w: i32, h: i32,
 /// `geom` is the current drawable size (the caller queries it once for its
 /// layout math too). `need` bounds the repaint when non-empty (buffer-age
 /// partial redraw — regions outside it keep the aged buffer's pixels).
-/// `damage` (top-left window coords) feeds eglSwapBuffersWithDamageKHR so
-/// the compositor only re-uploads what actually changed; empty = full swap.
-/// Consoles with no imported scanout yet are left at the clear color.
-/// Must be called from the GL thread.
-pub fn x11_redraw(e: &mut XEgl, rects: &[(i32, i32, i32, i32)], geom: (i32, i32),
-                  need: &[(i32, i32, i32, i32)], damage: &[(i32, i32, i32, i32)]) -> Result<()> {
-    unsafe {
+/// Rasterize every console's scanout into its rect — the shared draw half
+/// of x11_redraw and x11_dump (which reads the back buffer pre-swap).
+unsafe fn paint(e: &mut XEgl, rects: &[(i32, i32, i32, i32)], geom: (i32, i32),
+                need: &[(i32, i32, i32, i32)]) {
+    {
         let (_ww, wh) = geom;
         glClearColor(0.0, 0.0, 0.0, 1.0);
         if need.is_empty() { glClear(0x4000); } // GL_COLOR_BUFFER_BIT
@@ -597,6 +598,18 @@ pub fn x11_redraw(e: &mut XEgl, rects: &[(i32, i32, i32, i32)], geom: (i32, i32)
             }
             glDisable(GL_SCISSOR_TEST);
         }
+    }
+}
+
+/// `damage` (top-left window coords) feeds eglSwapBuffersWithDamageKHR so
+/// the compositor only re-uploads what actually changed; empty = full swap.
+/// Consoles with no imported scanout yet are left at the clear color.
+/// Must be called from the GL thread.
+pub fn x11_redraw(e: &mut XEgl, rects: &[(i32, i32, i32, i32)], geom: (i32, i32),
+                  need: &[(i32, i32, i32, i32)], damage: &[(i32, i32, i32, i32)]) -> Result<()> {
+    unsafe {
+        paint(e, rects, geom, need);
+        let (_ww, wh) = geom;
         if let Some(sd) = SWAP_DAMAGE {
             if !damage.is_empty() {
                 // rects are bottom-left surface coords per the KHR spec —
@@ -612,6 +625,43 @@ pub fn x11_redraw(e: &mut XEgl, rects: &[(i32, i32, i32, i32)], geom: (i32, i32)
             }
         }
         e.inst.swap_buffers(e.dpy, e.surf).context("swap")?;
+    }
+    Ok(())
+}
+
+/// Debug capture (--dump): paint the current scanouts into the back buffer
+/// and glReadPixels it into a binary PPM. Called post-swap — the next
+/// paint lands in the same back buffer, so the readback races nothing.
+pub fn x11_dump(e: &mut XEgl, rects: &[(i32, i32, i32, i32)], geom: (i32, i32),
+                path: &str) -> Result<()> {
+    unsafe {
+        paint(e, rects, geom, &[]);
+        // readback sanity stripe — proves the RGB path end-to-end when a
+        // head samples black (top-left 8px solid red)
+        glEnable(0x0C11); // GL_SCISSOR_TEST
+        glScissor(0, geom.1 - 8, 8, 8);
+        glClearColor(1.0, 0.0, 0.0, 1.0);
+        glClear(0x4000);
+        glDisable(0x0C11);
+        glFinish();
+        let (ww, wh) = geom;
+        let stride = ww.max(0) as usize * 4;
+        let mut buf = vec![0u8; stride * wh.max(0) as usize];
+        glReadPixels(0, 0, ww, wh, 0x1908, 0x1401, buf.as_mut_ptr() as *mut c_void); // RGBA/UBYTE
+        let gerr = glGetError();
+        let nz = buf.iter().filter(|&&b| b != 0).count();
+        eprintln!("[dump] {ww}x{wh} glerr=0x{gerr:x} nonzero={nz}/{}", buf.len());
+        let tmp = format!("{path}.tmp");
+        let mut f = std::fs::File::create(&tmp).context("dump create")?;
+        use std::io::Write;
+        write!(f, "P6\n{ww} {wh}\n255\n")?;
+        for row in (0..wh.max(0) as usize).rev() {
+            let px = &buf[row * stride..(row + 1) * stride];
+            let mut rgb = Vec::with_capacity(ww.max(0) as usize * 3);
+            for c in px.chunks_exact(4) { rgb.extend_from_slice(&c[..3]); }
+            f.write_all(&rgb)?;
+        }
+        std::fs::rename(&tmp, path).context("dump rename")?;
     }
     Ok(())
 }

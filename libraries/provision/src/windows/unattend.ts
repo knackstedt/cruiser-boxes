@@ -193,7 +193,17 @@ export function autounattendXml(o: UnattendOpts): string {
       <RegisteredOrganization>cruiser</RegisteredOrganization>`)}
     ${comp("Microsoft-Windows-Deployment", `
       <RunSynchronous>
-        ${["bcdedit /ems {current} on", "bcdedit /emssettings EMSPORT:1"]
+        ${["bcdedit /ems {current} on", "bcdedit /emssettings EMSPORT:1",
+           // {current} in specialize resolves to the setup boot object, not
+           // the installed OS entry — stamp EMS on {default} too.
+           "bcdedit /ems {default} on",
+           // Win10 eval first-logon can stall 30-60min inside App Readiness
+           // UWP provisioning before FirstLogonCommands ever run — disable it.
+           "reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\AppReadiness\" /v DisableAppReadiness /t REG_DWORD /d 1 /f",
+           // Fallback for the same stall: task-scheduler at-logon firing is
+           // independent of the FLC queue — the shim self-guards against
+           // double-runs (C:\\cruiser-setup.started marker).
+           `schtasks /create /tn cruiser-setup /sc onlogon /ru SYSTEM /rl HIGHEST /f /tr "cmd /c for %i in (d e f g h i j k l m n o p q r s t u v w) do if exist %i:\\cruiser-setup.cmd call %i:\\cruiser-setup.cmd"`]
             .map((c, i) => `<RunSynchronousCommand wcm:action="add">
           <Order>${i + 1}</Order>
           <Path>${c}</Path>
@@ -252,7 +262,11 @@ export function autounattendXml(o: UnattendOpts): string {
  *  HERE, not in specialize: session-0 specialize wedges real installers
  *  (virtio-win-guest-tools' burn chain spins silently for an hour). */
 function cruiserSetupCmd(): string {
-    return `@echo off\r\nrem first-logon entry — finds the seed ISO (this file's own drive)\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0cruiser-setup.ps1" "%~d0" >> C:\\cruiser-setup.log 2>&1\r\n`;
+    // Win10's FirstLogonCommands can stall ~an hour behind AppReadiness
+    // provisioning (and may never fire on some eval images) — specialize
+    // also registers a scheduled task that invokes this same shim at the
+    // first logon, so the marker makes the setup run once under either.
+    return `@echo off\r\nrem first-logon entry — finds the seed ISO (this file's own drive)\r\nif exist C:\\cruiser-setup.started exit /b 0\r\necho started > C:\\cruiser-setup.started\r\necho [cruiser] first-logon cmd shim fired %date% %time% >> C:\\cruiser-setup.log\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0cruiser-setup.ps1" "%~d0" >> C:\\cruiser-setup.log 2>&1\r\nfor %i in (d e f g h i j k l m n o p q r s t u v w) do if exist %i:\\cruiser-done.cmd call %i:\\cruiser-done.cmd\r\n`;
 }
 
 /**
@@ -326,15 +340,22 @@ if (Test-Path $yt) {
 $ErrorActionPreference = "Continue"
 Write-Output "[cruiser] first-logon setup starting (seed=$seed)"
 
-# ── virtio-win guest tools: all virtio drivers (viostor/NetKVM/vioinput/
-# balloon/viosock) + qemu-ga + spice agent + virtiofs. Finds the driver CD
-# by its marker exe — drive letters aren't stable across boot stages. ──
+# ── virtio drivers + qemu-ga via the plain MSIs. The burn bundle
+# (virtio-win-guest-tools.exe) has a documented spin-hang mode in quiet
+# installs (observed: ~1h at full CPU with no I/O, in both specialize and
+# first-logon sessions) — never let it gate provisioning. MSIs first so
+# qemu-ga lands early and the VM is observable; the bundle runs LAST under
+# a hard timeout, only for the bits that ship nowhere else (spice-vdagent
+# for the dmabuf clipboard, WinFsp for virtiofs). ──
 $virtio = Get-PSDrive -PSProvider FileSystem |
-    Where-Object { Test-Path "$($_.Root)virtio-win-guest-tools.exe" } |
+    Where-Object { Test-Path "$($_.Root)virtio-win-gt-x64.msi" } |
     Select-Object -First 1
 if ($virtio) {
-    Write-Output "[cruiser] virtio-win-guest-tools on $($virtio.Root)"
-    & "$($virtio.Root)virtio-win-guest-tools.exe" /install /quiet /norestart | Out-Null
+    $vroot = $virtio.Root
+    Write-Output "[cruiser] installing virtio drivers (msi) from $vroot"
+    & msiexec /i "\${vroot}virtio-win-gt-x64.msi" /qn /norestart | Out-Null
+    Write-Output "[cruiser] drivers done, installing qemu guest agent"
+    & msiexec /i "\${vroot}guest-agent\\qemu-ga-x86_64.msi" /qn /norestart | Out-Null
 } else { Write-Output "[cruiser] WARN: no virtio-win media found" }
 ${testSign}${yttrium}
 # ── RDP server (the freerdp fallback viewer path) ──
@@ -359,6 +380,23 @@ if ($env:COMPUTERNAME -ine "${windowsHostname(o.hostname)}") {
     Rename-Computer -NewName "${windowsHostname(o.hostname)}" -Force -ErrorAction SilentlyContinue
 }
 
+# ── burn bundle LAST, 5min cap: everything critical is already installed,
+# this only fetches spice-vdagent + WinFsp/virtiofs. If it wedges the VM
+# still provisions fully — clipboard/shares degrade, nothing else does. ──
+if ($virtio) {
+    $bundle = "\${vroot}virtio-win-guest-tools.exe"
+    if (Test-Path $bundle) {
+        Write-Output "[cruiser] tools bundle for vdagent/winfsp (5min cap)"
+        $bp = Start-Process $bundle -ArgumentList "/install","/quiet","/norestart" -PassThru
+        if (Wait-Process -Id $bp.Id -Timeout 300 -ErrorAction SilentlyContinue) {
+            Write-Output "[cruiser] tools bundle done"
+        } else {
+            Write-Output "[cruiser] WARN: tools bundle exceeded 5min — killed (drivers+qga unaffected)"
+            Stop-Process -Id $bp.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 New-Item "C:\\cruiser-installed" -ItemType File -Force | Out-Null
 Set-Content "C:\\cruiser-installed" -Value (Get-Date -Format o)
 Write-Output "[cruiser] first-logon setup done"
@@ -372,7 +410,7 @@ Write-Output "[cruiser] first-logon setup done"
  * normally (drivers + testsigning take effect on that boot).
  */
 function cruiserDoneCmd(): string {
-    return `@echo off\r\necho [cruiser] install complete — shutting down for the first real boot\r\nshutdown /s /t 5 /c "cruiser install complete"\r\n`;
+    return `@echo off\r\necho [cruiser] install complete — shutting down for the first real boot\r\nschtasks /delete /tn cruiser-setup /f >nul 2>&1\r\nshutdown /s /t 5 /c "cruiser install complete"\r\n`;
 }
 
 /** Write autounattend + scripts (+ optional yttrium payload) → Joliet ISO. */
