@@ -101,6 +101,12 @@ body { background:#141414; color:#ececec; font-family:'Cruiser Sans',sans-serif;
 input { background:#0e0e0e; border:1px solid #303030; border-radius:4px; color:#ececec;
         padding:8px 10px; font-size:14px; width:220px; }
 input:focus { border-color:#5ee6a8; outline:none; }
+/* The ✕ clear chip on every data-field input — injected by withClearButtons.
+   .inwrap pulls the chip tight against its input instead of letting the
+   row's 16px flex gap scatter it into the next control's space. */
+.inwrap { display:flex; align-items:center; gap:6px; }
+.clr { font-size:12px; color:#666666; padding:3px 6px; border-radius:3px; }
+.clr:hover { color:#ececec; background:#282828; }
 .opts { display:flex; gap:6px; }
 .opts.wrap { flex-wrap:wrap; max-width:680px; }
 .opt { padding:7px 13px; border-radius:4px; font-size:13px; border:1px solid #303030;
@@ -112,16 +118,23 @@ input:focus { border-color:#5ee6a8; outline:none; }
    "Confirm kill". Accent-blue read as a selection, not a danger state. */
 .opt.armed { background:#3a2530; color:#f08aa8; border-color:#a04868; }
 .opt.armed:hover { background:#4a2e3c; color:#f08aa8; }
-/* .tog marks the lone on/off switch chip — a pill shape + state dot so it
-   reads as a control, not a status badge or an option in a group. */
-.opt.tog { border-radius:11px; min-width:58px; text-align:center; }
-.opt.tog::before { content:"● "; font-size:9px; opacity:.5; }
-.opt.tog.on::before { opacity:1; }
 /* Flattened 45%-opacity equivalents — a real opacity layer would rasterize
    the label onto a transparent backdrop where LCD subpixel blending leaves
    colored fringes. */
 .opt.dim { background:#1b1b1b; color:#505050; border-color:#242424; }
 .opt.sm { padding:4px 9px; font-size:12px; }
+/* .tog marks the lone on/off switch — a track + knob so it reads as a
+   switch, not a status badge or an option in a group. The ::before box is
+   the knob; padding-left parks it on the off/on side (the shell steps it
+   inline for the slide — the doc engine never interpolates transitions).
+   Ordered after .opt.sm/.opt.on so the track's own off/on colors win over
+   the generic chip styles on .sm.tog/.on.tog. */
+.opt.tog { width:32px; height:16px; min-width:0; padding:2px 0; border-radius:11px;
+           display:flex; align-items:center; background:#242424; border-color:#3d3d3d; }
+.opt.tog::before { content:""; width:16px; height:16px; border-radius:8px; background:#8a8a8a; }
+.opt.tog:hover { border-color:#555555; }
+.opt.tog.on { padding-left:16px; background:#2c4e3c; border-color:#5ee6a8; }
+.opt.tog.on::before { background:#5ee6a8; }
 /* Apply-mode tags on the edit form while the VM runs: boot = frozen into
    QEMU's launch argv (needs restart), live = takes effect immediately. */
 .aptag { font-size:10px; padding:1px 7px; border-radius:8px; white-space:nowrap; margin-left:auto; }
@@ -483,7 +496,7 @@ function optRow(label: string, key: string, cur: string, choices: [string, strin
 
 function checkRow(label: string, key: string, cur: boolean, hint = "", tag = ""): string {
     return `<div class="row"><div class="lbl">${esc(label)}</div>
-        <div class="opt tog${cur ? " on" : ""}" data-action="set-field" data-field="${esc(key)}" data-value="${!cur}">${cur ? "on" : "off"}</div>
+        <div class="opt tog${cur ? " on" : ""}" data-action="set-field" data-field="${esc(key)}" data-value="${!cur}"></div>
         ${hint ? `<div class="meta">${esc(hint)}</div>` : ""}${tag}</div>`;
 }
 
@@ -673,6 +686,11 @@ function create(s: CruiserState): string {
         ${diskRow}
         ${vmDirRow}
         ${checkRow("Nested virtualization", "nestedVirt", f.nestedVirt, "pass the host's vmx/svm flag to the guest — run KVM inside the VM (needs the host kvm module's nested=1, see doctor)", aptag("boot"))}
+        ${field("QEMU nice", "nice", f.nice, 80, aptag("boot"))}
+        ${optRow("QEMU I/O class", "ioClass", f.ioClass, [["default", "default"], ["idle", "idle"], ["best-effort", "best-effort"], ["realtime", "realtime"]], "set-field", aptag("boot"))}
+        ${f.ioClass === "realtime" || f.ioClass === "best-effort" ? field("I/O priority", "ioPrio", f.ioPrio, 80, aptag("boot")) : ""}
+        <div class="hint">scheduling for the QEMU process — the I/O class covers virtiofsd too.
+            Lower numbers = higher priority; above default (nice &lt; 0, realtime, prio &lt; 4) needs root.</div>
         ${editing ? "" : `<div class="h2">Disk encryption</div>
         ${optRow("Encryption", "encrypt", f.encrypt, [["off", "off"], ["full", "full disk"], ["home", "/home only"]])}
         <div class="hint">qcow2 LUKS — the image file is encrypted at rest and QEMU unlocks it with a
@@ -811,7 +829,7 @@ function vmDetail(s: CruiserState): RouteBody {
         ${autoSnapBanner(s)}
         ${unlockBanner(s)}
         <div class="kv">
-            <div class="k">resources</div><div>${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB · ${vm.diskGiB} GiB disk${vm.nestedVirt ? " · nested virt" : ""}</div>
+            <div class="k">resources</div><div>${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB · ${vm.diskGiB} GiB disk${vm.nestedVirt ? " · nested virt" : ""}${vm.nice !== undefined ? ` · nice ${vm.nice}` : ""}${vm.ioClass ? ` · io ${vm.ioClass}${vm.ioPrio !== undefined ? `/${vm.ioPrio}` : ""}` : ""}</div>
             ${diskDetail ? `<div class="k">disk usage</div><div>${esc(diskDetail)}</div>` : ""}
             <div class="k">location</div><div>${esc(vm.vmDir)}${kvTog("copy", "kv-copy", attr("copy", vm.vmDir))}${kvTog("open", "kv-open", attr("path", vm.vmDir))}</div>
             <div class="k">gpu / head / viewer</div><div>${esc(vm.gpuMode)} / ${esc(vm.headMode)} / ${esc(vm.viewer)}</div>
@@ -859,10 +877,10 @@ function shareSection(vm: VmSummary, s: CruiserState, up: boolean): string {
         const chip = (field: string, value: string, label: string, on: boolean) =>
             `<div class="opt sm${on ? " on" : ""}" data-action="share-attr" data-vm="${esc(vm.name)}" data-idx="${sh.idx}" data-field="${field}" data-value="${value}">${esc(label)}</div>`;
         const armed = s.confirm === `share-rm:${vm.name}:${sh.idx}`;
-        const tog = (field: string, value: string, label: string, on: boolean) =>
-            `<div class="opt sm tog${on ? " on" : ""}" data-action="share-attr" data-vm="${esc(vm.name)}" data-idx="${sh.idx}" data-field="${field}" data-value="${value}">${esc(label)}</div>`;
+        const tog = (field: string, value: string, on: boolean) =>
+            `<div class="opt sm tog${on ? " on" : ""}" data-action="share-attr" data-vm="${esc(vm.name)}" data-idx="${sh.idx}" data-field="${field}" data-value="${value}"></div>`;
         return `<div class="vmrow">
-            ${tog("enabled", String(!sh.enabled), sh.enabled ? "on" : "off", sh.enabled)}
+            ${tog("enabled", String(!sh.enabled), sh.enabled)}
             <div class="grow">${esc(sh.hostPath)} → ${esc(mp)}
                 <div class="vmmode">${esc(sh.tag)} · ${sh.mode === "copy" ? "copy (rsync)" : "mount (virtiofs/9p)"}${sh.deletions ? " · --delete" : ""}</div></div>
             <div class="opts">
@@ -986,8 +1004,7 @@ function logsView(s: CruiserState): RouteBody {
                 <input data-field="log-grep" value="${esc(l.grep)}" style="width:260px">
                 <div class="meta">regex filter (journalctl -g)</div></div>
             <div class="row"><div class="lbl">Unit</div>
-                <input data-field="log-unit" value="${esc(l.unit)}" style="width:260px">
-                ${l.unit ? `<div class="opt" data-action="log-set" data-field="unit" data-value="">clear</div>` : ""}</div>
+                <input data-field="log-unit" value="${esc(l.unit)}" style="width:260px"></div>
             ${l.units.length ? `<div class="opts wrap unitlist">${l.units.slice(0, 80).map((u) =>
                 `<div class="opt${l.unit === u ? " on" : ""}" data-action="log-set" data-field="unit" data-value="${esc(u)}">${esc(u)}</div>`).join("")}</div>` : ""}`;
 
@@ -1149,6 +1166,18 @@ export interface RouteParts {
     html: string;
 }
 
+/** Wrap every <input data-field="x"> in an .inwrap carrying a ✕ chip
+ *  (data-action="clear-field" → the shell's field router). One injection
+ *  point covers the field() helper, the inline rows, and the share/fwd/
+ *  log/unlock/filter inputs — including any added later. The chip renders
+ *  unconditionally: input edits don't re-render while focused (the render
+ *  gate defers pushes), so a show-when-nonempty chip would never appear
+ *  mid-edit anyway. */
+function withClearButtons(html: string): string {
+    return html.replace(/<input\b[^>]*\bdata-field="([^"]+)"[^>]*>/g,
+        (m, f) => `<span class="inwrap">${m}<span class="clr" data-action="clear-field" data-field="${f}">✕</span></span>`);
+}
+
 export function renderRouteParts(s: CruiserState): RouteParts {
     const nav = (r: string, label: string, on = s.route === r) =>
         `<div class="item${on ? " on" : ""}" data-action="nav" data-route="${r}">${label}</div>`;
@@ -1180,12 +1209,22 @@ export function renderRouteParts(s: CruiserState): RouteParts {
         : "";
     const footer = `<div class="fbar${fcls}"><div class="fdot"></div><div class="ftext">${esc(s.status)}</div>${pathBtns}</div>`;
     const log = s.route === "logs" ? logPaneInner(s) : null;
+    // Clear chips go on the patch surface AND the markup it patches into —
+    // transforming only one would strip chips on the first same-route
+    // update (or leave every region permanently diff-dirty).
+    const body = withClearButtons(b.html);
+    const regions = b.regions?.map((r) => ({ sel: r.sel, html: withClearButtons(r.html) }));
+    const rowGroup = b.rowGroup && {
+        ...b.rowGroup,
+        containerHtml: withClearButtons(b.rowGroup.containerHtml),
+        rows: b.rowGroup.rows.map((r) => ({ id: r.id, html: withClearButtons(r.html) })),
+    };
     return {
-        topbar, content: b.html, footer, log,
-        regions: b.regions, rowGroup: b.rowGroup,
+        topbar, content: body, footer, log,
+        regions, rowGroup,
         html: `<html><head><style>${fontFaceCss()}${CSS}</style></head><body>
         <div class="topbar">${topbar}</div>
-        <div class="content${log !== null ? " logtop" : ""}${s.route === "term" ? " termroute" : ""}">${b.html}</div>
+        <div class="content${log !== null ? " logtop" : ""}${s.route === "term" ? " termroute" : ""}">${body}</div>
         ${log !== null ? `<div class="logpre" id="logpane">${log}</div>` : ""}
         <div class="footer">${footer}</div>
     </body></html>`,

@@ -187,6 +187,13 @@ export class CruiserShell {
             // instead of leaving an unbootable combo selected (create/save
             // guard against it too). A real gpu change back to a GL mode
             // restores dmabuf — the fast default; rdp stays a re-pick.
+            // .tog switches slide the knob inline on the still-mounted
+            // node, then commit — see slideTog.
+            if (BOOL_FIELDS.has(k) && v !== st().create[k]) {
+                this.slideTog(`.opt.tog[data-field="${k}"]`, v === true,
+                    () => st().setField(k, v as never));
+                return;
+            }
             const gpuChanged = k === "gpu" && v !== st().create.gpu;
             st().setField(k, v as never);
             if (k === "gpu") {
@@ -195,6 +202,33 @@ export class CruiserShell {
                 else if (gpuChanged && st().create.viewer === "rdp")
                     st().setField("viewer", "dmabuf");
             }
+        });
+        // Input ✕ chips — routes by data-field exactly like wireInputs:
+        // "" to the same store slot the input binds to (numeric fields get
+        // 0, matching what keyboard-clearing writes), then a direct attr
+        // mutate so the box empties even while the press gate holds the
+        // store-notify re-render.
+        this.host.onAction("clear-field", (d) => {
+            const field = d.field;
+            if (!field) return;
+            const st = this.store.getState();
+            if (field.startsWith("log-")) {
+                (st.logs as unknown as Record<string, unknown>)[field.slice(4)] = "";
+                void svc.refreshLogs();
+            } else if (field === "vm-desc") st.setVmDesc("");
+            else if (field.startsWith("share-")) st.setShareForm({ [field.slice(6)]: "" } as never);
+            else if (field.startsWith("fwd-")) st.setFwdForm({ [field.slice(4)]: "" } as never);
+            else if (field === "vm-filter") {
+                st.setVmFilter("");
+                this.panel?.setInnerHtml("#vmlist", vmListInner(st));
+            } else if (field === "unlock-pw") this.store.setState({ unlockPw: "" });
+            else if (field === "memInput") st.create.memMiB = 0;
+            else {
+                const k = field as keyof CreateForm;
+                (st.create as unknown as Record<string, unknown>)[k] = NUM_FIELDS.has(k) ? 0 : "";
+            }
+            this.panel?.mutate([{ op: "attr", sel: `input[data-field=${field}]`, name: "value", value: "" }] as never);
+            this.patchHints();
         });
         this.host.onAction("set-distro", (d) => {
             const fam = d.value as keyof typeof DISTROS;
@@ -246,6 +280,9 @@ export class CruiserShell {
             Object.assign(st().create, {
                 name: vm.name, cpus: vm.cpus, memMiB: vm.memMiB, diskGiB: vm.diskGiB,
                 nestedVirt: vm.nestedVirt,
+                nice: String(vm.nice ?? 0),
+                ioClass: vm.ioClass ?? "default",
+                ioPrio: String(vm.ioPrio ?? 4),
                 gpu: vm.gpuMode, swVk: vm.swVk, headMode: vm.headMode,
                 // dmabuf is preselected whenever the gpu can export scanouts
                 // — a saved rdp only survives an explicit re-pick.
@@ -308,7 +345,14 @@ export class CruiserShell {
             if (d.vm && this.armed(`share-rm:${d.vm}:${d.idx}`)) void svc.shareRemove(d.vm, Number(d.idx));
         });
         this.host.onAction("share-attr", (d) => {
-            if (d.vm && d.field) void svc.shareAttr(d.vm, Number(d.idx), String(d.field), String(d.value ?? ""));
+            if (!d.vm || !d.field) return;
+            const commit = () => void svc.shareAttr(d.vm!, Number(d.idx), String(d.field), String(d.value ?? ""));
+            if (d.field === "enabled") {
+                this.slideTog(`.opt.tog[data-field="enabled"][data-idx="${d.idx}"]`,
+                    d.value === "true", commit);
+                return;
+            }
+            commit();
         });
         this.host.onAction("share-form", (d) => {
             if (!d.field) return;
@@ -479,6 +523,23 @@ export class CruiserShell {
         } catch (e) {
             log.error("shell", `render failed: ${e instanceof Error ? e.stack ?? e.message : e}`);
         }
+    }
+
+    /**
+     * Slide a .tog knob to its parked end, then run commit (the store write
+     * that flips the class). The doc engine parses `transition` but never
+     * interpolates it, so the slide is stepped inline on the PRE-flip node —
+     * stable across the press — and the stylesheet takes over at the same
+     * position when commit's re-render lands (~130ms).
+     */
+    private slideTog(sel: string, toOn: boolean, commit: () => void): void {
+        const steps = 7, from = toOn ? 0 : 16, to = 16 - from;
+        let i = 0;
+        const t = setInterval(() => {
+            const x = from + (to - from) * (1 - (1 - ++i / steps) ** 2);
+            this.panel?.setStyle(sel, "padding-left", `${x.toFixed(1)}px`);
+            if (i >= steps) { clearInterval(t); commit(); }
+        }, 20);
     }
 
     /**

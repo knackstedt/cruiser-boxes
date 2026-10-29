@@ -36,6 +36,9 @@ export interface VmSummary {
     memMiB: number;
     diskGiB: number;
     nestedVirt: boolean;           // spec.resources.nestedVirt
+    nice?: number;                 // spec.resources.sched.nice
+    ioClass?: string;              // spec.resources.sched.ioClass — realtime|best-effort|idle
+    ioPrio?: number;               // spec.resources.sched.ioPrio
     sshPort?: number;
     rdpPort?: number;
     provisioned?: string;          // method or undefined
@@ -88,6 +91,9 @@ export type CreateForm = SyncFormFields & {
     memMiB: number;
     diskGiB: number;
     nestedVirt: boolean;           // pass vmx/svm through — run KVM inside the guest
+    nice: string;                  // spec.resources.sched.nice — prefilled "0" (device default)
+    ioClass: string;               // spec.resources.sched.ioClass — default|realtime|best-effort|idle
+    ioPrio: string;                // spec.resources.sched.ioPrio — prefilled "4" (class default)
     gpu: string;                   // venus|virgl|software
     swVk: boolean;                 // venus: expose host lavapipe (CPU Vulkan) to the guest
     headMode: string;              // fullscreen-monitor|windowed|virtual-desktop|app
@@ -351,6 +357,7 @@ const defaultLogs = (): LogsState => ({
 
 const defaultCreate = (): CreateForm => ({
     name: "", cpus: 4, memMiB: 8192, diskGiB: 100, nestedVirt: false,
+    nice: "0", ioClass: "default", ioPrio: "4",
     gpu: "venus", swVk: false, headMode: "virtual-desktop", viewer: "dmabuf", persist: "daemonize",
     autostart: false, netMode: "nat",
     method: "cloudimg", distro: "ubuntu", release: "26.04", desktop: "gnome",

@@ -242,6 +242,8 @@ export class CruiserService {
             viewer: s.display.viewer,
             cpus: s.resources.cpus, memMiB: s.resources.memoryMiB,
             diskGiB: s.disk.sizeGiB, nestedVirt: s.resources.nestedVirt,
+            nice: s.resources.sched.nice, ioClass: s.resources.sched.ioClass,
+            ioPrio: s.resources.sched.ioPrio,
             sshPort: s.network.sshPort, rdpPort: s.network.rdpPort,
             provisioned: s.provisioned.method, persist: s.persist, autostart: s.autostart,
             netMode: s.network.mode,
@@ -471,6 +473,34 @@ export class CruiserService {
 
     // ── actions ──
 
+    /** Parse the form's sched text inputs — "" = unset. Returns an error
+     *  string on a bad value so create/save can bail before touching spec. */
+    private parseSchedForm(f: CreateForm): VmSpec["resources"]["sched"] | string {
+        const out: VmSpec["resources"]["sched"] = {};
+        const nice = f.nice.trim();
+        if (nice) {
+            const n = Number(nice);
+            if (!Number.isInteger(n) || n < -20 || n > 19) return "nice must be an integer from -20 to 19";
+            // 0 is the effective default — persisting it would flag an
+            // untouched spec as changed vs the launch snapshot.
+            if (n !== 0) out.nice = n;
+        }
+        if (f.ioClass !== "default") {
+            if (!["realtime", "best-effort", "idle"].includes(f.ioClass))
+                return "I/O class must be default, realtime, best-effort or idle";
+            out.ioClass = f.ioClass as VmSpec["resources"]["sched"]["ioClass"];
+        }
+        // ioPrio is only meaningful (and only rendered) for rt/be classes —
+        // a leftover value from a class that hides the field stays ignored.
+        const ioPrio = f.ioPrio.trim();
+        if (ioPrio && (out.ioClass === "realtime" || out.ioClass === "best-effort")) {
+            const n = Number(ioPrio);
+            if (!Number.isInteger(n) || n < 0 || n > 7) return "I/O priority must be an integer from 0 to 7";
+            if (n !== 4) out.ioPrio = n;   // 4 = the class default
+        }
+        return out;
+    }
+
     /** First zod issue as "field: message" — friendlier than the raw dump. */
     private validateSpec(spec: VmSpec): void {
         const r = VmSpec.safeParse(spec);
@@ -509,11 +539,14 @@ export class CruiserService {
             st.setStatus("the dmabuf viewer needs a GL gpu — pick venus/virgl or the rdp viewer", "warn");
             return;
         }
+        const sched = this.parseSchedForm(f);
+        if (typeof sched === "string") { st.setStatus(sched, "warn"); return; }
         await this.run(`create ${f.name}`, async () => {
             const spec = defaultSpec(f.name);
             spec.resources.cpus = f.cpus;
             spec.resources.memoryMiB = f.memMiB;
             spec.resources.nestedVirt = f.nestedVirt;
+            spec.resources.sched = sched;
             spec.disk.sizeGiB = f.diskGiB;
             spec.gpu.mode = f.gpu as VmSpec["gpu"]["mode"];
             spec.gpu.softwareVk = f.swVk;
@@ -829,6 +862,8 @@ export class CruiserService {
             st.setStatus("the dmabuf viewer needs a GL gpu — pick venus/virgl or the rdp viewer", "warn");
             return;
         }
+        const sched = this.parseSchedForm(f);
+        if (typeof sched === "string") { st.setStatus(sched, "warn"); return; }
         // A changed VM location physically moves the dir — QEMU must not
         // hold open files under it.
         const curParent = dirname(vmRealDir(name));
@@ -844,6 +879,7 @@ export class CruiserService {
             spec.resources.cpus = f.cpus;
             spec.resources.memoryMiB = f.memMiB;
             spec.resources.nestedVirt = f.nestedVirt;
+            spec.resources.sched = sched;
             spec.disk.sizeGiB = f.diskGiB;
             spec.gpu.mode = f.gpu as VmSpec["gpu"]["mode"];
             spec.gpu.softwareVk = f.swVk;

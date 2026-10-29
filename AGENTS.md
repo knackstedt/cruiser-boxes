@@ -141,6 +141,19 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   save and the cli falls back (explicit --viewer dmabuf --gpu software
   is a create error). Guests provision their RDP server either way, so
   an rdp flip needs no re-provision.
+  resources.limits {cpuQuota,memoryMax,ioWeight} wraps QEMU in a
+  `systemd-run --user --scope cruiser-<name>` cgroup; resources.sched
+  {nice,ioClass,ioPrio} prepends nice(1)/ionice(1) wrappers INSIDE that
+  scope (start() builds inner argv first); the io fields also wrap each
+  virtiofsd spawn (it does the real share I/O — nice stays QEMU-only).
+  Priority-raising values
+  (nice<0, io realtime, be prio<4) need CAP_SYS_NICE/SYS_ADMIN. ionice
+  EXITS WITHOUT EXEC on a denied ioprio_set (nice(1) warns + continues),
+  so the io wrap is `sh -c 'ionice … "$@" || exec "$@"'` (schedIoArgv) —
+  denied or missing ionice falls back to default io class + a log line;
+  nice is which()-gated. Both surfaces expose it — create/edit
+  "QEMU nice"/"QEMU I/O class"/"I/O priority" rows ("" = unset) and the
+  cli's --nice/--io-class/--io-prio.
   `logs.ts` — the Logs screen's backends: run/ file tails (cruiser.log is
   tee'd from lifecycle + provision via `appendVmLog`; serial.log is attached
   on every boot) and guest journalctl with filters over QGA, falling back to
@@ -586,6 +599,15 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   wizard's edit mode owns only fields buffered into Save (description,
   resources, display, persist, sync channels, usb). Don't render
   instant-effect widgets inside the Save-gated form.
+  Every `<input data-field="x">` gets a ✕ clear chip via
+  `withClearButtons` in screens.ts — a regex wrap applied in
+  renderRouteParts to BOTH content markup and the regions/rowGroup patch
+  surface (one without the other strips chips on the first same-route
+  patch). The shell's `clear-field` action routes by field name exactly
+  like wireInputs (log-*/share-*/fwd-*/vm-desc/vm-filter/unlock-pw/
+  memInput/create) then attr-mutates value="" so the box empties even
+  while the press gate holds the notify render; numeric fields clear to
+  0 like keyboard-clearing does.
   `metrics.ts` — the running-VM sparklines (cpu/mem %; disk iops via QMP
   query-blockstats — no agent needed; net bytes/s via QGA /proc/net/dev;
   gpu util+mem via host `/proc/<qemu>/fdinfo` DRM client stats, absent in

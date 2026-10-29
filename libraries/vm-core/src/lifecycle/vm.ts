@@ -69,6 +69,20 @@ function userScopeWorks(): Promise<boolean> {
     return scopeWorks;
 }
 
+/** resources.sched → the ionice(1) argv prefix for a spawned process —
+ *  QEMU itself and virtiofsd (the daemon does the actual share I/O;
+ *  ioprio is inherited across its sandbox namespace fork). [] = unset.
+ *  ionice EXITS WITHOUT EXEC on a denied ioprio_set (unlike nice(1), which
+ *  warns and continues) — an over-privileged class would kill the child
+ *  outright, so the sh fallback re-execs the command at default io class
+ *  (it also covers a missing ionice binary). */
+function schedIoArgv(sched: VmSpec["resources"]["sched"]): string[] {
+    if (!sched.ioClass) return [];
+    const cls = { realtime: "1", "best-effort": "2", idle: "3" }[sched.ioClass];
+    const n = sched.ioClass !== "idle" && sched.ioPrio !== undefined ? ` -n ${sched.ioPrio}` : "";
+    return ["sh", "-c", `ionice -c ${cls}${n} "$@" || exec "$@"`, "cruiser-io"];
+}
+
 async function pickAudioBackend(qemu: string, ldLibraryPath: string): Promise<BuildOpts["audioBackend"]> {
     const backends = await qemuAudioBackends(qemu, ldLibraryPath);
     const xdg = process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid!()}`;
@@ -355,13 +369,29 @@ export class VmHandle {
             ...(lim.memoryMax ? [`MemoryMax=${lim.memoryMax}`] : []),
             ...(lim.ioWeight ? [`IOWeight=${lim.ioWeight}`] : []),
         ];
-        let qemuCmd = this.toolchain.qemu;
-        let qemuArgv = built.argv;
+        // resources.sched → nice/ionice wrappers around QEMU itself, applied
+        // INSIDE the cgroup scope (systemd-run runs the wrapped command).
+        // The ionice wrap self-falls-back (schedIoArgv): denied or missing
+        // ionice → the VM still boots at default io class.
+        const sched = this.spec.resources.sched;
+        let inner = [this.toolchain.qemu, ...built.argv];
+        inner = [...schedIoArgv(sched), ...inner];
+        if (sched.nice !== undefined) {
+            const bin = await which("nice");
+            if (bin)
+                inner = [bin, "-n", String(sched.nice), ...inner];
+            else void appendVmLog(this.paths, "resources.sched.nice set but nice is not on PATH — running at default priority");
+        }
+        if ((sched.nice !== undefined && sched.nice < 0) || sched.ioClass === "realtime"
+            || (sched.ioClass === "best-effort" && sched.ioPrio !== undefined && sched.ioPrio < 4))
+            void appendVmLog(this.paths, "resources.sched raises priority above default — runs at default without CAP_SYS_NICE/SYS_ADMIN");
+        let qemuCmd = inner[0]!;
+        let qemuArgv = inner.slice(1);
         if (props.length) {
             if (await userScopeWorks()) {
                 qemuCmd = "systemd-run";
                 qemuArgv = ["--user", "--scope", "--quiet", "--unit", `cruiser-${this.spec.name}`,
-                    ...props.flatMap((p) => ["-p", p]), "--", this.toolchain.qemu, ...built.argv];
+                    ...props.flatMap((p) => ["-p", p]), "--", ...inner];
             } else {
                 void appendVmLog(this.paths, "resources.limits set but systemd-run --user unavailable — running uncapped");
             }
@@ -534,10 +564,14 @@ export class VmHandle {
         const b = bin ?? await virtiofsdPath();
         if (!b) return;
         await rm(v.socket, { force: true });
-        const c = spawnChild(b, [
+        const argv = [
+            // the daemon does the real share I/O — ride the VM's io sched
+            ...schedIoArgv(this.spec.resources.sched),
+            b,
             `--socket-path=${v.socket}`, `--shared-dir=${v.sharedDir}`,
             "--cache=auto", "--sandbox=namespace",
-        ], { detached: true, logFile: join(this.paths.run, `virtiofsd-${v.tag}.log`) });
+        ];
+        const c = spawnChild(argv[0]!, argv.slice(1), { detached: true, logFile: join(this.paths.run, `virtiofsd-${v.tag}.log`) });
         this.vfsChildren.push(c);
         this.vfsdSpawned.set(v.socket, Date.now());
     }
