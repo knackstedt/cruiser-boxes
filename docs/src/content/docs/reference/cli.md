@@ -76,6 +76,8 @@ Common options: `--user`, `--password`, `--timezone`, `--no-monitor-mirror`.
 | `host session` | detected session type + active WmAdapter id and its capabilities |
 | `host monitors` | monitor topology probe (xrandr / kscreen) |
 | `host desktops` | virtual desktop list (qdbus UUIDs on KDE, wmctrl elsewhere) |
+| `host install-cli` | put `cruiser` on the host PATH — flatpak exports/bin + `~/.local/bin` wrappers (flatpak auto-installs on app launch; deb/rpm already ship `/usr/bin/cruiser`) |
+| `host uninstall-cli` | remove the installed cli wrappers |
 
 ## toolchain
 

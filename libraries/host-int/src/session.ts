@@ -383,8 +383,11 @@ function normKeys(keys: string): string {
  *  appdir launcher (`$DIR/cruiser vm …`, sibling of the runtime binary).
  *  Shortcut daemons (gsd, kglobalaccel) exec through `sh -c` with the
  *  SESSION's PATH — which may lack ~/.bun/bin — so binaries are referenced
- *  by absolute path and single-quoted for the shell. */
+ *  by absolute path and single-quoted for the shell. Flatpak: the expanded
+ *  command runs on the HOST (the in-sandbox launcher path doesn't exist
+ *  there), so it goes through `flatpak run <app-id>`. */
 export function cruiserCliArgv(): string[] {
+    if (process.env.FLATPAK_ID) return ["flatpak", "run", process.env.FLATPAK_ID];
     const cli = new URL("../../../src/cli.ts", import.meta.url).pathname;
     if (!existsSync(cli)) {
         const launcher = join(dirname(process.execPath), "cruiser");

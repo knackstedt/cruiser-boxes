@@ -13,6 +13,40 @@ description: Host requirements, dependencies, the pinned QEMU toolchain, and doc
   partial on KDE-Wayland and GNOME-X11, and falls back to the viewer placing
   itself elsewhere — see the [DE matrix](/internals/de-matrix/).
 
+## Release packages
+
+Each tagged release ships `deb`, `rpm`, `flatpak`, and `AppImage` artifacts
+(x86_64). Every package embeds the pinned QEMU toolchain and native helpers —
+the [host packages](#host-packages) below are still needed for the viewer,
+window placement, and share backends.
+
+```sh
+sudo dpkg -i cruiser_*.deb            # or: sudo dnf install ./cruiser-*.rpm
+flatpak install --user Cruiser-*.flatpak
+./Cruiser-*.AppImage                  # no install — run in place
+```
+
+### The `cruiser` command
+
+The packaged binary is also the CLI — arg-1 dispatch routes `cruiser vm …`,
+`cruiser doctor`, etc. to the headless control surface.
+
+- **deb / rpm** — the package installs `/usr/bin/cruiser`; nothing else to do.
+- **flatpak** — `flatpak run dev.cruiser.app vm …` always works, and the app
+  drops a `cruiser` wrapper on every launch into both
+  `~/.local/share/flatpak/exports/bin/` (flatpak's own exports dir — on PATH
+  via profile.d on most distros) and `~/.local/bin/`. `cruiser host
+  install-cli` / `uninstall-cli` manage them by hand; run via
+  `flatpak run dev.cruiser.app host install-cli`.
+- **AppImage** — `cruiser host install-cli` writes `~/.local/bin/cruiser`
+  pointing at the AppImage file (run it once from its final location first).
+
+The flatpak is a full VM manager in a sandbox — it needs `--device=all`
+(KVM + USB passthrough), `--filesystem=home` (VM dirs, QMP sockets, shares),
+and `--socket=session-bus` (global shortcuts, KDE window rules, `systemctl
+--user`). Permissions that broad make the sandbox mostly cosmetic; the deb
+is the cleaner install where available.
+
 ## Clone and install
 
 ```sh

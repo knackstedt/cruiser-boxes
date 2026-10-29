@@ -10,6 +10,7 @@ import { defaultSpec, DevTool, VmSpec } from "../../vm-core/src/config/schema";
 import { makeShare } from "../../vm-core/src/config/shares";
 import { CACHE_DIR, CLOUDIMG_DIR, CONFIG_DIR, DATA_DIR, ISO_DIR, VMS_DIR, vmRealDir } from "../../vm-core/src/paths";
 import { detectAdapter, detectSession } from "../../host-int/src/detect";
+import { flatpakId, installHostCli } from "../../host-int/src/host-cli";
 import { hostSshKeys } from "../../host-int/src/hoststate";
 import { defaultMountpoint, isMounted } from "../../host-int/src/mount";
 import type { VmSession } from "../../provision/src/session";
@@ -83,6 +84,10 @@ export class CruiserService {
         // `vm autostart-run`. Prompt-locked disks park on the unlock
         // banner; low-space autosnap parks on the space prompt.
         this.autostartVms().catch(() => {});
+        // A flatpak can't ship a host PATH entry — drop the `cruiser` cli
+        // wrappers (flatpak exports/bin + ~/.local/bin) on every launch so a
+        // user delete self-heals. No-op outside flatpak.
+        if (flatpakId()) installHostCli().catch(() => {});
         // "follow" on the logs screen — re-fetch while it's open; a slow
         // journal fetch just overlaps the next tick (loading flag guards).
         this.logTimer = setInterval(() => {

@@ -138,6 +138,9 @@ usage: cruiser <area> <command> [args]
            [--units]                    guest journal via QGA (ssh fallback on confined agents)
   host session                         detected DE/session + adapter caps
   host monitors|desktops               probe host display topology
+  host install-cli                     put a 'cruiser' command on PATH
+                                       (flatpak exports/bin + ~/.local/bin wrappers)
+  host uninstall-cli                   remove the installed cli wrappers
   usb ls                                usb attach <vm> <vid:pid>
   usb detach <vm> <id>
   usb auto <vm> <vid:pid[:serial]> [--boot]   hot-plug whenever seen (--boot = also at launch)
@@ -1264,6 +1267,21 @@ switch (area) {
             }
             case "monitors": console.log(JSON.stringify(await a.monitors(), null, 2)); break;
             case "desktops": console.log(JSON.stringify(await a.desktops(), null, 2)); break;
+            case "install-cli": {
+                const { installHostCli } = await import("../libraries/host-int/src/host-cli");
+                const r = await installHostCli();
+                r.installed.forEach((p) => console.log(`installed ${p}`));
+                r.notes.forEach((n) => console.log(n));
+                if (!r.installed.length && !r.notes.length) console.log("nothing to do");
+                break;
+            }
+            case "uninstall-cli": {
+                const { uninstallHostCli } = await import("../libraries/host-int/src/host-cli");
+                const rm = await uninstallHostCli();
+                console.log(rm.length ? `removed ${rm.length} wrapper(s)` : "no cli wrappers installed");
+                rm.forEach((p) => console.log(`  ${p}`));
+                break;
+            }
             default: usage();
         }
         break;

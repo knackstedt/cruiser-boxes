@@ -37,7 +37,19 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 
 - `.github/workflows/ci.yml` — typecheck + lint + `bun test tests/` on push/PR;
   reused by `release.yml` (tag `v*` → `draft release --target=linux` →
-  deb + AppImage uploaded to a GitHub release; `-` in the tag = prerelease).
+  deb + AppImage + flatpak + rpm uploaded to a GitHub release; `-` in the
+  tag = prerelease). Formats come from package.json build.linux.target
+  (the packager's KNOWN_FORMATS are dir/deb/appimage/flatpak/rpm — dir is
+  left out as it produces no uploadable artifact). The flatpak/rpm formats
+  need extra tooling the runner doesn't have — release.yml apt-installs
+  `flatpak flatpak-builder rpm cpio` and pulls
+  org.freedesktop.{Platform,Sdk}//25.08 from flathub before packaging.
+  build.flatpak.finishArgs replaces the packager defaults wholesale —
+  the set is defaults + `--device=all` (kvm + /dev/bus/usb passthrough),
+  `--socket=session-bus` (kglobalaccel/gsd shortcut registration, KDE
+  window rules via qdbus, `systemctl --user` for the autostart unit),
+  keeping wayland/x11/ipc/pulseaudio/home/network. build.rpm mirrors the
+  deb dep set under Fedora names (libusb1, libusbredir).
   ci.yml also runs `cargo check --locked` + `cargo clippy --locked` on
   `viewer-dd/` and `term-dd/`; release.yml runs `bun run viewer-dd:stage`,
   `bun run term-dd:stage` (same `cargo build --release --locked` →
@@ -57,7 +69,16 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   the CLI: native-entry.ts dispatches argv to src/cli.ts when arg1 is a cli
   area (`cruiser vm start x`, `cruiser doctor`), so OVMF_CODE/OVMF_VARS
   resolve system-first then opt's edk2 fds, and {cli} shortcuts expand to
-  the appdir launcher.
+  the appdir launcher. `cruiser` on PATH: deb/rpm ship /usr/bin/cruiser via
+  the packager; flatpak can't touch host PATH, so service.init (and `host
+  install-cli`) drops marker-checked wrappers exec'ing `flatpak run
+  dev.cruiser.app` into ~/.local/share/flatpak/exports/bin + ~/.local/bin
+  (host-cli.ts — also used for AppImage/dev via ~/.local/bin). Every
+  host-EXECUTED cli expansion checks FLATPAK_ID first and routes through
+  `flatpak run <id>` — session.ts cruiserCliArgv (escape shortcuts,
+  app-mode .desktop Exec lines) and autostart.ts cliArgv (the systemd
+  --user unit's ExecStart) — the in-sandbox launcher path is dead on the
+  host.
 - CI does NOT use the sibling engine checkout — deps are already npm specs;
   `.github/actions/downdraft-deps` can still pin `@downdraft/*` to a chosen
   published version (`downdraft-version` input — empty default = keep

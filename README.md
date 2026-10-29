@@ -62,10 +62,12 @@ does make a mess, `vm snapshot` / `vm restore` is right there.
 
 ## Getting started
 
-Grab the `.deb` or AppImage from Releases — the package ships its own
-pinned QEMU 11 toolchain, so there is almost nothing to install. The same
-binary is both the app and the CLI: `cruiser doctor` reports whatever
-else your host might want.
+Grab the `.deb`, `.rpm`, `.flatpak` or AppImage from Releases — the package
+ships its own pinned QEMU 11 toolchain, so there is almost nothing to
+install. The same binary is both the app and the CLI: `cruiser doctor`
+reports whatever else your host might want (deb/rpm put `cruiser` on PATH;
+flatpak installs a `cruiser` wrapper on first launch —
+`flatpak run dev.cruiser.app` works regardless).
 
 From source:
 

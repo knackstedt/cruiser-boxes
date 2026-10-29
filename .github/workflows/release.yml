@@ -80,7 +80,17 @@ jobs:
         # so the embedded terminal has a real page to load.
         run: bun run term:bundle
 
-      - name: Package (deb + AppImage via draft release)
+      - name: Install flatpak/rpm packaging tools
+        # Same recipe as the engine's packaging.yml — flatpak-builder needs
+        # the flathub remote + the runtime/sdk the manifest pins
+        # (build.flatpak in package.json, default org.freedesktop.*//25.08).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder rpm cpio
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08
+
+      - name: Package (deb + AppImage + flatpak + rpm via draft release)
         # Formats come from build.linux.target in package.json; runtime from
         # downdraft.config.json ("node" — emit-tree + shipped node binary).
         run: bunx draft release --target=linux
@@ -91,7 +101,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           shopt -s nullglob
-          artifacts=(release/*.deb release/*.AppImage release/*.flatpak)
+          artifacts=(release/*.deb release/*.AppImage release/*.flatpak release/*.rpm)
           if (( ${#artifacts[@]} == 0 )); then
             echo "No release artifacts found in release/" >&2
             ls -la release/ >&2 || true
