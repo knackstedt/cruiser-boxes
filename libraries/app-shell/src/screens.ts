@@ -102,10 +102,14 @@ input { background:#0e0e0e; border:1px solid #303030; border-radius:4px; color:#
         padding:8px 10px; font-size:14px; width:220px; }
 input:focus { border-color:#5ee6a8; outline:none; }
 /* The ✕ clear chip on every data-field input — injected by withClearButtons.
-   .inwrap pulls the chip tight against its input instead of letting the
-   row's 16px flex gap scatter it into the next control's space. */
-.inwrap { display:flex; align-items:center; gap:6px; }
-.clr { font-size:12px; color:#666666; padding:3px 6px; border-radius:3px; }
+   It sits INSIDE the input's right edge (negative margin into the space
+   padding-right reserves) and only exists on wrap hover — an invisible
+   click target in the input corner would eat focus clicks. */
+.inwrap { display:flex; align-items:center; }
+.inwrap input { padding-right:26px; }
+.clr { display:none; font-size:12px; color:#666666; padding:3px 6px;
+       border-radius:3px; margin-left:-24px; }
+.inwrap:hover .clr { display:inline-block; }
 .clr:hover { color:#ececec; background:#282828; }
 .opts { display:flex; gap:6px; }
 .opts.wrap { flex-wrap:wrap; max-width:680px; }
