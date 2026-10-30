@@ -129,13 +129,16 @@ input:focus { border-color:#5ee6a8; outline:none; }
 .opt.sm { padding:4px 9px; font-size:12px; }
 /* .tog marks the lone on/off switch — a track + knob so it reads as a
    switch, not a status badge or an option in a group. The ::before box is
-   the knob; padding-left parks it on the off/on side (the shell steps it
-   inline for the slide — the doc engine never interpolates transitions).
-   Ordered after .opt.sm/.opt.on so the track's own off/on colors win over
-   the generic chip styles on .sm.tog/.on.tog. */
+   the knob; padding-left parks it on the off/on side so the state flip is
+   an interpolatable property and the transition slides the knob (works
+   because contentPatch's attr-level diffing keeps the node alive across
+   the class flip). Ordered after .opt.sm/.opt.on so the track's own off/on
+   colors win over the generic chip styles on .sm.tog/.on.tog. */
 .opt.tog { width:32px; height:16px; min-width:0; padding:2px 0; border-radius:11px;
-           display:flex; align-items:center; background:#242424; border-color:#3d3d3d; }
-.opt.tog::before { content:""; width:16px; height:16px; border-radius:8px; background:#8a8a8a; }
+           display:flex; align-items:center; background:#242424; border-color:#3d3d3d;
+           transition:padding-left .14s ease-out, background .14s ease-out; }
+.opt.tog::before { content:""; width:16px; height:16px; border-radius:8px; background:#8a8a8a;
+                   transition:background .14s ease-out; }
 .opt.tog:hover { border-color:#555555; }
 .opt.tog.on { padding-left:16px; background:#2c4e3c; border-color:#5ee6a8; }
 .opt.tog.on::before { background:#5ee6a8; }

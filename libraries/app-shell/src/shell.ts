@@ -187,13 +187,6 @@ export class CruiserShell {
             // instead of leaving an unbootable combo selected (create/save
             // guard against it too). A real gpu change back to a GL mode
             // restores dmabuf — the fast default; rdp stays a re-pick.
-            // .tog switches slide the knob inline on the still-mounted
-            // node, then commit — see slideTog.
-            if (BOOL_FIELDS.has(k) && v !== st().create[k]) {
-                this.slideTog(`.opt.tog[data-field="${k}"]`, v === true,
-                    () => st().setField(k, v as never));
-                return;
-            }
             const gpuChanged = k === "gpu" && v !== st().create.gpu;
             st().setField(k, v as never);
             if (k === "gpu") {
@@ -346,13 +339,7 @@ export class CruiserShell {
         });
         this.host.onAction("share-attr", (d) => {
             if (!d.vm || !d.field) return;
-            const commit = () => void svc.shareAttr(d.vm!, Number(d.idx), String(d.field), String(d.value ?? ""));
-            if (d.field === "enabled") {
-                this.slideTog(`.opt.tog[data-field="enabled"][data-idx="${d.idx}"]`,
-                    d.value === "true", commit);
-                return;
-            }
-            commit();
+            void svc.shareAttr(d.vm, Number(d.idx), String(d.field), String(d.value ?? ""));
         });
         this.host.onAction("share-form", (d) => {
             if (!d.field) return;
@@ -526,29 +513,14 @@ export class CruiserShell {
     }
 
     /**
-     * Slide a .tog knob to its parked end, then run commit (the store write
-     * that flips the class). The doc engine parses `transition` but never
-     * interpolates it, so the slide is stepped inline on the PRE-flip node —
-     * stable across the press — and the stylesheet takes over at the same
-     * position when commit's re-render lands (~130ms).
-     */
-    private slideTog(sel: string, toOn: boolean, commit: () => void): void {
-        const steps = 7, from = toOn ? 0 : 16, to = 16 - from;
-        let i = 0;
-        const t = setInterval(() => {
-            const x = from + (to - from) * (1 - (1 - ++i / steps) ** 2);
-            this.panel?.setStyle(sel, "padding-left", `${x.toFixed(1)}px`);
-            if (i >= steps) { clearInterval(t); commit(); }
-        }, 20);
-    }
-
-    /**
      * Apply fresh markup. Route changes swap the whole document (scroll
      * resets to the top — intentional). Same-route updates patch
      * topbar/content/footer via innerHtml — and routes that declare a fine
      * surface (regions/rowGroup) go one level deeper: contentPatch diffs
      * per-region markup and emits a single batched mutate() covering only
-     * the changed subtrees, so a metrics tick reparses the one row that
+     * the changed subtrees — attr/text-level ops when the structure is
+     * unchanged (keeping nodes alive so CSS transitions run), innerHtml
+     * when it isn't — so a metrics tick reparses the one row that
      * moved instead of the whole page. The .content scrollport node always
      * survives, so scroll offset persists with no restore scroll —
      * which means no scroll=0 frame between rebuild and restore (the
