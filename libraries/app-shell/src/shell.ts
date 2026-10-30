@@ -133,7 +133,8 @@ export class CruiserShell {
         // Spinner ticks only while busy (status text itself re-renders the
         // overlay) — direct setText so it doesn't trip the RenderGate.
         this.spinTimer = setInterval(() => {
-            if (!this.store.getState().busy) return;
+            const now = this.store.getState();
+            if (!now.busy && !Object.keys(now.actions).length) return;
             // same teardown-race guard as pushRender — a dead panel's
             // setText must not kill the interval's process either
             try { this.panel?.setText("[data-spin]", SPIN[this.spinIdx++ % SPIN.length]!); } catch { /* panel gone */ }

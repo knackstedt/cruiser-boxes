@@ -342,7 +342,7 @@ function sparksFor(vm: VmSummary): string {
  *  targets this VM the cluster collapses to a single live indicator — the
  *  shell's busy ticker animates [data-spin] (~140ms/frame). */
 function vmBtns(vm: VmSummary, s: CruiserState, detail = false): string {
-    const act = s.action?.vm === vm.name ? s.action : null;
+    const act = s.actions[vm.name] ?? null;
     if (act) {
         const secs = Math.floor((Date.now() - act.at) / 1000);
         return `<div class="btn sm dim"><span data-spin>◐</span>&nbsp;${esc(act.verb)}… ${secs}s</div>`;

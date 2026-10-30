@@ -251,7 +251,10 @@ export interface CruiserState {
     status: string;
     statusKind: StatusKind;
     busy: boolean;                 // an async action is in flight
-    action: ActionState | null;    // which action — renders on its VM's button
+    /** In-flight actions keyed by target VM ("" = global op) — concurrent
+     *  per-VM ops each keep their own row glyph; one finishing can't clear
+     *  another's. */
+    actions: Record<string, ActionState>;
     create: CreateForm;
     doctor: DoctorRow[] | null;
     host: HostInfo | null;
@@ -320,7 +323,8 @@ export interface CruiserActions {
     setVms(vms: VmSummary[]): void;
     setStatus(status: string, kind?: StatusKind): void;
     setBusy(busy: boolean): void;
-    setAction(a: ActionState | null): void;
+    setAction(a: ActionState): void;
+    clearAction(vm: string | null): void;
     setField<K extends keyof CreateForm>(k: K, v: CreateForm[K]): void;
     resetCreate(): void;
     setDoctor(rows: DoctorRow[] | null): void;
@@ -380,7 +384,7 @@ export function createCruiserStore() {
         status: "ready",
         statusKind: "info",
         busy: false,
-        action: null,
+        actions: {},
         create: defaultCreate(),
         doctor: null,
         host: null,
@@ -407,7 +411,12 @@ export function createCruiserStore() {
         setVms: (vms) => set({ vms }),
         setStatus: (status, kind = "info") => set({ status, statusKind: kind }),
         setBusy: (busy) => set({ busy }),
-        setAction: (action) => set({ action }),
+        setAction: (a) => set((s) => ({ actions: { ...s.actions, [a.vm ?? ""]: a } })),
+        clearAction: (vm) => set((s) => {
+            const next = { ...s.actions };
+            delete next[vm ?? ""];
+            return { actions: next };
+        }),
         setField: (k, v) => set((s) => ({ create: { ...s.create, [k]: v } })),
         resetCreate: () => set({ create: defaultCreate() }),
         setDoctor: (doctor) => set({ doctor }),
