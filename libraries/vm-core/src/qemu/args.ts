@@ -124,6 +124,14 @@ export function buildArgs(
     // vars updates through the unprotected interface.
     if (sb) push("-global", "driver=cfi.pflash01,property=secure,value=on");
 
+    // Firmware boot pinning: OVMF otherwise builds Boot#### entries for
+    // every bootable device it can find (PXE/HTTP network boot included)
+    // during DXE — the bulk of pre-kernel firmware time. order=d,strict=on
+    // trims the bootorder fw_cfg to the system disk only. Install mode
+    // keeps free enumeration so the attached install/seed cd can boot —
+    // and CRUISER_NO_BOOTPIN restores it for a rescue/firmware-menu boot.
+    if (opts.mode !== "install" && !process.env.CRUISER_NO_BOOTPIN) push("-boot", "order=d,strict=on");
+
     // LUKS (spec.disk.encrypt): the passphrase reaches QEMU as a `-object
     // secret` file reference — never inline on argv. "full" keys the
     // system drive itself; "home" leaves it plaintext and attaches the

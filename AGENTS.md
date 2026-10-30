@@ -154,6 +154,23 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   nice is which()-gated. Both surfaces expose it — create/edit
   "QEMU nice"/"QEMU I/O class"/"I/O priority" rows ("" = unset) and the
   cli's --nice/--io-class/--io-prio.
+  `vm hibernate` is suspend-to-disk via QMP `migrate "exec:cat >
+  run/suspend.mig"` — NOT snapshot-save/internal snapshots (that path
+  tagged every disk, needed qcow2, and a mid-load kill rolled disk vs RAM
+  inconsistently → guest fs corruption). start() detects the file, adds
+  `-incoming "exec:cat …"`, polls query-migrate → cont → deletes it.
+  virtio-gpu's `conf.max_outputs` is VMSTATE_UINT32_EQUAL — the resume
+  argv MUST carry the save-time guestMonitors or the element load fails
+  ("1 != 3"); hibernate() stashes launch-monitors.json as
+  run/suspend-mons.json for exactly this. Gates: gpu.mode=software (virgl/
+  venus host GL state isn't serializable) and no mount-mode shares
+  (vhost-user-fs state lives in virtiofsd). A boot-frozen spec drift vs
+  run/launch-spec.json refuses resume with the diff named; `--discard-state`
+  cold-boots (discardHibernate also sweeps the legacy
+  run/hibernate.vmstate + "hibernate" disk tags — start() still resumes
+  that older format via -S + snapshot-load). waitJob() polls query-jobs
+  once after listener registration — a concluded JOB_STATUS_CHANGE event
+  emitted pre-registration is otherwise missed to the 10min timeout.
   `logs.ts` — the Logs screen's backends: run/ file tails (cruiser.log is
   tee'd from lifecycle + provision via `appendVmLog`; serial.log is attached
   on every boot) and guest journalctl with filters over QGA, falling back to

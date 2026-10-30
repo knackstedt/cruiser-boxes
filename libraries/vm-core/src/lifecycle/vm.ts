@@ -325,27 +325,62 @@ export class VmHandle {
         if (this.spec.disk.encrypt !== "off") await this.ensureAuxDisks();
         if (!existsSync(this.paths.ovmfVars)) await copyFile(ovmfVarsTemplate(this.spec.security.secureBoot), this.paths.ovmfVars);
 
+        // Hibernate resume: a run/suspend.mig from hibernate() means this
+        // boot is a state-load, not a cold boot — -incoming makes QEMU
+        // consume the saved RAM+device stream at startup (disks are never
+        // rolled). The legacy run/hibernate.vmstate path is a paused (-S)
+        // boot + snapshot-load.
+        const resumeMig = join(this.paths.run, "suspend.mig");
+        const resumeVs = join(this.paths.run, "hibernate.vmstate");
+        const resuming = existsSync(resumeMig) || existsSync(resumeVs);
+        if (resuming) {
+            // The vmstate is bound to the launch-time device model — a
+            // boot-frozen spec edit since the save (RAM size, cpu count,
+            // gpu mode…) makes snapshot-load fail partway. Refuse the
+            // resume with the drift named; the state survives for a retry
+            // after reverting, or --discard-state cold-boots.
+            let drift: string[] = [];
+            try {
+                drift = bootRelevantChanges(
+                    parseVmSpec(JSON.parse(readFileSync(this.paths.launchSpec, "utf-8"))),
+                    this.spec);
+            } catch { /* no launch baseline — take the state at face value */ }
+            if (drift.length) {
+                await this.clearDiskKey();   // the spawn-time finally never runs on this throw
+                throw new Error(
+                    `hibernate state predates a spec change (${drift.join(", ")}) — ` +
+                    `revert it, or cold-boot with 'vm start ${this.spec.name} --discard-state'`);
+            }
+        }
+
         // swtpm: QEMU's tpm-emulator chardev connects at machine init, so
         // the daemon must be listening first (same shape as virtiofsd).
         if (this.spec.security.tpm) await this.spawnSwtpm();
-
-        // Hibernate resume: a run/hibernate.vmstate from hibernate() means
-        // this boot is a state-load, not a cold boot — -S freezes the cpus
-        // at startup and snapshot-load drops in RAM + rolls the disks.
-        const resumeVs = join(this.paths.run, "hibernate.vmstate");
-        const resuming = existsSync(resumeVs);
         // The GPU device's max_outputs must match the SAVE-time argv or
-        // virtio-gpu's vmstate refuses to load — the launch-time monitor
-        // list is persisted next to launch-spec for exactly this.
+        // virtio-gpu's vmstate refuses to load (VMSTATE_UINT32_EQUAL →
+        // "1 != 3"-style failure). hibernate() persists the exact list as
+        // suspend-monitors.json; launch-monitors.json is the fallback.
         let savedMons: BuildOpts["guestMonitors"] | undefined;
         if (resuming) {
-            try { savedMons = JSON.parse(readFileSync(this.launchMonitorsPath(), "utf-8")); } catch { /* fall back to caller's */ }
+            const monPaths = [this.suspendMonitorsPath(), this.launchMonitorsPath()];
+            for (let i = 0; i < monPaths.length && !savedMons?.length; i++) {
+                try { savedMons = JSON.parse(readFileSync(monPaths[i]!, "utf-8")); } catch { /* try next */ }
+            }
         }
+        // The list that actually shaped this launch's GPU device — a resume
+        // reuses the save-time list even when the caller's differs, and the
+        // persisted record must match what went into argv (a later
+        // restoreSnapshot rebuilds the device from it). An EMPTY saved list
+        // reads as "no monitors were mirrored" — not a zero-monitor save —
+        // so it falls back like a missing file (buildArgs crashes on []).
+        const launchMons = resuming && savedMons?.length ? savedMons : opts.guestMonitors;
 
         const built = await this.buildArgv({
             ...opts,
-            guestMonitors: resuming ? (savedMons ?? opts.guestMonitors) : opts.guestMonitors,
-            extraArgs: [...(opts.extraArgs ?? []), ...(resuming ? ["-S"] : [])],
+            guestMonitors: launchMons,
+            extraArgs: [...(opts.extraArgs ?? []),
+                ...(existsSync(resumeMig) ? ["-incoming", `exec:cat '${resumeMig}'`]
+                    : existsSync(resumeVs) ? ["-S"] : [])],
         });
         void appendVmLog(this.paths, `start: mode=${opts.mode ?? "run"} persist=${this.spec.persist} gpu=${this.spec.gpu.mode}`);
 
@@ -409,39 +444,81 @@ export class VmHandle {
                 this.qemuChild.unref();
             }
 
-            // Wait for the monitor socket, then QMP handshake.
+            // Wait for the monitor socket, then QMP handshake. The post-
+            // launch steps (state-load, spec snapshot, watchers, ddproxy)
+            // run OUTSIDE the readiness probe — a loadVmstate failure must
+            // surface as itself, not a swallowed "qemu did not come up" at
+            // the deadline.
             const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
             for (;;) {
+                let ready = false;
                 if (existsSync(this.paths.monitorSock)) {
-                    try {
-                        await this.withQmp((q) => q.queryStatus());
-                        void appendVmLog(this.paths, `started: pid ${this.pid()}${resuming ? " (hibernate resume)" : ""}`);
-                        if (resuming)
-                            await this.loadVmstate(resumeVs, "hibernate", { dropAfter: true });
-                        // Snapshot the spec QEMU actually launched with —
-                        // pendingRestart() diffs later saves against it.
-                        await writeFile(this.paths.launchSpec,
-                            JSON.stringify(this.spec)).catch(() => {});
-                        // …and the monitor list that shaped the GPU device —
-                        // a live-snapshot/hibernate restore must reproduce
-                        // that exact max_outputs.
-                        await writeFile(this.launchMonitorsPath(),
-                            JSON.stringify(opts.guestMonitors ?? [])).catch(() => {});
-                        this.watchVfsd();
-                        this.watchUsb();
-                        this.startUrlListener();
-                        // ddproxy: the dmabuf display broker holds QEMU's
-                        // @dbus-display conns for the VM's lifetime so viewer
-                        // churn never reaches QEMU's wedgable p2p auth.
-                        // Default-on for dmabuf VMs; a missing binary is not
-                        // fatal (viewer-dd falls back to the direct channel).
-                        // Awaited (it's just a detached spawn — the attach
-                        // retry runs inside the daemon) so the pidfile lands
-                        // before start() returns.
-                        if (this.spec.display.viewer === "dmabuf")
-                            await spawnDdproxy(this.paths);
-                        return;
-                    } catch { /* not ready */ }
+                    try { await this.withQmp((q) => q.queryStatus()); ready = true; }
+                    catch { /* not ready */ }
+                }
+                if (ready) {
+                    void appendVmLog(this.paths, `started: pid ${this.pid()}${resuming ? " (hibernate resume)" : ""}`);
+                    if (resuming) {
+                        try {
+                            if (existsSync(resumeMig)) {
+                                // -incoming consumes the stream during
+                                // startup; poll query-migrate for the
+                                // outcome, then cont out of the paused
+                                // post-load state and drop the file.
+                                const migDl = Date.now() + 120_000;
+                                for (;;) {
+                                    if (!this.isRunning()) {
+                                        const tail = existsSync(this.paths.log)
+                                            ? readFileSync(this.paths.log, "utf-8").slice(-800) : "";
+                                        throw new Error(`qemu exited while loading state${tail ? `\n${tail}` : ""}`);
+                                    }
+                                    const m = await this.withQmp((q) => q.execute("query-migrate")).catch(() => null) as { status?: string; error?: { desc?: string } } | null;
+                                    if (m?.status === "completed") break;
+                                    if (m?.status === "failed" || m?.status === "cancelled")
+                                        throw new Error(`migrate ${m.status}${m.error?.desc ? `: ${m.error.desc}` : ""}`);
+                                    if (Date.now() > migDl) throw new Error("state load did not finish in 120s");
+                                    await new Promise((r) => setTimeout(r, 200));
+                                }
+                                await this.withQmp((q) => q.cont()).catch(() => {});
+                                await rm(resumeMig, { force: true });
+                                await rm(this.suspendMonitorsPath(), { force: true });
+                            } else {
+                                await this.loadVmstate(resumeVs, "hibernate", { dropAfter: true });
+                            }
+                        } catch (e) {
+                            // A failed state-load leaves QEMU a paused
+                            // half-boot — kill it. The state file survives
+                            // for a retry or discard.
+                            const msg = e instanceof Error ? e.message : String(e);
+                            void appendVmLog(this.paths, `hibernate resume failed: ${msg}`);
+                            await this.kill().catch(() => {});
+                            throw new Error(`hibernate resume failed: ${msg} — ` +
+                                `state kept; retry 'vm start' or cold-boot with --discard-state`);
+                        }
+                    }
+                    // Snapshot the spec QEMU actually launched with —
+                    // pendingRestart() diffs later saves against it.
+                    await writeFile(this.paths.launchSpec,
+                        JSON.stringify(this.spec)).catch(() => {});
+                    // …and the monitor list that shaped the GPU device —
+                    // a live-snapshot/hibernate restore must reproduce
+                    // that exact max_outputs.
+                    await writeFile(this.launchMonitorsPath(),
+                        JSON.stringify(launchMons ?? [])).catch(() => {});
+                    this.watchVfsd();
+                    this.watchUsb();
+                    this.startUrlListener();
+                    // ddproxy: the dmabuf display broker holds QEMU's
+                    // @dbus-display conns for the VM's lifetime so viewer
+                    // churn never reaches QEMU's wedgable p2p auth.
+                    // Default-on for dmabuf VMs; a missing binary is not
+                    // fatal (viewer-dd falls back to the direct channel).
+                    // Awaited (it's just a detached spawn — the attach
+                    // retry runs inside the daemon) so the pidfile lands
+                    // before start() returns.
+                    if (this.spec.display.viewer === "dmabuf")
+                        await spawnDdproxy(this.paths);
+                    return;
                 }
                 if (Date.now() > deadline) {
                     const tail = existsSync(this.paths.log) ? readFileSync(this.paths.log, "utf-8").slice(-2000) : "";
@@ -888,33 +965,94 @@ done
         return disk.snapshotDelete((await this.tc()).qemuImg, this.diskPath(), name, this.needDiskKey());
     }
 
-    /** Suspend-to-disk: live snapshot tagged "hibernate" with vmstate in
-     *  run/, then QEMU quits. The next start() detects the file, boots
-     *  paused (-S), snapshot-loads, and drops the state. Memory-hungry —
-     *  the vmstate file is roughly guest-RAM sized. */
+    /** run/suspend-mons.json — the guestMonitors that shaped the SUSPENDED
+     *  VM's GPU device. Lives next to suspend.mig (not in
+     *  launch-monitors.json, which each new boot overwrites). */
+    private suspendMonitorsPath(): string {
+        return join(this.paths.run, "suspend-mons.json");
+    }
+
+    /** Suspend-to-disk: freeze the guest, migrate RAM+device state to
+     *  run/suspend.mig, then quit. The next start() detects the file and
+     *  launches with -incoming — QEMU consumes the stream and lands the
+     *  guest where it left off. Unlike the old internal-snapshot path the
+     *  disks are never rolled and any format works; the file is roughly
+     *  guest-RAM sized. */
     async hibernate(): Promise<void> {
         if (!this.isRunning()) throw new Error("start the VM to hibernate it");
         if (this.spec.gpu.mode !== "software")
             throw new Error("hibernate needs gpu.mode=software — virgl/venus devices aren't migratable");
-        const vs = join(this.paths.run, "hibernate.vmstate");
-        await disk.createDisk((await this.tc()).qemuImg, vs,
-            Math.ceil(this.spec.resources.memoryMiB / 1024) + 1);
+        // virtiofs shares are vhost-user: device state lives in the
+        // external daemon, which QEMU can't serialize — migrate refuses.
+        if (this.vfsdTargets().length)
+            throw new Error("hibernate can't save VMs with mount-mode shares — vhost-user-fs state lives in virtiofsd and isn't migratable");
+        const mig = join(this.paths.run, "suspend.mig");
+        await rm(mig, { force: true });            // a stale file can't host a fresh save
+        await rm(this.suspendMonitorsPath(), { force: true });
         await this.withQmp(async (q) => {
-            const nodes = await this.snapNodes(q);
-            const vsNode = await VmHandle.addVmstateNode(q, vs);
-            const jobId = `hib-${Date.now()}`;
-            await q.execute("snapshot-save", {
-                "job-id": jobId, tag: "hibernate", vmstate: vsNode,
-                devices: [...nodes, vsNode],   // vmstate must be listed too
-            });
-            await disk.waitJob(q, jobId);
-            await q.quit();
+            await q.stop();   // quiesce vcpus + disk I/O for a consistent stream
+            try {
+                await q.execute("migrate", { uri: `exec:cat > '${mig}'` });
+                const deadline = Date.now() + 10 * 60_000;
+                for (;;) {
+                    const m = await q.execute("query-migrate").catch(() => null) as { status?: string; error?: { desc?: string } } | null;
+                    if (m?.status === "completed") break;
+                    if (m?.status === "failed" || m?.status === "cancelled")
+                        throw new Error(`migrate ${m.status}${m.error?.desc ? `: ${m.error.desc}` : ""}`);
+                    if (Date.now() > deadline) throw new Error("migrate timed out");
+                    await new Promise((r) => setTimeout(r, 200));
+                }
+            } catch (e) {
+                // Keep the running VM usable — unpause and drop the
+                // partial stream so start() can't pick up a truncated file.
+                await q.cont().catch(() => {});
+                await rm(mig, { force: true }).catch(() => {});
+                throw e;
+            }
+            // The resume must reproduce this device's exact shape — stash
+            // the launch-time monitor list next to the stream (host
+            // topology may differ by resume time).
+            try { await writeFile(this.suspendMonitorsPath(), readFileSync(this.launchMonitorsPath())); }
+            catch { /* none — resume falls back to the caller's list */ }
+            // quit's reply races the socket teardown — a rejection just
+            // means QEMU took the order.
+            await q.quit().catch(() => {});
         });
+        // Wait for the pid to die so the stream is durable, then reap the
+        // detached companions — virtiofsd listeners and ddproxy would
+        // otherwise sit orphaned until the next start's stray-sweep.
+        const deadline = Date.now() + 15_000;
+        while (this.isRunning() && Date.now() < deadline)
+            await new Promise((r) => setTimeout(r, 100));
+        this.cleanupRunDir();
+    }
+
+    /** Drop a pending hibernate state WITHOUT resuming — the suspend.mig
+     *  stream and its sidecar, plus (legacy) the run/hibernate.vmstate
+     *  file and the "hibernate" internal-snapshot tags the old
+     *  snapshot-save path left on every covered disk. Encrypted disks
+     *  need the passphrase like any mutating op. */
+    async discardHibernate(): Promise<void> {
+        if (this.isRunning()) throw new Error("stop the VM first");
+        const vs = join(this.paths.run, "hibernate.vmstate");
+        await rm(join(this.paths.run, "suspend.mig"), { force: true });
+        await rm(this.suspendMonitorsPath(), { force: true });
+        if (!existsSync(vs)) return;
+        const key = this.spec.disk.encrypt === "off" ? undefined : this.needDiskKey();
+        await rm(vs, { force: true });
+        const img = (await this.tc()).qemuImg;
+        const imgs = [this.diskPath(), this.spec.disk.encrypt === "home" ? this.homeDiskPath() : null];
+        for (let i = 0; i < imgs.length; i++) {
+            const d = imgs[i];
+            if (d && existsSync(d))
+                await disk.snapshotDelete(img, d, "hibernate", key).catch(() => {});
+        }
     }
 
     /** A hibernate image is pending — start() will resume it. */
     hibernated(): boolean {
-        return existsSync(join(this.paths.run, "hibernate.vmstate"));
+        return existsSync(join(this.paths.run, "suspend.mig"))
+            || existsSync(join(this.paths.run, "hibernate.vmstate"));
     }
     async resizeDisk(newSizeGiB: number) {
         if (this.isRunning()) throw new Error("stop the VM before resizing the disk (guest growfs happens next boot)");

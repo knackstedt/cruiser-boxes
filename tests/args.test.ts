@@ -130,6 +130,15 @@ describe("buildArgs", () => {
         expect(build((s) => { s.display.viewer = "rdp"; }, { vdagent: true })).not.toContain("qemu-vdagent");
     });
 
+    test("run boots pin OVMF to the disk; install mode enumerates freely", () => {
+        // strict=on trims OVMF's bootoption enumeration to the system
+        // disk — the install/seed cd path must keep free enumeration.
+        const a = build();
+        expect(a).toContain("-boot\norder=d,strict=on");
+        const i = build(undefined, { mode: "install", install: { seedIso: "/s.iso" } });
+        expect(i).not.toContain("-boot\n");
+    });
+
     test("install mode attaches iso+seed+kernel", () => {
         const a = build(undefined, {
             mode: "install",

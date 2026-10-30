@@ -150,15 +150,22 @@ export async function snapshotList(qemuImg: string, disk: string, keyFile?: stri
  *  cancelled and the call rejects. */
 export async function waitJob(qmp: QmpClient, jobId: string, timeoutMs = 10 * 60_000): Promise<void> {
     await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        // Shared event/poll path: a concluded job reports its failure
+        // string via query-jobs, then gets dismissed either way.
+        const conclude = async () => {
+            const jobs = await qmp.execute("query-jobs").catch(() => [] as any[]);
+            const job = (jobs ?? []).find((j: any) => j?.id === jobId);
+            if (!job) { finish(() => resolve()); return; }   // concluded + auto-dismissed, or never registered
+            if (job.status !== "concluded") return;          // still running
+            const err = job.error;
+            await qmp.jobDismiss(jobId).catch(() => {});
+            finish(() => err ? reject(new Error(String(err))) : resolve());
+        };
         const onEv = (e: any) => {
             if (e.event !== "JOB_STATUS_CHANGE" || e.data?.id !== jobId
                 || e.data?.status !== "concluded") return;
-            void (async () => {
-                const jobs = await qmp.execute("query-jobs").catch(() => [] as any[]);
-                const err = (jobs ?? []).find((j: any) => j?.id === jobId)?.error;
-                await qmp.jobDismiss(jobId).catch(() => {});
-                finish(() => err ? reject(new Error(String(err))) : resolve());
-            })();
+            void conclude();
         };
         const timer = setTimeout(() => {
             void (async () => {
@@ -168,11 +175,17 @@ export async function waitJob(qmp: QmpClient, jobId: string, timeoutMs = 10 * 60
             })();
         }, timeoutMs);
         function finish(fn: () => void) {
+            if (settled) return;
+            settled = true;
             clearTimeout(timer);
             qmp.off("event", onEv);
             fn();
         }
         qmp.on("event", onEv);
+        // The concluded event can fire between the job-creating command's
+        // reply and listener registration — poll once so a fast job isn't
+        // waited out to the timeout.
+        void conclude();
     });
 }
 

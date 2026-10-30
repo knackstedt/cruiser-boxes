@@ -81,10 +81,14 @@ usage: cruiser <area> <command> [args]
   vm share rm <name> <tag|hostPath>
   vm filesync <name> [--watch]     run copy-mode shares now (--watch keeps syncing live)
   vm start <name...> [--all] [--mode <headmode>] [--no-view]   (1 name → auto-opens the viewer like the UI)
+                   [--discard-state]     drop a pending hibernate state and cold-boot
   vm stop <name...> [--all]             vm kill <name>
   vm reboot <name>                      vm suspend|resume <name>   (QGA reboot / QMP pause+cont)
-  vm hibernate <name>                   save RAM+disk state and power off — 'vm start'
-                                       resumes it (≈ guest-RAM-sized vmstate file)
+  vm hibernate <name>                   save RAM+device state and power off — 'vm start'
+                                       resumes it (needs gpu software; no mount shares;
+                                       ≈ guest-RAM-sized suspend.mig). A spec change
+                                       since the save blocks resume — 'vm start
+                                       --discard-state' cold-boots instead
   vm status <name>                      vm args <name>   (print QEMU argv)
   vm stats <name>                       point-in-time summary — state, guest OS, memory
                                        (incl. balloon), host+guest disk usage, ifaces
@@ -419,6 +423,9 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
                 // Encrypted VMs need the passphrase materialized before QEMU —
                 // flag/env, then a tty prompt for key-storage=prompt VMs.
                 await ensureDiskKey(h);
+                // --discard-state: cold-boot past a saved hibernate state —
+                // drops the suspend.mig stream (+ legacy vmstate/disk tags).
+                if (has("--discard-state")) await h.discardHibernate();
                 if (!existsSync(h.diskPath())) {
                     await mkdir(h.paths.dir, { recursive: true });
                     console.log(`creating disk ${h.diskPath()} (${h.spec.disk.sizeGiB}G sparse)`);
@@ -543,7 +550,14 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             break;
         }
         case "resume": { const h = await needVm(args[0]); await h.resume(); console.log("resumed"); break; }
-        case "status": { const h = await needVm(args[0]); console.log(await h.probe()); break; }
+        case "status": {
+            const h = await needVm(args[0]);
+            const st = await h.probe();
+            console.log(st === "stopped" && h.hibernated()
+                ? "hibernated (saved state — 'vm start' resumes it)"
+                : st);
+            break;
+        }
         case "stats": {
             const h = await needVm(args[0]);
             const s = h.spec;
