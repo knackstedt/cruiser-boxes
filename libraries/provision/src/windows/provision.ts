@@ -55,7 +55,13 @@ export async function provisionVmWindows(h: VmHandle, o: ProvisionOpts): Promise
             hostname: windowsHostname(spec.name),
             username: spec.credentials.username,
             password: pw,
-            edition: spec.os.winEdition ?? media.edition ?? defaultWinEdition(spec.os.release || "11"),
+            // Eval media is single-image — the consumer default /IMAGE/NAME
+            // isn't in its wim and InstallFrom fails deep in WinPE. Sniff
+            // eval ISOs (cruiser-cached names carry "eval"; Microsoft's own
+            // filenames contain "ENTERPRISEEVAL") and omit the edition —
+            // setup then takes its only image. spec.os.winEdition wins.
+            edition: spec.os.winEdition ?? media.edition
+                ?? (/eval/i.test(winIso) ? undefined : defaultWinEdition(spec.os.release || "11")),
             timezone: windowsTimezone(await seedTimezone(spec, o.timezone)),
             locale: windowsLocale(snap.locale),
             testsigning: spec.os.winDriver === "yttrium",

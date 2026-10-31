@@ -144,7 +144,7 @@ describe("windows portable spec", () => {
 describe("unattend helpers", () => {
     test("windowsHostname is NetBIOS-safe", () => {
         expect(windowsHostname("My Dev Box!")).toBe("my-dev-box");
-        expect(windowsHostname("a-very-long-vm-name-exceeding-limit")).toBe("a-very-long-vm-");
+        expect(windowsHostname("a-very-long-vm-name-exceeding-limit")).toBe("a-very-long-vm");
         expect(windowsHostname("---")).toBe("cruiser-vm");
     });
 

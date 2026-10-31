@@ -1051,7 +1051,6 @@ fn fullscreen_monitor_indices(dpy: *mut std::ffi::c_void,
         if r.0 < lx { lx = r.0; fsm[2] = i; }
         if r.0 + r.2 > rx { rx = r.0 + r.2; fsm[3] = i; }
     }
-    eprintln!("[fsm] screens={screens:?} rects={rects:?} fsm={fsm:?}");
     Some(fsm)
 }
 

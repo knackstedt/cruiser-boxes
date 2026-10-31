@@ -111,9 +111,17 @@ export function splitQemuArgs(s: string): string[] {
     while ((m = re.exec(s))) out.push(m[1] ?? m[2] ?? m[3]!);
     return out;
 }
-/** Inverse of splitQemuArgs — quote only when an arg contains whitespace. */
+/** Inverse of splitQemuArgs — quote only when an arg needs it. Args with
+ *  a `"` wrap in single quotes (split restores them verbatim); a `'` needs
+ *  double quotes. Both quote types can't be represented (no escapes in the
+ *  split grammar) — fold `"` to `'` as the last resort. */
 export function joinQemuArgs(args: string[]): string {
-    return args.map((a) => (/[\s"']/.test(a) ? `"${a.replace(/"/g, "'")}"` : a)).join(" ");
+    return args.map((a) => {
+        if (!/[\s"']/.test(a)) return a;
+        if (a.includes("'")) return `"${a.replace(/"/g, "'")}"`;
+        if (a.includes('"')) return `'${a}'`;
+        return `"${a}"`;
+    }).join(" ");
 }
 
 /** Deterministic vsock guest CID per VM name (>= 1024 avoids reserved cids). */
@@ -404,10 +412,10 @@ export function buildArgs(
     }
 
     // serial console to file on every boot — the Logs screen tails it.
-    // autoinstall boots (kernel+initrd) keep their dedicated log path.
-    const serialLog = opts.mode === "install" && opts.install?.kernel && opts.install?.initrd
-        ? (opts.install.serialLog ?? paths.serialLog)
-        : paths.serialLog;
+    // install-mode boots keep their dedicated log path when one is given
+    // (autoinstall AND windows-iso — the unattend scripts echo their
+    // completion markers to COM1, which lands here).
+    const serialLog = (opts.mode === "install" && opts.install?.serialLog) || paths.serialLog;
     push("-serial", `file:${serialLog}`);
 
     // Second serial port (guest ttyS1) on a host unix socket — `vm serial`

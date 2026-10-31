@@ -188,4 +188,11 @@ describe("splitQemuArgs/joinQemuArgs", () => {
         const args = ["-rtc", "base=localtime", "-smbios", "type=1,serial=x y", "-boot", "menu=on"];
         expect(splitQemuArgs(joinQemuArgs(args))).toEqual(args);
     });
+
+    test("join round-trips args containing quote characters", () => {
+        const args = ["-smbios", `serial=it's "quoted" value`, `plain"inner`, "it's"];
+        const round = splitQemuArgs(joinQemuArgs(args));
+        // the arg holding BOTH quote kinds can't round-trip (no escapes)
+        expect(round.slice(1)).toEqual([`serial=it's 'quoted' value`, `plain"inner`, "it's"]);
+    });
 });

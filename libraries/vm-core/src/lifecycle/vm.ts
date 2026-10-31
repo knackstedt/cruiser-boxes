@@ -1048,6 +1048,14 @@ export async function spawnSwtpm(paths: VmPaths): Promise<void> {
     const bin = await which("swtpm");
     if (!bin) throw new Error("security.tpm is set but swtpm isn't installed — apt install swtpm");
     await mkdir(paths.tpmDir, { recursive: true });
+    // A previous daemon may still hold the tpmstate dir — QEMU exits don't
+    // always reap it promptly (and -t only fires on ctrl-conn drop). Kill
+    // by pidfile before rebinding the socket.
+    const pidFile = join(paths.run, "swtpm.pid");
+    if (existsSync(pidFile)) {
+        const pid = Number(readFileSync(pidFile, "utf8").trim().split("\n")[0]);
+        if (pid > 0) try { process.kill(pid); } catch { /* already gone */ }
+    }
     await rm(paths.tpmSock, { force: true });
     await run(bin, ["socket", "--tpm2", "--daemon",
         "--tpmstate", `dir=${paths.tpmDir},mode=0600`,

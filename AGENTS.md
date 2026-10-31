@@ -579,10 +579,13 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   cruiser-done.cmd's shutdown = the host's install-complete signal) and
   packs it + scripts + the yttrium payload into a Joliet seed ISO
   (`buildSeedIso`). `install.ts` runs an OWNED QEMU with
-  `install.sata` — the system disk AND all three CDs on native AHCI so
-  driverless WinPE sees everything (production virtio comes from the
-  virtio-win ISO installed during specialize); waits for the
-  FirstLogonCommands shutdown. `provision.ts` orchestrates: downloads →
+  `install.sata` — the three CDs on native AHCI so driverless WinPE sees
+  the media, while the system disk stays REAL virtio: the seed ISO's
+  WinPE DriverPaths supplies viostor, so the install runs on the same
+  storage path the production boot uses (no IDE→virtio 0x7B transition).
+  Completion = FirstLogonCommands' shutdown (QMP SHUTDOWN,guest=true) +
+  a marker on the serial log (COM1 echo — works for LUKS'd disks) or the
+  qcow2 MFT `strings` scan when unencrypted. `provision.ts` orchestrates: downloads →
   seed ISO → install run → normal boot → QGA wait → `setup.ts`
   PowerShell-over-`guestPs` (virtiofs→drive-letter mapping, vdagent
   clipboard service, wallpaper, RDP) → `provisioned.method=windows-iso`.

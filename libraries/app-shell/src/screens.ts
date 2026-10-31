@@ -907,7 +907,12 @@ function runtimeSection(vm: VmSummary, s: CruiserState): string {
     if (vm.state !== "running") return "";
     const attached = vm.usbAttached ?? [];
     const isAttached = (d: UsbChoice) =>
-        attached.some((a) => a.id === `usb-${d.vendorId}-${d.productId}-${d.bus ?? "?"}-${d.addr ?? "?"}`);
+        attached.some((a) => a.id === `usb-${d.vendorId}-${d.productId}-${d.bus ?? "?"}-${d.addr ?? "?"}`)
+        // sysfs bus/addr unreadable (0/absent) → the port-qualified id can
+        // never match; vid:pid is close enough to keep a passed-through
+        // device out of the attachable list.
+        || ((!d.bus || !d.addr) &&
+            attached.some((a) => a.id.startsWith(`usb-${d.vendorId}-${d.productId}-`)));
     const rows = [
         ...attached.map((a) => `<div class="row">
             <div style="flex:1">${esc(a.label)} <span class="meta">· passed through (${esc(a.id)})</span></div>

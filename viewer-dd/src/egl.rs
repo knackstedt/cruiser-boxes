@@ -49,10 +49,6 @@ extern "C" {
     fn glGenFramebuffers(n: i32, out: *mut u32);
     fn glBindFramebuffer(t: u32, fb: u32);
     fn glFramebufferTexture2D(t: u32, att: u32, tt: u32, tex: u32, lvl: i32);
-    fn glDeleteTextures(n: i32, t: *const u32);
-    fn glDeleteFramebuffers(n: i32, f: *const u32);
-    fn glDeleteProgram(p: u32);
-    fn glDeleteShader(s: u32);
 }
 
 #[link(name = "X11")]
@@ -390,11 +386,14 @@ pub fn x11_import(e: &mut XEgl, ci: usize, fd: RawFd, x: u32, y: u32, w: u32, h:
         IMG_TARGET.unwrap()(GL_TEXTURE_EXTERNAL_OES, img.as_ptr());
         head.w = w as i32;
         head.h = h as i32;
-        // scanout subrect as texture coords: y0_top scanouts sample the
-        // backing top-down (v_top=v(y)), !y0_top bottom-up (v_top=v(y+h)).
+        // scanout subrect as texture coords — sampled bottom-up (the flip)
+        // whether or not the scanout reports y0_top: a literal top-down
+        // mapping renders every head upside-down on the drivers tried
+        // (NVIDIA EGL; AGENTS.md). y0_top still sits in the dedupe key so a
+        // layout change forces a re-import.
         let (bf, hf) = (bw as f32, bh as f32);
         let v = |py: u32| py as f32 / hf;
-        let (vb, vt) = if y0_top { (v(y + h), v(y)) } else { (v(y + h), v(y)) };
+        let (vb, vt) = (v(y + h), v(y));
         head.uv = [x as f32 / bf, vb, (x + w) as f32 / bf, vt];
         head.key = key;
         head.kind_cpu = false;
@@ -551,7 +550,7 @@ fn probe_modifiers(e: &XEgl, fd: RawFd, bw: u32, bh: u32, poff: u32,
         }
         // sanity: draw a known checkerboard through the same FBO/readback —
         // if this shows stripes the probe machinery is broken, not the buf.
-        unsafe {
+        {
             let mut fbtex = 0u32; let mut fbo = 0u32; let mut ctex = 0u32;
             let mut chk = vec![0u8; 256 * 256 * 4];
             for i in 0..256 { for j in 0..256 {
@@ -806,9 +805,13 @@ pub fn x11_cpu_upload(e: &mut XEgl, ci: usize, pixels: Option<&[u8]>,
         glTexParameteri(GL_TEXTURE_2D_, 0x2803, 0x812F); // WRAP_T
         glTexImage2D(GL_TEXTURE_2D_, 0, internal, w as i32, h as i32, 0,
                      gl_fmt, gl_ty, packed.as_ptr() as *const c_void);
-        let sum: u64 = packed.iter().step_by(4096).map(|&b| b as u64).sum();
-        eprintln!("[cpu] upload ci={ci} {w}x{h} bytes={} checksum={sum} glerr={:#x}",
-                  packed.len(), glGetError());
+        static UPL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = UPL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if n % 240 == 1 {
+            let sum: u64 = packed.iter().step_by(4096).map(|&b| b as u64).sum();
+            eprintln!("[cpu] upload ci={ci} {w}x{h} bytes={} checksum={sum} glerr={:#x}",
+                      packed.len(), glGetError());
+        }
     }
     head.w = w as i32;
     head.h = h as i32;
@@ -816,6 +819,10 @@ pub fn x11_cpu_upload(e: &mut XEgl, ci: usize, pixels: Option<&[u8]>,
     head.uv = [0.0, 1.0, 1.0, 0.0];
     head.linear = false;
     head.kind_cpu = true;
+    // a dmabuf import after a cpu scanout MUST go through — dropping the
+    // key here keeps x11_import's same-GEM dedupe from skipping a scanout
+    // that returns with an identity we saw before the cpu upload.
+    head.key = None;
     head.cpu = Some(CpuHead { map, gl_fmt, gl_ty, swz, bpp, stride });
     Ok(())
 }

@@ -98,8 +98,9 @@ export async function resolveWindowsIsoUrl(release: string): Promise<string> {
     const skus = await fetchJson(
         `https://www.microsoft.com/software-download-connector/api/getskuinformationbyproductedition` +
         `?profile=${MS_PROFILE}&ProductEditionId=${editionId}&SKU=undefined&friendlyFileName=undefined&Locale=en-US&sessionID=${sid}`);
-    const sku = (skus.Skus as any[]).find((s) => s.Language === "English" || s.LocalizedLanguage === "English")
-        ?? skus.Skus?.[0];
+    const skuList: any[] = Array.isArray(skus?.Skus) ? skus.Skus : [];
+    const sku = skuList.find((s) => s.Language === "English" || s.LocalizedLanguage === "English")
+        ?? skuList[0];
     if (!sku) throw new Error("windows SKU list came back empty — Microsoft's API may have changed");
 
     // The referer is required; without it the API 4xxs. Sentinel rejects

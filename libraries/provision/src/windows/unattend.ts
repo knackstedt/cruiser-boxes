@@ -45,9 +45,12 @@ export interface UnattendOpts {
 const xesc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 
-/** NetBIOS-safe hostname: ≤15 chars, [a-z0-9-], no leading/trailing dash. */
+/** NetBIOS-safe hostname: ≤15 chars, [a-z0-9-], no leading/trailing dash.
+ *  Dashes are stripped again after the slice — truncating to 15 can leave
+ *  one dangling, and Windows rejects a name that ends in '-'. */
 export function windowsHostname(name: string): string {
-    const h = name.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 15);
+    const h = name.toLowerCase().replace(/[^a-z0-9-]/g, "-")
+        .replace(/^-+|-+$/g, "").slice(0, 15).replace(/-+$/g, "");
     return h || "cruiser-vm";
 }
 
@@ -110,7 +113,7 @@ export function windowsTimezone(iana?: string): string | undefined {
 
 /** "en_US.UTF-8" → "en-US" (BCP47 for the unattend locale fields). */
 export function windowsLocale(iana?: string): string | undefined {
-    return iana?.split(".")[0]?.replace("_", "-") || undefined;
+    return iana?.split(".")[0]?.replace(/_/g, "-") || undefined;
 }
 
 /**
@@ -202,7 +205,7 @@ export function autounattendXml(o: UnattendOpts): string {
            "reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\AppReadiness\" /v DisableAppReadiness /t REG_DWORD /d 1 /f",
            // Fallback for the same stall: task-scheduler at-logon firing is
            // independent of the FLC queue — the shim self-guards against
-           // double-runs (C:\\cruiser-installed marker).
+           // double-runs (C:\\cruiser-installed marker + mkdir lock).
            `schtasks /create /tn cruiser-setup /sc onlogon /ru SYSTEM /rl HIGHEST /f /tr "cmd /c for %i in (d e f g h i j k l m n o p q r s t u v w) do if exist %i:\\cruiser-setup.cmd call %i:\\cruiser-setup.cmd"`,
            // And the bits the whole install is dead without — qemu-ga +
            // testsigning + the yttrium driver — land HERE in specialize,
@@ -270,8 +273,11 @@ function cruiserSetupCmd(): string {
     // Win10's FirstLogonCommands can stall ~an hour behind AppReadiness
     // provisioning (and may never fire on some eval images) — specialize
     // also registers a scheduled task that invokes this same shim at the
-    // first logon, so the marker makes the setup run once under either.
-    return `@echo off\r\nrem first-logon entry — finds the seed ISO (this file's own drive)\r\nif exist C:\\cruiser-installed exit /b 0\r\necho started > C:\\cruiser-setup.started\r\necho [cruiser] first-logon cmd shim fired %date% %time% >> C:\\cruiser-setup.log\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0cruiser-setup.ps1" "%~d0" >> C:\\cruiser-setup.log 2>&1\r\nfor %%i in (d e f g h i j k l m n o p q r s t u v w) do if exist %%i:\\cruiser-done.cmd call %%i:\\cruiser-done.cmd\r\n`;
+    // first logon. Both can fire together: mkdir is atomic, so the loser
+    // waits up to 30min for the winner's marker rather than double-
+    // installing (msiexec would serialize anyway; the driver churn is the
+    // waste). A lock surviving that wait is a crashed run's — steal once.
+    return `@echo off\r\nrem first-logon entry — finds the seed ISO (this file's own drive)\r\nif exist C:\\cruiser-installed exit /b 0\r\nmkdir C:\\cruiser-setup.lock 2>nul\r\nif not errorlevel 1 goto :run\r\nfor /l %%n in (1,1,180) do (\r\n    if exist C:\\cruiser-installed exit /b 0\r\n    ping -n 11 127.0.0.1 >nul\r\n)\r\nrem 30min with a held lock and no marker — steal it once\r\nrmdir /q C:\\cruiser-setup.lock\r\nmkdir C:\\cruiser-setup.lock 2>nul\r\nif errorlevel 1 exit /b 0\r\n:run\r\necho started > C:\\cruiser-setup.started\r\necho [cruiser] first-logon cmd shim fired %date% %time% >> C:\\cruiser-setup.log\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0cruiser-setup.ps1" "%~d0" >> C:\\cruiser-setup.log 2>&1\r\nrmdir /q C:\\cruiser-setup.lock 2>nul\r\nfor %%i in (d e f g h i j k l m n o p q r s t u v w) do if exist %%i:\\cruiser-done.cmd call %%i:\\cruiser-done.cmd\r\n`;
 }
 
 /**
@@ -426,11 +432,11 @@ function cruiserPreinstallCmd(o: UnattendOpts): string {
         ? "bcdedit /set {current} testsigning on & bcdedit /set {current} nointegritychecks on & bcdedit /set {default} testsigning on & bcdedit /set {default} nointegritychecks on\r\n"
         : ""}${o.yttriumDir
         ? `for /r "%~dp0yttrium" %%j in (*.cer) do (certutil -addstore -f TrustedPublisher "%%j" & certutil -addstore -f Root "%%j")\r\nif exist "%~dp0yttrium\\Install_Debug\\${winDirName}\\amd64\\viogpu3d.inf" pnputil /add-driver "%~dp0yttrium\\Install_Debug\\${winDirName}\\amd64\\viogpu3d.inf" /install\r\n`
-        : ""}echo specialize installs done > C:\\cruiser-preinstall-done\r\n`;
+        : ""}echo specialize installs done > C:\\cruiser-preinstall-done\r\nrem COM1 lands in the host's install-serial.log — the completion marker's\r\nrem only channel when the disk is LUKS (host can't strings-scan ciphertext)\r\necho cruiser-preinstall-done > COM1 2>nul\r\n`;
 }
 
 function cruiserDoneCmd(): string {
-    return `@echo off\r\necho [cruiser] install complete — shutting down for the first real boot\r\nschtasks /delete /tn cruiser-setup /f >nul 2>&1\r\necho done > C:\\cruiser-installed\r\nshutdown /s /t 5 /c "cruiser install complete"\r\n`;
+    return `@echo off\r\necho [cruiser] install complete — shutting down for the first real boot\r\nschtasks /delete /tn cruiser-setup /f >nul 2>&1\r\necho done > C:\\cruiser-installed\r\nrem serial sentinel — host-side completion check for LUKS'd disks\r\necho cruiser-installed > COM1 2>nul\r\nshutdown /s /t 5 /c "cruiser install complete"\r\n`;
 }
 
 /** Write autounattend + scripts (+ optional yttrium payload) → Joliet ISO. */
@@ -470,7 +476,12 @@ export async function buildUnattendIso(workDir: string, o: UnattendOpts & { yttr
     // extract the boot-critical virtio drivers off the virtio-win ISO into
     // /drivers so the answer file's DriverPaths can load viostor in WinPE.
     // isoinfo reads ISO9660 without a mount; each dir flattens to inf+sys+cat.
-    if (o.driverIso && await which("isoinfo")) {
+    // Missing either input → the seed ISO has no /drivers → WinPE sees NO
+    // installable disk (the disk is deliberately virtio). Fail loudly here
+    // instead of letting the installer stall at disk selection.
+    if (!o.driverIso) throw new Error("buildUnattendIso needs driverIso — the virtio driver disc WinPE's DriverPaths is staged from");
+    if (!(await which("isoinfo"))) throw new Error("need isoinfo to stage virtio drivers off the driver disc (apt install genisoimage)");
+    {
         const winVer = o.winDir ?? "w11";
         const list = await run("isoinfo", ["-f", "-i", o.driverIso]).then((r) => r.stdout).catch(() => "");
         const wanted = new Set(WINPE_DRIVER_DIRS.map((d) => d.toLowerCase()));

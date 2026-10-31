@@ -1,11 +1,12 @@
 // ============================================================================
 // windows/install.ts — owned install run: Windows ISO + unattend seed +
-// virtio-win driver disc on native AHCI (WinPE has no virtio drivers),
+// virtio-win driver disc, all CDs on native AHCI (WinPE has no virtio
+// drivers — the disk itself stays virtio via the seed's DriverPaths),
 // powers off via the unattend FirstLogonCommands hook → QEMU exits.
 // ============================================================================
 
 import { existsSync, statSync } from "node:fs";
-import { copyFile, mkdir } from "node:fs/promises";
+import { copyFile, mkdir, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import { vmPaths, diskPath, homeDiskPath } from "../../../vm-core/src/paths";
@@ -53,6 +54,7 @@ export async function runWindowsInstall(spec: VmSpec, o: WindowsInstallOpts): Pr
     if (!existsSync(paths.ovmfVars))
         await copyFile(ovmfVarsTemplate(spec.security.secureBoot), paths.ovmfVars);
 
+    const serialLog = join(paths.run, "install-serial.log");
     const built = buildArgs(spec, paths, {
         mode: "install",
         daemonize: false,
@@ -60,18 +62,19 @@ export async function runWindowsInstall(spec: VmSpec, o: WindowsInstallOpts): Pr
             iso: o.winIso,
             seedIso: o.unattendIso,
             extraCds: [o.driverIso],
-            // WinPE ships no virtio storage drivers — disk + all three CDs
-            // go on the q35's native AHCI so the installer sees everything
-            // out of the box. Production boots still get virtio-blk (the
-            // specialize pass installs viostor via virtio-win-guest-tools).
+            // WinPE ships no virtio storage drivers — all three CDs go on
+            // the q35's native AHCI so the installer sees them out of the
+            // box. The DISK stays virtio (install.sata scopes to cdroms):
+            // the seed ISO's DriverPaths gives WinPE viostor, and booting
+            // the production device path avoids a 0x7B on first real boot.
             sata: true,
-            serialLog: join(paths.run, "install-serial.log"),
+            serialLog,
         },
     }, { ldLibraryPath: tc.ldLibraryPath });
 
-    // QEMU's tpm-emulator chardev connects at machine init — the daemon
-    // must be listening first (same constraint as the lifecycle's start()).
-    if (spec.security.tpm) await spawnSwtpm(paths);
+    // A stale sentinel from a previous provision attempt must not read as
+    // this run's completion marker.
+    await rm(serialLog, { force: true });
 
     /** One install-QEMU boot. Resolves true only on a guest-initiated
      *  poweroff; rejects on host kill/crash/timeout (caller aborts). */
@@ -80,48 +83,57 @@ export async function runWindowsInstall(spec: VmSpec, o: WindowsInstallOpts): Pr
             env: { ...process.env, ...built.env },
             stdio: ["ignore", "ignore", "inherit"],
         });
-        // Windows install media parks on "Press any key to boot from CD or
-        // DVD" — nobody pressing means OVMF's watchdog kills the boot image
-        // (~10s) and it falls through to PXE. Tap a key every 2s for the
-        // first ~90s so the prompt is hit whenever OVMF gets there. The key
-        // is a LEFT ARROW, not Enter: it still satisfies "any key" but can
-        // never activate a focused button — an Enter leaking into the setup
-        // GUI (e.g. landing on Cancel → quit-confirm → Yes) would abort the
-        // whole install.
-        void (async () => {
-            try {
-                for (let i = 0; i < 45 && child.exitCode === null; i++) {
-                    await new Promise((r) => setTimeout(r, 2_000));
-                    if (child.exitCode !== null) break;
-                    const q = await QmpClient.connect(paths.monitorSock, 2_000).catch(() => null);
-                    if (!q) continue;
-                    await q.execute("send-key", { keys: [{ type: "qcode", data: "left" }] })
-                        .catch(() => {});
-                    q.close();
-                }
-            } catch { /* never sink the install on a key-tap failure */ }
-        })();
-
         // Completion = the guest's own poweroff (cruiser-done.cmd's shutdown):
         // QEMU's SHUTDOWN event carries guest=true only for guest-initiated
         // stops — a host `quit`/kill reports guest=false, so a crashed or
         // force-killed installer can no longer read as "install complete".
         let guestShutdown: boolean | undefined;
+        // Held for the boot's lifetime so the event listener keeps firing —
+        // the socket owns its callbacks once dropped from scope, but an
+        // explicit reference is clearer than relying on that.
+        let monitor: QmpClient | null = null;
         void (async () => {
-            for (let i = 0; i < 30 && child.exitCode === null; i++) {
-                const q = await QmpClient.connect(paths.monitorSock, 2_000).catch(() => null);
-                if (!q) { await new Promise((r) => setTimeout(r, 2_000)); continue; }
-                q.on("event", (e: { event: string; data?: { guest?: boolean } }) => {
-                    if (e.event === "SHUTDOWN") guestShutdown = e.data?.guest === true;
-                });
-                q.on("close", () => {});
-                return;
+            // QEMU's unix QMP accepts extra socket connections but services
+            // only ONE client at a time — a second connect gets no greeting
+            // until the first drops (verified against QEMU 8.2: a held conn
+            // starves every later client). The SHUTDOWN watch holds its conn
+            // for the whole boot, so the "press any key" taps MUST ride the
+            // same connection — separate tap conns would queue forever and
+            // the OVMF CD-boot prompt would lapse to PXE.
+            //
+            // The prompt: install media parks on "Press any key to boot
+            // from CD or DVD" — nobody pressing means OVMF's watchdog kills
+            // the boot image (~10s) and it falls through to PXE. Tap a key
+            // every 2s for the first ~90s so the prompt is hit whenever
+            // OVMF gets there. The key is a LEFT ARROW, not Enter: it still
+            // satisfies "any key" but can never activate a focused button —
+            // an Enter leaking into the setup GUI (e.g. landing on Cancel →
+            // quit-confirm → Yes) would abort the whole install.
+            let q: QmpClient | null = null;
+            for (let i = 0; i < 60 && !q && child.exitCode === null; i++) {
+                q = await QmpClient.connect(paths.monitorSock, 2_000).catch(() => null);
+                if (!q) await new Promise((r) => setTimeout(r, 1_000));
             }
+            if (!q) return;
+            monitor = q;   // keep the conn referenced for the boot's lifetime
+            q.on("event", (e: { event: string; data?: { guest?: boolean } }) => {
+                if (e.event === "SHUTDOWN") guestShutdown = e.data?.guest === true;
+            });
+            try {
+                for (let i = 0; i < 45 && child.exitCode === null; i++) {
+                    await new Promise((r) => setTimeout(r, 2_000));
+                    if (child.exitCode !== null) break;
+                    await q.execute("send-key", { keys: [{ type: "qcode", data: "left" }] })
+                        .catch(() => {});
+                }
+            } catch { /* never sink the install on a key-tap failure */ }
         })();
         const timer = setTimeout(() => { child.kill("SIGKILL"); rej(new Error("windows install timed out")); },
             o.timeoutMs ?? 120 * 60_000);
         child.on("exit", (c) => {
             clearTimeout(timer);
+            monitor?.close();
+            monitor = null;
             if (guestShutdown === true) res();
             else if (c === 0 || c === null) {
                 // clean exit but unverified — monitor conn never landed, or
@@ -138,13 +150,18 @@ export async function runWindowsInstall(spec: VmSpec, o: WindowsInstallOpts): Pr
     // Windows setup survives power cycles — but every stage boundary CAN
     // be a cold poweroff rather than a warm reboot, and all guest exits
     // look identical on the QEMU side. Relaunch the installer until the
-    // disk carries the ps1's completion marker; setup resumes where it
-    // stopped each boot.
+    // completion marker is observed; setup resumes where it stopped.
+    const luks = spec.disk.encrypt === "full";
     for (let boot = 0; boot < 8; boot++) {
+        // QEMU's tpm-emulator chardev connects at machine init — the daemon
+        // must be listening first. swtpm -t exits when the connection
+        // drops (i.e. at every guest poweroff), so it has to be respawned
+        // for EVERY boot, not just the first.
+        if (spec.security.tpm) await spawnSwtpm(paths);
         await bootOnce();
-        if (await guestInstallMarkedDone(disk)) break;
+        if (await guestInstallMarkedDone(disk, serialLog, luks)) break;
         if (boot === 7) throw new Error(
-            "windows install power-cycled 8 times without writing the completion marker — the unattend setup script never ran");
+            "windows install power-cycled 8 times without a completion marker — the unattend setup script never ran");
     }
 
     // sanity — the answer file marks the image before its shutdown
@@ -155,11 +172,20 @@ export async function runWindowsInstall(spec: VmSpec, o: WindowsInstallOpts): Pr
 
 /** Two markers signal a viable image: done.cmd writes C:\cruiser-installed
  *  before its shutdown, and the specialize preinstall writes
- *  C:\cruiser-preinstall-done — either one surviving a clean poweroff means
- *  the critical installs landed. After flush both MFT filenames (UTF-16LE)
- *  sit in the qcow2's uncompressed clusters — `strings -e l` finds them
- *  without a guest agent or an NTFS reader. */
-async function guestInstallMarkedDone(disk: string): Promise<boolean> {
+ *  C:\cruiser-preinstall-done. Two host-readable channels carry them:
+ *   - COM1: both scripts echo the marker text to the serial port, which
+ *     lands in the install serial log — the only channel that works for a
+ *     LUKS'd disk (qcow2 payload is ciphertext to us).
+ *   - MFT filenames: after flush both names (UTF-16LE) sit in the qcow2's
+ *     uncompressed clusters — `strings -e l` finds them without a guest
+ *     agent or an NTFS reader. Unencrypted disks only. */
+async function guestInstallMarkedDone(disk: string, serialLog: string, luks: boolean): Promise<boolean> {
+    if (existsSync(serialLog)) {
+        const s = await run("grep", ["-qE", "cruiser-installed|cruiser-preinstall-done", serialLog],
+            { noThrow: true });
+        if (s.code === 0) return true;
+    }
+    if (luks) return false;
     const r = await run("sh", ["-c", `strings -e l "$1" | grep -m1 -q "^cruiser-installed$\\|^cruiser-preinstall-done$"`, "--", disk],
         { noThrow: true });
     return r.code === 0;
