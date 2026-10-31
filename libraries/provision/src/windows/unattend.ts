@@ -193,7 +193,7 @@ export function autounattendXml(o: UnattendOpts): string {
       <RegisteredOrganization>cruiser</RegisteredOrganization>`)}
     ${comp("Microsoft-Windows-Deployment", `
       <RunSynchronous>
-        ${["bcdedit /ems {current} on", "bcdedit /emssettings EMSPORT:1",
+        ${["bcdedit /ems {current} on", "bcdedit /emssettings EMSPORT:2 EMSBAUDRATE:115200",
            // {current} in specialize resolves to the setup boot object, not
            // the installed OS entry — stamp EMS on {default} too.
            "bcdedit /ems {default} on",
@@ -202,12 +202,17 @@ export function autounattendXml(o: UnattendOpts): string {
            "reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\AppReadiness\" /v DisableAppReadiness /t REG_DWORD /d 1 /f",
            // Fallback for the same stall: task-scheduler at-logon firing is
            // independent of the FLC queue — the shim self-guards against
-           // double-runs (C:\\cruiser-setup.started marker).
-           `schtasks /create /tn cruiser-setup /sc onlogon /ru SYSTEM /rl HIGHEST /f /tr "cmd /c for %i in (d e f g h i j k l m n o p q r s t u v w) do if exist %i:\\cruiser-setup.cmd call %i:\\cruiser-setup.cmd"`]
+           // double-runs (C:\\cruiser-installed marker).
+           `schtasks /create /tn cruiser-setup /sc onlogon /ru SYSTEM /rl HIGHEST /f /tr "cmd /c for %i in (d e f g h i j k l m n o p q r s t u v w) do if exist %i:\\cruiser-setup.cmd call %i:\\cruiser-setup.cmd"`,
+           // And the bits the whole install is dead without — qemu-ga +
+           // testsigning + the yttrium driver — land HERE in specialize,
+           // session-0, before OOBE can stall them. The FLC ps1 stays for
+           // desktop-side extras (RDP, power, hostname, vdagent).
+           `cmd /c "for %i in (d e f g h i j k l m n o p q r s t u v w) do if exist %i:\\cruiser-preinstall.cmd call %i:\\cruiser-preinstall.cmd"`]
             .map((c, i) => `<RunSynchronousCommand wcm:action="add">
           <Order>${i + 1}</Order>
           <Path>${c}</Path>
-          ${i === 0 ? "<Description>cruiser: EMS on COM1 for serial observability</Description>" : ""}
+          ${i === 0 ? "<Description>cruiser: EMS on COM2 + serial observability</Description>" : ""}
         </RunSynchronousCommand>`).join("\n        ")}
       </RunSynchronous>`)}
   </settings>
@@ -266,7 +271,7 @@ function cruiserSetupCmd(): string {
     // provisioning (and may never fire on some eval images) — specialize
     // also registers a scheduled task that invokes this same shim at the
     // first logon, so the marker makes the setup run once under either.
-    return `@echo off\r\nrem first-logon entry — finds the seed ISO (this file's own drive)\r\nif exist C:\\cruiser-setup.started exit /b 0\r\necho started > C:\\cruiser-setup.started\r\necho [cruiser] first-logon cmd shim fired %date% %time% >> C:\\cruiser-setup.log\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0cruiser-setup.ps1" "%~d0" >> C:\\cruiser-setup.log 2>&1\r\nfor %i in (d e f g h i j k l m n o p q r s t u v w) do if exist %i:\\cruiser-done.cmd call %i:\\cruiser-done.cmd\r\n`;
+    return `@echo off\r\nrem first-logon entry — finds the seed ISO (this file's own drive)\r\nif exist C:\\cruiser-installed exit /b 0\r\necho started > C:\\cruiser-setup.started\r\necho [cruiser] first-logon cmd shim fired %date% %time% >> C:\\cruiser-setup.log\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0cruiser-setup.ps1" "%~d0" >> C:\\cruiser-setup.log 2>&1\r\nfor %%i in (d e f g h i j k l m n o p q r s t u v w) do if exist %%i:\\cruiser-done.cmd call %%i:\\cruiser-done.cmd\r\n`;
 }
 
 /**
@@ -409,8 +414,23 @@ Write-Output "[cruiser] first-logon setup done"
  * host: the owned install QEMU exits, and the lifecycle then boots the VM
  * normally (drivers + testsigning take effect on that boot).
  */
+/** Specialize RunSynchronous payload — session-0, pre-OOBE, pre-first-logon.
+ *  Lands the pieces the install cannot complete without (guest agent,
+ *  testsigning, the yttrium driver), because Win10's first-logon path can
+ *  stall an hour+ or never fire. The FLC ps1 redoes them harmlessly and
+ *  keeps the desktop-side extras. Marker file tells the host-side install
+ *  loop the image is viable even if first logon never happens. */
+function cruiserPreinstallCmd(o: UnattendOpts): string {
+    const winDirName = o.winDir === "w10" ? "Win10" : "Win11";
+    return `@echo off\r\nrem specialize payload — drive letter comes from %~dp0 (this script's own drive)\r\nfor %%i in (d e f g h i j k l m n o p q r s t u v w) do if exist %%i:\\guest-agent\\qemu-ga-x86_64.msi msiexec /i %%i:\\guest-agent\\qemu-ga-x86_64.msi /qn /norestart\r\n${o.testsigning
+        ? "bcdedit /set {current} testsigning on & bcdedit /set {current} nointegritychecks on & bcdedit /set {default} testsigning on & bcdedit /set {default} nointegritychecks on\r\n"
+        : ""}${o.yttriumDir
+        ? `for /r "%~dp0yttrium" %%j in (*.cer) do (certutil -addstore -f TrustedPublisher "%%j" & certutil -addstore -f Root "%%j")\r\nif exist "%~dp0yttrium\\Install_Debug\\${winDirName}\\amd64\\viogpu3d.inf" pnputil /add-driver "%~dp0yttrium\\Install_Debug\\${winDirName}\\amd64\\viogpu3d.inf" /install\r\n`
+        : ""}echo specialize installs done > C:\\cruiser-preinstall-done\r\n`;
+}
+
 function cruiserDoneCmd(): string {
-    return `@echo off\r\necho [cruiser] install complete — shutting down for the first real boot\r\nschtasks /delete /tn cruiser-setup /f >nul 2>&1\r\nshutdown /s /t 5 /c "cruiser install complete"\r\n`;
+    return `@echo off\r\necho [cruiser] install complete — shutting down for the first real boot\r\nschtasks /delete /tn cruiser-setup /f >nul 2>&1\r\necho done > C:\\cruiser-installed\r\nshutdown /s /t 5 /c "cruiser install complete"\r\n`;
 }
 
 /** Write autounattend + scripts (+ optional yttrium payload) → Joliet ISO. */
@@ -430,6 +450,7 @@ export async function buildUnattendIso(workDir: string, o: UnattendOpts & { yttr
     await mkdir(workDir, { recursive: true });
     await writeFile(join(workDir, "autounattend.xml"), autounattendXml(o));
     await writeFile(join(workDir, "cruiser-setup.cmd"), cruiserSetupCmd());
+    await writeFile(join(workDir, "cruiser-preinstall.cmd"), cruiserPreinstallCmd(o));
     await writeFile(join(workDir, "cruiser-setup.ps1"),
         cruiserSetupPs1({ ...o, yttriumDir: o.yttriumZip ? "yttrium" : undefined }));
     await writeFile(join(workDir, "cruiser-done.cmd"), cruiserDoneCmd());
@@ -443,7 +464,7 @@ export async function buildUnattendIso(workDir: string, o: UnattendOpts & { yttr
     const iso = join(workDir, "unattend.iso");
     // graft-points: explicit ISO-root names (and keeps unattend.iso itself
     // out on rebuilds — passing workDir raw would self-include it).
-    const files = ["autounattend.xml", "cruiser-setup.cmd", "cruiser-setup.ps1", "cruiser-done.cmd"];
+    const files = ["autounattend.xml", "cruiser-setup.cmd", "cruiser-setup.ps1", "cruiser-done.cmd", "cruiser-preinstall.cmd"];
     const grafts = files.map((f) => `${f}=${join(workDir, f)}`);
     if (o.yttriumZip) grafts.push(`yttrium=${join(workDir, "yttrium")}`);
     // extract the boot-critical virtio drivers off the virtio-win ISO into

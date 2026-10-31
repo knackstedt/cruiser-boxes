@@ -432,6 +432,16 @@ const VmSpecObject = z.object({
     }).prefault({}),
 
     /**
+     * Escape hatch: raw QEMU argv appended verbatim at launch — features
+     * cruiser doesn't model land here ("-rtc base=localtime",
+     * "-boot menu=on"). Boot-frozen; unvalidated — bad args fail the
+     * launch with a qemu error in the runner log.
+     */
+    qemu: z.object({
+        extraArgs: z.array(z.string()).default([]),
+    }).prefault({}),
+
+    /**
      * daemonize = QEMU survives app exit; owned = QEMU stops with the app;
      * ephemeral = owned + the VM dir (incl. disk) is deleted when the app exits.
      */

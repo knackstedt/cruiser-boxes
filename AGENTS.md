@@ -247,7 +247,13 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   Workspace::xineramaIndexToOutput during manage() (4x SIGSEGV restart
   loop observed, kwin recovered only after the window died). The
   session's setFullscreen (wmctrl path) evaluates the dormant hint —
-  same timing as freerdp /multimon.
+  same timing as freerdp /multimon. Two later KWin gotchas: (a) KWin
+  DELETES _NET_WM_FULLSCREEN_MONITORS when it consumes a fullscreen
+  transition, so the viewer re-arms it from PropertyNotify(type 28) —
+  without that the first toggle lost the span and shrank to one monitor;
+  (b) KWin clips an over-screen window to one output during manage(), so
+  the union XMoveResizeWindow is re-asserted ~1.5s after map (the pre-map
+  placement doesn't stick).
   head_rects() only uses the span layout while the drawable is union-sized
   (±2px) — a WM that collapsed the span gets the composite-letterbox
   fallback instead of a crop; windowed mode letterboxes the whole
@@ -583,6 +589,34 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   Schema: `os.winDriver=yttrium|virtio2d` (yttrium needs
   `gpu.mode=venus` + Secure Boot OFF — test-signed driver; virtio2d is
   the stock signed fallback), `os.winEdition` selects the /IMAGE/NAME.
+  Multi-monitor = ONE virtio-gpu DEVICE per monitor (args.ts `winMulti`) —
+  viogpudo/viogpu3d are single-head drivers so max_outputs>1 leaves the
+  extra consoles dark. QEMU allows only one virtio-gpu-GL device, so
+  secondary monitors get plain virtio-gpu-pci (CPU Scanout path; viewer-dd
+  draws both). Each device head exports as its own D-Bus console in PCI
+  creation order, matching outs[].
+  Pointer agent (windows): virtio tablets enumerate as absolute HID MICE
+  and Windows pins them to the primary display — wisp's Digimon registry
+  association is digitizer-only (verified no-op) — so multi-monitor input
+  rides an in-guest agent: agent.ps1 dials the slirp guestfwd
+  (`-netdev user,guestfwd=tcp:10.0.2.250:28090-unix:run/agent.sock`,
+  args.ts; viewer-dd `--inject unix:` listens there, CRUISER_VD_INJECT
+  overrides with a host:port connect-out for dev bridges) and injects
+  SendInput with MOUSEEVENTF_ABSOLUTE|VIRTUALDESK — spans the guest's
+  REAL display layout for any arrangement ("m <console> <x> <y>" lines,
+  DISPLAY<ci+1> → console ci; "b <btn> <down>", wheel on 3/4; "info"
+  logs the real layout). Dead/absent agent → viewer falls back to the
+  D-Bus tablet path (primary-confined but alive). Installed by setup.ts:
+  ProgramData\cruiser\agent.ps1 + INTERACTIVE-group logon task AND
+  HKLM\Run (Task Scheduler denies registration 0x80070005 even
+  user-context on hardened images; the agent's Local\ mutex makes the
+  double launch benign). Two shell caveats seen on win10 eval images:
+  powershell.exe via ShellExecute (Run dialog/Win+X) can fail "cannot
+  access the specified device, path, or file" while cmd→powershell
+  (CreateProcess) works fine — diagnose through a cmd /k window, not
+  the Run dialog; and `vm screenshot`/screendump never shows UAC or the
+  cursor (software cursor, no cursor plane — verify clicks by side
+  effects like menus, not pointer position).
   The unattend password lives only in the transient seed ISO — never
   the spec. QGA-on-windows is SYSTEM session 0: `guestPs` exec works but
   `vm screenshot --guest` can't see the interactive desktop (schema/

@@ -153,12 +153,14 @@ export async function runWindowsInstall(spec: VmSpec, o: WindowsInstallOpts): Pr
     spec.provisioned = { method: "windows-iso", source: o.winIso };
 }
 
-/** The ps1's last step drops C:\cruiser-installed; after a clean guest
- *  poweroff NTFS is flushed and the MFT filename (UTF-16LE) is readable
- *  straight out of the qcow2's uncompressed clusters — `strings -e l`
- *  finds it without a guest agent or an NTFS reader. */
+/** Two markers signal a viable image: done.cmd writes C:\cruiser-installed
+ *  before its shutdown, and the specialize preinstall writes
+ *  C:\cruiser-preinstall-done — either one surviving a clean poweroff means
+ *  the critical installs landed. After flush both MFT filenames (UTF-16LE)
+ *  sit in the qcow2's uncompressed clusters — `strings -e l` finds them
+ *  without a guest agent or an NTFS reader. */
 async function guestInstallMarkedDone(disk: string): Promise<boolean> {
-    const r = await run("sh", ["-c", `strings -e l "$1" | grep -m1 -q "^cruiser-installed$"`, "--", disk],
+    const r = await run("sh", ["-c", `strings -e l "$1" | grep -m1 -q "^cruiser-installed$\\|^cruiser-preinstall-done$"`, "--", disk],
         { noThrow: true });
     return r.code === 0;
 }

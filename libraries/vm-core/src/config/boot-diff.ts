@@ -29,6 +29,7 @@ import type { VmSpec } from "./schema";
 function bootSlice(s: VmSpec) {
     return {
         resources: s.resources,
+        qemu: s.qemu,
         disk: { file: s.disk.file, format: s.disk.format,
             encrypt: s.disk.encrypt, keyStorage: s.disk.keyStorage, homeGiB: s.disk.homeGiB },
         gpu: s.gpu,

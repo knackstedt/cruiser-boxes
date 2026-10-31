@@ -15,18 +15,18 @@
 // invoke this CLI.
 // ============================================================================
 
-import { z } from "zod";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { VmRegistry, VmSpec, VmHandle, HeadMode, DevTool, defaultSpec, linkVmDir, type ShareSpec } from "../libraries/vm-core/src/index";
-import { makeShare } from "../libraries/vm-core/src/config/shares";
+import { dirname, join } from "node:path";
+import { z } from "zod";
 import type { ViewerSession } from "../libraries/host-int/src/session";
-import { listUsbDevices } from "../libraries/vm-core/src/usb/usb";
+import { run, virtiofsdPath, which } from "../libraries/sys/src/exec";
+import { makeShare } from "../libraries/vm-core/src/config/shares";
 import { createDisk } from "../libraries/vm-core/src/disk/ops";
+import { DevTool, HeadMode, VmHandle, VmRegistry, VmSpec, defaultSpec, linkVmDir, type ShareSpec } from "../libraries/vm-core/src/index";
 import { resolveToolchain } from "../libraries/vm-core/src/qemu/resolve";
-import { run, which, virtiofsdPath } from "../libraries/sys/src/exec";
+import { listUsbDevices } from "../libraries/vm-core/src/usb/usb";
 
 const argv = process.argv.slice(2);
 
@@ -53,6 +53,8 @@ usage: cruiser <area> <command> [args]
                    [--provision-script <host-path>]  run at end of guest-setup (root, idempotent)
                    [--cpu-quota 50%] [--mem-max 8G] [--io-weight 500]  cgroup caps (user scope)
                    [--tpm] [--secure-boot]          swtpm 2.0 + edk2 secboot firmware
+                   [--qemu-args "…"]                  raw QEMU argv appended verbatim — escape
+                                                      hatch for flags cruiser doesn't model
                    [--nested]                          expose vmx/svm to the guest (VMs in the VM —
                                                         needs the host kvm module's nested=1, see doctor)
                    [--sw-vk]                           venus: also expose host lavapipe (CPU Vulkan)
@@ -85,6 +87,8 @@ usage: cruiser <area> <command> [args]
   vm start <name...> [--all] [--mode <headmode>] [--no-view]   (1 name → auto-opens the viewer like the UI)
   vm stop <name...> [--all]             vm kill <name>
   vm reboot <name>                      vm suspend|resume <name>   (QGA reboot / QMP pause+cont)
+  vm send-key <name> <qcode…>           inject a key combo via QMP — 'vm cad <name>' is
+                                        ctrl+alt+del shorthand (hung guests, login screens)
   vm hibernate <name>                   save RAM+disk state and power off — 'vm start'
                                        resumes it (≈ guest-RAM-sized vmstate file)
   vm status <name>                      vm args <name>   (print QEMU argv)
@@ -342,6 +346,11 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const ioW = num("--io-weight"); if (ioW) spec.resources.limits.ioWeight = ioW;
             if (has("--tpm")) spec.security.tpm = true;
             if (has("--secure-boot")) spec.security.secureBoot = true;
+            const qargs = flagVal("--qemu-args");
+            if (qargs) {
+                const { splitQemuArgs } = await import("../libraries/vm-core/src/qemu/args");
+                spec.qemu.extraArgs = splitQemuArgs(qargs);
+            }
             if (has("--sw-vk")) spec.gpu.softwareVk = true;
             if (has("--snap")) spec.os.snap = true;
             if (has("--xfonts")) spec.os.extraFonts = true;
@@ -551,6 +560,15 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             break;
         }
         case "resume": { const h = await needVm(args[0]); await h.resume(); console.log("resumed"); break; }
+        case "send-key": case "cad": {
+            const h = await needVm(args[0]);
+            if (!h.isRunning()) { console.error(`'${h.spec.name}' is not running`); process.exit(1); }
+            const keys = cmd === "cad" ? ["ctrl", "alt", "delete"] : args.slice(1);
+            if (!keys.length) { console.error("expected qcode names — e.g. vm send-key <vm> ctrl alt delete"); process.exit(2); }
+            await h.sendKeys(keys);
+            console.log(`sent ${keys.join("+")}`);
+            break;
+        }
         case "status": { const h = await needVm(args[0]); console.log(await h.probe()); break; }
         case "stats": {
             const h = await needVm(args[0]);

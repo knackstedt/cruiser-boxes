@@ -4,11 +4,11 @@
 // ============================================================================
 
 import { existsSync } from "node:fs";
-import { VMS_DIR } from "../../vm-core/src/paths";
 import { DISTROS, supportsKrdp } from "../../provision/src/distros";
 import { DEVTOOLS } from "../../provision/src/packages";
-import { fontFaceCss } from "./fonts";
+import { VMS_DIR } from "../../vm-core/src/paths";
 import { ansiToHtml } from "./ansi";
+import { fontFaceCss } from "./fonts";
 import type { CruiserState, UsbChoice, VmSummary } from "./store";
 
 const CSS = `
@@ -338,9 +338,13 @@ function vmBtns(vm: VmSummary, s: CruiserState, detail = false): string {
     if (up && vm.headMode !== "app") parts.push(b("View", "vm-view"));
     if (up) parts.push(b("Term", "vm-term"));
     if (up) parts.push(b("Screenshot", "vm-shot", "btn sm dim"));
+    if (up) parts.push(b("Reboot", "vm-reboot", "btn sm dim"));
+    if (up && detail) parts.push(b("Suspend", "vm-suspend", "btn sm dim"));
+    if (up && detail) parts.push(b("Hibernate", "vm-hibernate", "btn sm dim"));
+    if (up && detail) parts.push(b("Ctrl+Alt+Del", "vm-cad", "btn sm dim"));
     if (paused) parts.push(b("Resume", "vm-resume"));
     if (up || paused) parts.push(b("Stop", "vm-stop", "btn sm dim"));
-    if (stopped) parts.push(b("Start", "vm-start"));
+    if (stopped) parts.push(b(vm.hibernated ? "Resume" : "Start", "vm-start"));
     if (!transitional) parts.push(b("Edit", "vm-edit", "btn sm dim"));
     parts.push(btn("Logs", "nav", attr("route", "logs") + attr("vm", vm.name), "btn sm dim"));
     if (up || paused || transitional)
@@ -412,7 +416,7 @@ function unlockBanner(s: CruiserState): string {
     const opLabel = ({
         start: "start it", clone: "clone it", snapshot: "take a snapshot",
         restore: `restore '${p.arg ?? ""}'`, snapdel: `delete '${p.arg ?? ""}'`,
-        grow: "grow the disk",
+        grow: "grow the disk", backup: "back it up", compact: "compact the disk",
     } as Record<string, string>)[p.op] ?? p.op;
     return `<div class="hostsum" style="border-color:#6b5527;color:#f0c98a">
         <b>${esc(p.vm)}</b>: the disk is LUKS-encrypted — enter its passphrase to ${esc(opLabel)}.
@@ -685,6 +689,12 @@ function create(s: CruiserState): string {
         ${diskRow}
         ${vmDirRow}
         ${checkRow("Nested virtualization", "nestedVirt", f.nestedVirt, "pass the host's vmx/svm flag to the guest — run KVM inside the VM (needs the host kvm module's nested=1, see doctor)", aptag("boot"))}
+        ${field("CPU quota", "cpuQuota", f.cpuQuota, 80, aptag("boot"))}
+        ${field("Memory max", "memMax", f.memMax, 80, aptag("boot"))}
+        ${field("IO weight", "ioWeight", f.ioWeight, 80, aptag("boot"))}
+        <div class="hint">optional host-side cgroup caps on the QEMU process — blank leaves each uncapped.
+            CPU quota sums across cores ("50%" = half a core, "200%" = two). Memory max covers QEMU's RSS
+            <b>including</b> guest RAM — keep it above the memory size or the host OOM-kills the VM. IO weight is 1–10000.</div>
         ${editing ? "" : `<div class="h2">Disk encryption</div>
         ${optRow("Encryption", "encrypt", f.encrypt, [["off", "off"], ["full", "full disk"], ["home", "/home only"]])}
         <div class="hint">qcow2 LUKS — the image file is encrypted at rest and QEMU unlocks it with a
@@ -705,6 +715,9 @@ function create(s: CruiserState): string {
         <div id="hint-pw2">${hintPw2(s)}</div>
         <div class="hint">unlocks the qcow2 image itself — separate from the guest login below, and
             <b>not recoverable</b> if lost.</div>`}`}
+        <div class="h2">Security &amp; firmware</div>
+        ${checkRow("TPM 2.0", "tpm", f.tpm, "swtpm emulator — TPM-bound LUKS + measured boot; state persists in the VM dir", aptag("boot"))}
+        ${checkRow("Secure Boot", "secureBoot", f.secureBoot, "edk2 secboot firmware + SMM — some Windows guests want it; the yttrium driver needs it off", aptag("boot"))}
         <div class="h2">Graphics &amp; display</div>
         ${optRow("GPU mode", "gpu", f.gpu, [["venus", "Venus (Vulkan)"], ["virgl", "virgl (GL)"], ["software", "software"]], "set-field", aptag("boot"))}
         ${f.gpu === "venus" ? checkRow("Host software Vulkan", "swVk", f.swVk, "expose the host's lavapipe (CPU renderer) to the guest — off keeps software Vulkan on the guest's own lavapipe", aptag("boot")) : ""}
@@ -714,6 +727,10 @@ function create(s: CruiserState): string {
             : "remote-desktop into the guest — works with any GPU mode"}</div>
         ${optRow("Head mode", "headMode", f.headMode, [["virtual-desktop", "virtual desktop"], ["fullscreen-monitor", "fullscreen monitor"], ["windowed", "windowed"], ["app", "app-only"]], "set-field", aptag("live"))}
         ${vdPicker}
+        ${checkRow("Sound", "sound", f.sound, "intel-hda audio out through the viewer", aptag("boot"))}
+        ${checkRow("Microphone", "microphone", f.microphone, "mic into the guest — dmabuf viewer path", aptag("boot"))}
+        ${checkRow("Clipboard sync", "clipboard", f.clipboard, "host↔guest text clipboard — vdagent/freerdp channel", aptag("boot"))}
+        ${checkRow("Open links on host", "urlOpen", f.urlOpen, "guest http(s) links land in the host browser", aptag("boot"))}
         ${optRow("Persist", "persist", f.persist, [["daemonize", "survives app"], ["owned", "stops with app"], ["ephemeral", "deleted on exit"]], "set-field", aptag("live"))}
         <div class="hint">${PERSIST_HINT[f.persist] ?? ""}</div>
         ${checkRow("Start on boot", "autostart", f.autostart, "start with the app and at login — headless (open a console yourself); a systemd --user unit is installed while any VM is flagged", aptag("live"))}
@@ -724,6 +741,7 @@ function create(s: CruiserState): string {
             isolated: "no network at all — QGA, serial console and vsock still reach the guest; ssh and app-mode don't.",
             vmnet: "nat plus a second NIC on a layer-2 net shared by every vmnet VM on this host (multi-VM labs — no DHCP, use link-local or static IPs).",
         }[f.netMode] ?? ""}</div>
+        ${checkRow("Host↔guest vsock", "vsock", f.vsock, "vhost-vsock channel — app-mode (waypipe) and host services ride it", aptag("boot"))}
         <div class="h2">Snapshots ${aptag("live")}</div>
         ${optRow("Auto snapshot", "snapAuto", f.snapAuto, [["off", "off"], ["daily", "daily"], ["weekly", "weekly"], ["monthly", "monthly"]])}
         ${f.snapAuto === "off" ? "" : `
@@ -746,6 +764,11 @@ function create(s: CruiserState): string {
         <div class="hint">The base bundle — desktop, RDP/audio/GPU stack, flatpak + software store, fonts — is always installed.</div>`}`}
         ${winGuest ? "" : syncSection}
         ${usbSection}
+        <div class="h2">Advanced</div>
+        ${field("Extra QEMU args", "qemuArgs", f.qemuArgs, 460, aptag("boot"))}
+        <div class="hint">raw args appended verbatim to QEMU's command line — the escape hatch for features
+            cruiser doesn't model ("-rtc base=localtime", "-boot menu=on", "-device …"). Quotes group words.
+            Unvalidated — bad args fail the launch (check the qemu log).</div>
         ${editing ? "" : `<div class="h2">Credentials</div>
         ${field("Username", "username", f.username)}
         ${field("Password", "password", f.password, 220, "", "password")}`}
@@ -814,6 +837,11 @@ function vmDetail(s: CruiserState): RouteBody {
           + (vm.rdpPort ? ` <span class="meta">· rdp 127.0.0.1:${vm.rdpPort}</span>` : "")
         : `<span class="meta">ssh :${vm.sshPort ?? "–"} · rdp :${vm.rdpPort ?? "–"} — reserved, live when the VM runs</span>`;
     const locked = vm.diskLocked;
+    const caps = [
+        vm.limits.cpuQuota ? `cpu ≤ ${vm.limits.cpuQuota}` : "",
+        vm.limits.memoryMax ? `mem ≤ ${vm.limits.memoryMax}` : "",
+        vm.limits.ioWeight ? `io weight ${vm.limits.ioWeight}` : "",
+    ].filter(Boolean).join(" · ");
     const top = `<div class="crumb" data-action="nav" data-route="home">‹ VMs</div>
         <div class="h1">${esc(vm.name)} <span class="pill ${pillClass(vm.state)}">${esc(vm.state)}</span></div>
         ${vm.description ? `<div class="meta" style="margin:-8px 0 12px">${esc(vm.description)}</div>` : ""}
@@ -823,7 +851,7 @@ function vmDetail(s: CruiserState): RouteBody {
         ${autoSnapBanner(s)}
         ${unlockBanner(s)}
         <div class="kv">
-            <div class="k">resources</div><div>${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB · ${vm.diskGiB} GiB disk${vm.nestedVirt ? " · nested virt" : ""}</div>
+            <div class="k">resources</div><div>${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB · ${vm.diskGiB} GiB disk${vm.nestedVirt ? " · nested virt" : ""}${caps ? ` · ${esc(caps)}` : ""}</div>
             ${diskDetail ? `<div class="k">disk usage</div><div>${esc(diskDetail)}</div>` : ""}
             <div class="k">location</div><div>${esc(vm.vmDir)}${kvTog("copy", "kv-copy", attr("copy", vm.vmDir))}${kvTog("open", "kv-open", attr("path", vm.vmDir))}</div>
             <div class="k">gpu / head / viewer</div><div>${esc(vm.gpuMode)} / ${esc(vm.headMode)} / ${esc(vm.viewer)}</div>
@@ -840,12 +868,25 @@ function vmDetail(s: CruiserState): RouteBody {
         <div style="margin:10px 0 18px">
             ${vmBtns(vm, s, true)}
         </div>`;
-    const rest = `<div class="sech">Configuration</div>
+    const rest = `${runtimeSection(vm, s)}<div class="sech">Configuration</div>
         ${shareSection(vm, s, up)}
         ${fwdSection(vm, s)}
         ${mountSection(vm)}
         <div class="h2">Snapshots</div>
         ${snapSection}
+        <div class="h2">Disk</div>
+        <div class="row"><div class="lbl"></div>
+            ${btn("Backup image", "vm-backup", attr("vm", vm.name), "btn sm")}
+            ${up ? btn("Fstrim", "vm-fstrim", attr("vm", vm.name), "btn sm dim") : ""}
+            ${vm.state === "stopped"
+                ? (s.confirm === `vm-compact:${vm.name}`
+                    ? btn(vm.snapshots.length ? "compact — drops snapshots?" : "compact?", "vm-compact", attr("vm", vm.name), "btn sm warn")
+                    : btn("Compact", "vm-compact", attr("vm", vm.name), "btn sm dim"))
+                : ""}</div>
+        <div class="hint" style="margin-left:0">backup writes a full copy of the image — live + consistent while
+            running, offline while stopped. fstrim runs FITRIM inside the guest so free blocks are reclaimable.
+            compact rewrites the qcow2 sparse (stopped VMs only) — internal snapshots don't survive
+            ${vm.snapshots.length ? `(${vm.snapshots.length} present)` : "it"}.</div>
         <div class="h2">Portable config</div>
         <div class="row"><div class="lbl">Export / pull</div>
             ${btn("Export (yaml)", "vm-export", attr("vm", vm.name), "btn sm")}
@@ -857,6 +898,34 @@ function vmDetail(s: CruiserState): RouteBody {
         html: `<div id="vmtop">${top}</div><div id="vmrest">${rest}</div>`,
         regions: [{ sel: "#vmtop", html: top }, { sel: "#vmrest", html: rest }],
     };
+}
+
+/** Session-level controls for a running VM — USB hotplug + the memory
+ *  balloon. Nothing here persists; the boot-time equivalents live on the
+ *  Edit screen (usb chips, Memory). */
+function runtimeSection(vm: VmSummary, s: CruiserState): string {
+    if (vm.state !== "running") return "";
+    const attached = vm.usbAttached ?? [];
+    const isAttached = (d: UsbChoice) =>
+        attached.some((a) => a.id === `usb-${d.vendorId}-${d.productId}-${d.bus ?? "?"}-${d.addr ?? "?"}`);
+    const rows = [
+        ...attached.map((a) => `<div class="row">
+            <div style="flex:1">${esc(a.label)} <span class="meta">· passed through (${esc(a.id)})</span></div>
+            <div class="opt sm" data-action="usb-detach" data-vm="${esc(vm.name)}" data-id="${esc(a.id)}">detach</div></div>`),
+        ...s.usbDevices.filter((d) => !isAttached(d)).map((d) => `<div class="row">
+            <div style="flex:1">${esc(d.label)} <span class="meta">· ${d.vendorId}:${d.productId}${d.serial ? ` · ${esc(d.serial)}` : ""}${d.writable ? "" : " · no host access"}</span></div>
+            <div class="opt sm${d.writable ? "" : " dim"}" data-action="usb-attach" data-vm="${esc(vm.name)}" data-key="${esc(d.key)}">attach</div></div>`),
+    ];
+    return `<div class="sech">Runtime — this boot only</div>
+        <div class="h2">USB passthrough</div>
+        <div class="hint" style="margin-left:0">hot-attached until detached or the VM stops — the Edit screen's
+            USB picks are the boot-time set.</div>
+        ${rows.length ? rows.join("") : `<div class="meta">no USB devices on the host</div>`}
+        <div class="h2">Memory balloon</div>
+        <div class="row"><div class="lbl">Guest-visible</div>
+            <input data-field="memtarget" value="${esc(s.memTarget)}" style="width:100px">
+            ${btn("Apply", "vm-memset", attr("vm", vm.name), "btn sm")}
+            <div class="meta">MiB${vm.memBalloonMiB !== undefined ? ` — now ${vm.memBalloonMiB}` : ""}, capped at the ${vm.memMiB} MiB boot size</div></div>`;
 }
 
 /** The shares list + add form on the vm detail screen. */

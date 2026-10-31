@@ -67,6 +67,16 @@ export function ddViewerArgs(spec: VmSpec, monitorSock: string, geo?: DdViewerGe
     // --grab: XGrabKeyboard while the window is focused (freerdp
     // +grab-keyboard analog — guest sees alt-tab etc. instead of the host WM)
     if (spec.display.grabKeyboard) argv.push("--grab");
+    // --inject: Windows guests can't stretch a virtio-tablet past the
+    // primary display (they enumerate as absolute HID mice — wisp's
+    // Digimon association is digitizer-only), so pointer events go to a
+    // guest agent instead (SendInput MOUSEEVENTF_VIRTUALDESK spans the
+    // real Windows layout). Default channel: QEMU's slirp guestfwd →
+    // run/agent.sock (args.ts adds it for windows). CRUISER_VD_INJECT
+    // overrides for dev bridges ("host:port" = connect out).
+    const inject = process.env.CRUISER_VD_INJECT
+        ?? (spec.os.family === "windows" ? `unix:${vmPaths(spec.name).agentSock}` : undefined);
+    if (inject) argv.push("--inject", inject);
     // --relmouse: pointer-lock capture policy — the viewer flips QEMU's
     // active handler between the PS/2 mouse (RelMotion deltas) and the
     // virtio tablet per its state machine

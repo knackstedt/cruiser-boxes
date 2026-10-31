@@ -93,6 +93,10 @@ export interface VmPaths {
     serialSock: string;
     /** virtserialport org.cruiser.urlopen.0 — guest → host URL forwarding. */
     urlOpenSock: string;
+    /** slirp guestfwd → unix socket (windows pointer agent): QEMU dials
+     *  this when the guest connects to 10.0.2.250:28090; viewer-dd listens
+     *  here for inject-mode input (agent attach/detach events). */
+    agentSock: string;
     /** ddproxy display broker: viewer-facing p2p socket, pidfile, log.
      *  Present only while a dmabuf VM's broker is up. */
     ddproxySock: string;
@@ -124,6 +128,7 @@ export function vmPaths(name: string): VmPaths {
         serialLog: join(run, "serial.log"),
         serialSock: join(run, "serial.sock"),
         urlOpenSock: join(run, "urlopen.sock"),
+        agentSock: join(run, "agent.sock"),
         ddproxySock: join(run, "ddproxy.sock"),
         ddproxyPid: join(run, "ddproxy.pid"),
         ddproxyLog: join(run, "ddproxy.log"),

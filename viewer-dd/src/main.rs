@@ -17,9 +17,10 @@
 // the handlers only enqueue work — all GL happens on a dedicated worker
 // thread that owns the EGL context.
 use anyhow::{Context, Result};
+use std::io::Write as _;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 mod egl;
 use zbus::connection;
 use zvariant::Fd;
@@ -30,6 +31,12 @@ static MOUSE_VERBOSE: AtomicU64 = AtomicU64::new(0);
 /// --dump <path>: after every present, overwrite <path> with a PPM of the
 /// composited frame — lets a headless session read the guest's screen.
 static DUMP_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// --headless: listener-only probe — no window, no GL, no input grabs.
+/// ScanoutDMABUF2 events are logged with fstat'd dmabuf sizes instead of
+/// being handed to the GL worker.
+static HEADLESS: AtomicBool = AtomicBool::new(false);
+/// last logged headless scanout signature, for dedup
+static HD_SIG: AtomicU64 = AtomicU64::new(0);
 
 /// Per-console scanout dims — the window thread's input map needs them.
 struct Dims { w: AtomicU64, h: AtomicU64 }
@@ -42,6 +49,11 @@ struct Dims { w: AtomicU64, h: AtomicU64 }
 struct Heads {
     dims: Vec<std::sync::Arc<Dims>>,
     offsets: Vec<(u32, u32)>,
+    /// Per-console input mode: every console owns its absolute device
+    /// (e.g. a virtio-tablet bound display=gpuN), so SetAbsPosition takes
+    /// raw console-local px with no composite rescale. Signalled by an
+    /// all-zero --offsets list — there is no shared composite range.
+    local_input: bool,
 }
 
 /// GL-worker job — one shared channel for every console, so Fd carries
@@ -232,6 +244,56 @@ impl ddproto::ConsoleEvents for ViewerConsole {
         if n % 120 == 1 || resized {
             eprintln!("[listener:{}] ScanoutDMABUF2#{n} planes={num_planes} {width}x{height} strides={strides:?} fourcc={} modifier=0x{modifier:x} backing={backing_width}x{backing_height} y0_top={y0_top}",
                 self.id, fourcc_str(fourcc));
+        }
+        if HEADLESS.load(Ordering::Relaxed) {
+            let mut sig: u64 = 1469598103934665603;
+            let mut sizes: Vec<i64> = Vec::new();
+            for f in &dmabufs {
+                let sz = unsafe {
+                    let mut st: libc::stat = std::mem::zeroed();
+                    libc::fstat(f.as_raw_fd(), &mut st);
+                    st.st_size as i64
+                };
+                sizes.push(sz);
+            }
+            for v in [num_planes as u64, width as u64, height as u64,
+                      fourcc as u64, modifier, sizes.first().copied().unwrap_or(0) as u64] {
+                sig ^= v; sig = sig.wrapping_mul(1099511628211);
+            }
+            if HD_SIG.swap(sig, Ordering::Relaxed) != sig {
+                eprintln!("[headless:{}] ScanoutDMABUF2#{n} planes={num_planes} {width}x{height} strides={strides:?} offsets={offsets:?} fourcc={} modifier=0x{modifier:x} sizes={sizes:?}",
+                    self.id, fourcc_str(fourcc));
+            }
+            if let Some(p) = DUMP_PATH.get() {
+                let sz = sizes.first().copied().unwrap_or(0);
+                if sz > 0 {
+                    let map = unsafe {
+                        libc::mmap(std::ptr::null_mut(), sz as usize,
+                                   libc::PROT_READ, libc::MAP_SHARED,
+                                   dmabufs[0].as_raw_fd(), 0)
+                    };
+                    if map == libc::MAP_FAILED {
+                        eprintln!("[headless:{}] dmabuf mmap failed: {}",
+                            self.id, std::io::Error::last_os_error());
+                    } else {
+                        let stride = strides.first().copied().unwrap_or(0) as usize;
+                        let need = stride * height as usize;
+                        let data = unsafe { std::slice::from_raw_parts(map as *const u8, (sz as usize).min(need.max(sz as usize))) };
+                        let nz = data.iter().filter(|&&b| b != 0).count();
+                        let out = p.clone().replace(".ppm", &format!("-c{}-raw.bin", self.id));
+                        match std::fs::File::create(&out) {
+                            Ok(mut f) => {
+                                use std::io::Write;
+                                let _ = f.write_all(data);
+                                eprintln!("[headless:{}] dumped {} bytes ({} nonzero) → {}", self.id, data.len(), nz, out);
+                            }
+                            Err(e) => eprintln!("[headless:{}] dump write failed: {e}", self.id),
+                        }
+                        unsafe { libc::munmap(map, sz as usize); }
+                    }
+                }
+            }
+            return;
         }
         if dmabufs.is_empty() || num_planes == 0 { return; }
         if num_planes > 1 { return; } // multi-plane not supported
@@ -797,7 +859,7 @@ extern "C" fn xerror_handler(_d: *mut std::ffi::c_void, e: *mut XErrEv) -> i32 {
 /// are read; the rest is re-sent verbatim. `client` is written for the
 /// _NET_WM_STATE fullscreen request.
 #[repr(C)]
-union XEvBuf { any: XAnyEv, key: XKeyEv, client: XClientMsgEv, _pad: [u64; 24] }
+union XEvBuf { any: XAnyEv, key: XKeyEv, client: XClientMsgEv, prop: XPropEv, _pad: [u64; 24] }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -826,6 +888,17 @@ struct XClientMsgEv {
     t: i32, _p0: i32, _serial: u64, _send_event: i32, _p1: i32,
     _dpy: u64, win: u64, msg_type: u64, fmt: i32, _p2: i32,
     data: [u64; 5],
+}
+
+/// XPropertyEvent (type 28) — KWin DELETES _NET_WM_FULLSCREEN_MONITORS
+/// after evaluating a fullscreen transition (it's a request property to
+/// KWin, not persistent state), so the next toggle sees a bare window.
+/// state: 0=NewValue, 1=Delete — we re-arm on Delete only.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct XPropEv {
+    _t: i32, _p0: i32, _serial: u64, _send_event: i32, _p1: i32,
+    _dpy: u64, _win: u64, atom: u64, _time: u64, state: i32, _p2: i32,
 }
 
 #[repr(C)]
@@ -978,6 +1051,7 @@ fn fullscreen_monitor_indices(dpy: *mut std::ffi::c_void,
         if r.0 < lx { lx = r.0; fsm[2] = i; }
         if r.0 + r.2 > rx { rx = r.0 + r.2; fsm[3] = i; }
     }
+    eprintln!("[fsm] screens={screens:?} rects={rects:?} fsm={fsm:?}");
     Some(fsm)
 }
 
@@ -1055,13 +1129,57 @@ fn mouse_set(monitor: &str, rel: bool) -> Result<()> {
 /// device activating during guest boot can steal the head handler back,
 /// so a call that fails on mode grounds re-asserts the wanted mode.
 fn input_worker(conn: std::sync::Arc<zbus::blocking::Connection>,
-                paths: Vec<String>, rx: std::sync::mpsc::Receiver<In>, monitor: String) {
+                paths: Vec<String>, rx: std::sync::mpsc::Receiver<In>, monitor: String,
+                inject_addr: Option<String>) {
     let kbds: Vec<_> = paths.iter().map(|p|
         zbus::blocking::Proxy::new(&conn, "org.qemu", p.as_str(),
             "org.qemu.Display1.Keyboard").expect("kbd proxy")).collect();
     let mice: Vec<_> = paths.iter().map(|p|
         zbus::blocking::Proxy::new(&conn, "org.qemu", p.as_str(),
             "org.qemu.Display1.Mouse").expect("mouse proxy")).collect();
+    // --inject — Windows guests can't map virtio-tablet's absolute HID
+    // mouse beyond the primary display, so pointer events go to a guest
+    // agent (SendInput VIRTUALDESK) instead of the Mouse proxies. Lines:
+    // "m <ci> <x> <y>" / "b <btn> <down>" (console-local px). Dead
+    // socket → fall back to the D-Bus path so input never dies.
+    //   unix:<path> — LISTEN; QEMU guestfwd dials it per guest connection
+    //     (newest conn wins — agent reconnects on viewer restarts).
+    //   <host:port> — CONNECT to a dev bridge.
+    let (iatx, iarx) = std::sync::mpsc::channel::<Box<dyn std::io::Write + Send>>();
+    let mut inject: Option<Box<dyn std::io::Write + Send>> = None;
+    let mut connect_addr: Option<String> = None; // connect-mode target, for re-dial
+    match inject_addr.as_deref() {
+        Some(a) if a.starts_with("unix:") => {
+            let path = &a[5..];
+            let _ = std::fs::remove_file(path); // stale listener from a dead viewer
+            match std::os::unix::net::UnixListener::bind(path) {
+                Ok(l) => {
+                    eprintln!("[input] inject listening on {path}");
+                    std::thread::spawn(move || {
+                        for c in l.incoming().flatten() {
+                            if iatx.send(Box::new(c) as Box<dyn std::io::Write + Send>).is_err() {
+                                return;
+                            }
+                        }
+                    });
+                }
+                Err(e) => eprintln!("[input] inject bind {path} failed: {e} — dbus path"),
+            }
+        }
+        Some(a) => {
+            connect_addr = Some(a.to_string());
+            match std::net::TcpStream::connect(a) {
+                Ok(s) => {
+                    let _ = s.set_nodelay(true);
+                    eprintln!("[input] inject → {a}");
+                    inject = Some(Box::new(s));
+                }
+                Err(e) => eprintln!("[input] inject connect {a} failed: {e} — dbus path"),
+            }
+        }
+        None => {}
+    }
+    let mut last_redial = std::time::Instant::now() - std::time::Duration::from_secs(10);
     let mut moves = 0u64;
     let mut want_rel = false;
     let mut last_mode_set = std::time::Instant::now() - std::time::Duration::from_secs(1);
@@ -1075,20 +1193,48 @@ fn input_worker(conn: std::sync::Arc<zbus::blocking::Connection>,
             last_mode_set = std::time::Instant::now();
             continue;
         }
+        // Fresh agent connection (unix listen mode) — newest wins.
+        while let Ok(s) = iarx.try_recv() {
+            eprintln!("[input] inject: guest agent attached");
+            inject = Some(s);
+        }
+        // Connect-mode re-dial — the bridge/agent may restart under us.
+        if inject.is_none() && last_redial.elapsed() > std::time::Duration::from_secs(1) {
+            if let Some(a) = &connect_addr {
+                last_redial = std::time::Instant::now();
+                if let Ok(s) = std::net::TcpStream::connect(a) {
+                    let _ = s.set_nodelay(true);
+                    eprintln!("[input] inject → {a} (re-dial)");
+                    inject = Some(Box::new(s));
+                }
+            }
+        }
         let r: Result<(), zbus::Error> = (|| match ev {
             In::Move(ci, x, y) => {
                 moves += 1;
                 if moves % 100 == 1 { eprintln!("[input] move#{moves} console={ci} guest={x},{y}"); }
+                if let Some(s) = inject.as_mut() {
+                    if let Err(e) = write!(s, "m {ci} {x} {y}\n") {
+                        eprintln!("[input] inject died: {e} — dbus path"); inject = None;
+                    } else { return Ok(()); }
+                }
                 match mice.get(ci) {
                     Some(m) => m.call::<_, _, ()>("SetAbsPosition", &(x, y)),
                     None => Ok(()),
                 }
             }
             In::Rel(dx, dy) => mice[0].call::<_, _, ()>("RelMotion", &(dx, dy)),
-            In::Btn(ci, b, d) => match mice.get(ci) {
-                Some(m) => m.call::<_, _, ()>(if d { "Press" } else { "Release" }, &(b as u32,)),
-                None => Ok(()),
-            },
+            In::Btn(ci, b, d) => {
+                if let Some(s) = inject.as_mut() {
+                    if let Err(e) = write!(s, "b {b} {}\n", d as u8) {
+                        eprintln!("[input] inject died: {e} — dbus path"); inject = None;
+                    } else { return Ok(()); }
+                }
+                match mice.get(ci) {
+                    Some(m) => m.call::<_, _, ()>(if d { "Press" } else { "Release" }, &(b as u32,)),
+                    None => Ok(()),
+                }
+            }
             In::Key(k, d) => kbds[0].call::<_, _, ()>(if d { "Press" } else { "Release" }, &(k,)),
             In::Mode(_) => unreachable!(),
         })();
@@ -1143,7 +1289,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                   crx: std::sync::mpsc::Receiver<CurJob>,
                   heads: std::sync::Arc<Heads>, span: Option<Span>,
                   esc: std::sync::Arc<EscState>, rel_mode: RelMode,
-                  monitor: String) -> Result<()> {
+                  monitor: String, inject: Option<String>) -> Result<()> {
     use minifb::{Window, WindowOptions};
     let nheads = console_paths.len();
     let span = span.map(std::sync::Arc::new);
@@ -1166,6 +1312,16 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     // --rects span mode; written with the same WM_STATE gating as the
     // fullscreen-monitors hint.
     let mut bypass_pending = span.is_some();
+    // The fsm value + atom, kept after the first write — KWin deletes the
+    // property when it consumes a transition, and PropertyNotify re-arms it.
+    let mut fsm_atom = 0u64;
+    let mut fsm_value: Option<[u32; 4]> = None;
+    // KWin clips an over-screen window to one monitor at manage() — the
+    // pre-map XMoveResizeWindow to the span union doesn't stick. Re-assert
+    // the union once the WM has managed us, so even windowed (pre-toggle)
+    // presentation keeps the host monitor layout.
+    let mut span_reassert: Option<(i32, i32, i32, i32)> =
+        span.as_ref().map(|s| s.union);
     let xwin_id;
 
     // GL worker owns the EGL context — all device calls are single-threaded
@@ -1230,7 +1386,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                     // switch unmaps us and the remapped window needs a
                     // repaint kick (damage-driven presents never fire on
                     // their own) — the drain turns those into XJob::Repaint.
-                    XSelectInput(d, xid, 0x38003); // Key|Exposure|Visibility|StructureNotify
+                    XSelectInput(d, xid, 0x438003); // +PropertyChange: fsm re-arm
                     XFlush(d);
                     xdpy = d;
                 }
@@ -1475,7 +1631,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     {
         let ic2 = iconn.clone();
         let paths = console_paths.clone();
-        std::thread::spawn(move || input_worker(ic2, paths, irx, monitor));
+        std::thread::spawn(move || input_worker(ic2, paths, irx, monitor, inject));
     }
 
     let mut mouse = (-1.0f32, -1.0f32);
@@ -1525,6 +1681,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
         let (vx, vy, vw, vh) = egl::fit_viewport(rw.max(1) as u32, rh.max(1) as u32, iw, ih);
         let lx = ((mx - (rx + vx) as f32) / vw as f32 * iw as f32).clamp(0.0, iw as f32 - 1.0);
         let ly = ((my - (ry + vy) as f32) / vh as f32 * ih as f32).clamp(0.0, ih as f32 - 1.0);
+        if heads.local_input { return (best, lx as u32, ly as u32); }
         let (ox, oy) = head_offset(&heads, best);
         let (cw_total, ch_total) = composite_extent(&heads);
         let gx = ((ox as f32 + lx) * iw as f32 / cw_total as f32)
@@ -1721,10 +1878,23 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
             // them at the session's setFullscreen transition, same as freerdp.
             // Give up after ~10s of WM_STATE absence (no WM → the hints are
             // useless anyway and the X roundtrip per loop is waste).
-            if (fsm_pending.is_some() || bypass_pending)
+            if (fsm_pending.is_some() || bypass_pending || span_reassert.is_some())
                 && wm_managed(xdpy, xwin_id, wm_state_atom) {
+                if let Some(u) = span_reassert.take() {
+                    unsafe {
+                        XMoveResizeWindow(xdpy, xwin_id, u.0, u.1,
+                            u.2 as u32, u.3 as u32);
+                        XFlush(xdpy);
+                    }
+                    eprintln!("[+{}s][xegl] span union re-asserted {}x{} ({title})",
+                        ts(), u.2, u.3);
+                }
                 if let Some(fsm) = fsm_pending.take() {
                     set_fullscreen_monitors(xdpy, xwin_id, &fsm);
+                    fsm_value = Some(fsm);
+                    fsm_atom = unsafe {
+                        XInternAtom(xdpy, c"_NET_WM_FULLSCREEN_MONITORS".as_ptr().cast(), 0)
+                    };
                     eprintln!("[+{}s][xegl] fullscreen-monitors hint set ({title})", ts());
                 }
                 if bypass_pending {
@@ -1739,9 +1909,11 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                     }
                     eprintln!("[+{}s][xegl] bypass-compositor hint set ({title})", ts());
                 }
-            } else if (fsm_pending.is_some() || bypass_pending) && ts() > 10 {
+            } else if (fsm_pending.is_some() || bypass_pending
+                || span_reassert.is_some()) && ts() > 10 {
                 fsm_pending = None;
                 bypass_pending = false;
+                span_reassert = None;
             }
         }
         if esc.enabled && !xdpy.is_null() {
@@ -1876,6 +2048,18 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                 // while the guest is idle, so kick the GL worker.
                 if a.t == 12 || a.t == 15 || a.t == 19 {
                     let _ = jtx.send(XJob::Repaint);
+                    continue;
+                }
+                // PropertyNotify(28): KWin deletes _NET_WM_FULLSCREEN_MONITORS
+                // when it consumes the value during a fullscreen transition
+                // — re-arm so the NEXT toggle still spans the monitor union.
+                if a.t == 28 {
+                    let p = unsafe { ev.prop };
+                    if p.state == 1 && p.atom == fsm_atom && p.atom != 0 {
+                        if let Some(fsm) = fsm_value {
+                            set_fullscreen_monitors(xdpy, xwin_id, &fsm);
+                        }
+                    }
                     continue;
                 }
                 if (a.t == 2 || a.t == 3) && unsafe { ev.key }._win == xwin_id {
@@ -2375,17 +2559,26 @@ async fn main() -> Result<()> {
     let mut probes: Vec<String> = Vec::new();
     let mut clipboard = true;
     let mut grab = false;
+    let mut headless = false;
     let mut rel_mode = RelMode::Off;
     let mut escapes: Vec<EscCombo> = Vec::new();
     // --proxy <ddproxy.sock> — attach via the per-VM display broker instead
     // of minting QMP @dbus-display channels; a dead/absent proxy falls back
     // to the direct channel so the viewer never regresses.
     let mut proxy: Option<String> = None;
+    let mut inject: Option<String> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--proxy" => proxy = args.next(),
+            // Windows multi-monitor: pointer events are line-pushed to a
+            // guest SendInput agent instead of the confined virtio-tablet
+            "--inject" => inject = args.next(),
             "--dump" => { if let Some(p) = args.next() { let _ = DUMP_PATH.set(p); } }
+            "--dump-raw" => { if let Some(p) = args.next() { egl::set_dump_raw(&p); } }
+            "--probe-mods" => { if let Some(p) = args.next() { egl::set_probe_mods(&p); } }
             "--no-clipboard" => clipboard = false,
+            // diagnostic: register listeners and log scanouts — no window
+            "--headless" => headless = true,
             // grab the keyboard while the window is focused (spec.display.grabKeyboard)
             "--grab" => grab = true,
             // spec.display.pointerLock — relative pointer capture policy
@@ -2448,7 +2641,8 @@ async fn main() -> Result<()> {
             _ => {}
         }
     }
-    eprintln!("[*] monitor: {monitor} size={w}x{h} proxy={proxy:?}");
+    HEADLESS.store(headless, Ordering::Relaxed);
+    eprintln!("[*] monitor: {monitor} size={w}x{h} proxy={proxy:?} headless={headless}");
 
     // channel #1: control conn (VM/Console objects) — prefer the proxy; if
     // the socket is dead, fall straight back to the direct QMP channel.
@@ -2611,8 +2805,14 @@ async fn main() -> Result<()> {
         });
     }
 
+    if headless {
+        eprintln!("[*] headless — {} console(s) registered, no window", _lconns.len());
+        loop { std::thread::sleep(std::time::Duration::from_secs(3600)); }
+    }
+
     let heads = std::sync::Arc::new(Heads {
         dims: pending.iter().map(|p| p.dims.clone()).collect(),
+        local_input: offsets.len() > 1 && offsets.iter().all(|&o| o == (0, 0)),
         offsets,
     });
 
@@ -2646,7 +2846,7 @@ async fn main() -> Result<()> {
     // the runtime's workers while we join.
     let t = title.clone();
     let wh = std::thread::spawn(move ||
-        present_window(iconn, paths, &t, w, h, jrx, jtx, crx, heads, span, esc, rel_mode, monitor));
+        present_window(iconn, paths, &t, w, h, jrx, jtx, crx, heads, span, esc, rel_mode, monitor, inject));
     let r = wh.join().unwrap_or_else(|_| Err(anyhow::anyhow!("window thread panicked")));
     eprintln!("[*] window closed — {r:?}");
     Ok(())

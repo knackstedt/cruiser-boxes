@@ -72,7 +72,9 @@ export async function provisionVmWindows(h: VmHandle, o: ProvisionOpts): Promise
         log(h, o, "install complete — first normal boot (drivers + testsigning take effect)…");
         await h.start({ guestMonitors: await hostMirroredGuestMonitors(spec) });
         log(h, o, "waiting for guest agent…");
-        await waitForAgent(h, 10 * 60_000);
+        // 20min — the specialize payload installs the agent, but OOBE/
+        // first-logon churn on eval media can delay it well past boot.
+        await waitForAgent(h, 20 * 60_000);
 
         log(h, o, "running guest setup…");
         await runWindowsSetup(h, { onLog: (m) => log(h, o, m) });

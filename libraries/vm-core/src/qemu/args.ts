@@ -12,7 +12,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { VmSpec } from "../config/schema";
 import { DISK_SECRET_ID } from "../disk/ops";
-import { diskPath, diskKeyPath, homeDiskPath, optDir, type VmPaths } from "../paths";
+import { diskKeyPath, diskPath, homeDiskPath, optDir, type VmPaths } from "../paths";
 
 const SYS_OVMF_CODE = "/usr/share/OVMF/OVMF_CODE_4M.fd";
 const SYS_OVMF_VARS_TEMPLATE = "/usr/share/OVMF/OVMF_VARS_4M.fd";
@@ -101,6 +101,21 @@ export function hostVirtFlag(): "vmx" | "svm" | null {
     return null;
 }
 
+/** Shell-lite split for spec.qemu.extraArgs' text representation —
+ *  whitespace-separated, single/double quotes group, no escapes or
+ *  expansions. Unterminated quotes just swallow the tail as one arg. */
+export function splitQemuArgs(s: string): string[] {
+    const out: string[] = [];
+    const re = /"([^"]*)"?|'([^']*)'?|(\S+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(s))) out.push(m[1] ?? m[2] ?? m[3]!);
+    return out;
+}
+/** Inverse of splitQemuArgs — quote only when an arg contains whitespace. */
+export function joinQemuArgs(args: string[]): string {
+    return args.map((a) => (/[\s"']/.test(a) ? `"${a.replace(/"/g, "'")}"` : a)).join(" ");
+}
+
 /** Deterministic vsock guest CID per VM name (>= 1024 avoids reserved cids). */
 export function guestCid(name: string): number {
     let h = 0;
@@ -173,7 +188,13 @@ export function buildArgs(
 
     // ── GPU ──
     const outs = opts.guestMonitors ?? [{ name: "cruiser-1", xres: 1920, yres: 1080 }];
-    const maxOut = Math.max(1, outs.length);
+    // Windows virtio display drivers (viogpudo/viogpu3d) are single-head:
+    // max_outputs>1 leaves the extra consoles dark. Give Windows one
+    // virtio-gpu DEVICE per monitor instead — the guest binds the driver to
+    // each and QEMU exports each device head as its own D-Bus console (in
+    // device creation order, matching outs[]).
+    const winMulti = spec.os.family === "windows" && outs.length > 1;
+    const maxOut = winMulti ? 1 : Math.max(1, outs.length);
     const primary = outs[0];
     if (spec.gpu.mode === "venus") {
         push("-device", JSON.stringify({
@@ -181,14 +202,14 @@ export function buildArgs(
             venus: true, blob: true,
             hostmem: spec.gpu.hostmemMiB * 1024 * 1024,
             max_outputs: maxOut, xres: primary.xres, yres: primary.yres,
-            outputs: outs,
+            outputs: winMulti ? [primary] : outs,
         }));
     } else if (spec.gpu.mode === "virgl") {
         const dd = spec.display.viewer === "dmabuf";
         push("-device", JSON.stringify({
             driver: "virtio-vga-gl", id: "gpu0",
             max_outputs: maxOut, xres: primary.xres, yres: primary.yres,
-            outputs: outs,
+            outputs: winMulti ? [primary] : outs,
             // dmabuf viewer needs host-resident scanouts — blob keeps the
             // guest's buffers on the virgl rendernode (no per-flip transfer).
             ...(dd ? { blob: true, hostmem: spec.gpu.hostmemMiB * 1024 * 1024 } : {}),
@@ -198,6 +219,18 @@ export function buildArgs(
             driver: "virtio-vga", id: "gpu0",
             max_outputs: maxOut, xres: primary.xres, yres: primary.yres,
         }));
+    }
+    if (winMulti) {
+        // QEMU permits only ONE virtio-gpu-gl device per machine — secondary
+        // monitors are plain 2D virtio-gpu. viogpudo binds them the same;
+        // their consoles export via the CPU Scanout path (viewer-dd handles
+        // both), just without GPU-resident scanout buffers.
+        outs.slice(1).forEach((o, i) => push("-device", JSON.stringify({
+            driver: "virtio-gpu-pci",
+            id: `gpu${i + 1}`,
+            max_outputs: 1, xres: o.xres, yres: o.yres,
+            outputs: [o],
+        })));
     }
 
     // dmabuf viewer: QEMU D-Bus display backend (org.qemu.Display1, p2p).
@@ -248,7 +281,14 @@ export function buildArgs(
     if (netMode !== "isolated") {
         const fwd = spec.network.hostfwd
             .map((f) => `hostfwd=${f.proto}:127.0.0.1:${f.hostPort}-:${f.guestPort}`);
-        push("-netdev", `user,id=n0${netMode === "restricted" ? ",restrict=on" : ""}${fwd.length ? "," + fwd.join(",") : ""}`);
+        // Windows pointer agent: the guest's cruiser-agent dials a fixed
+        // slirp address; guestfwd wires it to run/agent.sock, which
+        // viewer-dd listens on in --inject unix: mode (SendInput-based
+        // multi-monitor pointer — virtio tablets pin to the primary).
+        const guestfwd = spec.os.family === "windows"
+            ? `,guestfwd=tcp:10.0.2.250:28090-unix:${paths.agentSock}`
+            : "";
+        push("-netdev", `user,id=n0${netMode === "restricted" ? ",restrict=on" : ""}${fwd.length ? "," + fwd.join(",") : ""}${guestfwd}`);
         push("-device", "virtio-net-pci,netdev=n0");
         if (netMode === "vmnet") {
             push("-netdev", "socket,id=n1,mcast=230.0.0.1:1234");
@@ -256,7 +296,18 @@ export function buildArgs(
         }
     }
 
-    push("-device", "virtio-keyboard-pci", "-device", "virtio-tablet-pci");
+    push("-device", "virtio-keyboard-pci");
+    if (winMulti) {
+        // Per-display tablet (QEMU multiseat pattern): console N's Mouse
+        // events route to the tablet bound to gpuN, so each Windows adapter
+        // gets its own absolute pointer. One shared tablet is exposed to
+        // the guest as a single digitizer that Windows maps onto ONE
+        // display — the cursor can't cross monitors.
+        outs.forEach((_o, i) =>
+            push("-device", `virtio-tablet-pci,id=tab${i},display=gpu${i}`));
+    } else {
+        push("-device", "virtio-tablet-pci");
+    }
     push("-object", "rng-random,filename=/dev/urandom,id=rng0", "-device", "virtio-rng-pci,rng=rng0");
     // virtio-balloon — live guest-visible memory resize (`vm mem`, QMP
     // balloon) + query-balloon gives real in-guest free mem for metrics.
@@ -361,6 +412,9 @@ export function buildArgs(
 
     if (spec.persist === "daemonize" && opts.daemonize !== false) push("-daemonize");
     push("-pidfile", paths.pidFile, "-D", paths.log);
+    // spec escape hatch — appended last so it can override generated flags
+    // (QEMU's last-occurrence-wins for most options).
+    push(...spec.qemu.extraArgs);
     if (opts.extraArgs) a.push(...opts.extraArgs);
 
     const outEnv: Record<string, string> = { LD_LIBRARY_PATH: env.ldLibraryPath };
@@ -368,6 +422,9 @@ export function buildArgs(
     // the variant lib — point the loader at it explicitly.
     if (env.renderServerExec) outEnv.RENDER_SERVER_EXEC_PATH = env.renderServerExec;
     if (process.env.CRUISER_VKR_DEBUG) outEnv.VKR_DEBUG = process.env.CRUISER_VKR_DEBUG;
+    if (process.env.CRUISER_VKR_LOG_IMAGES) outEnv.VKR_LOG_IMAGES = process.env.CRUISER_VKR_LOG_IMAGES;
+    if (process.env.CRUISER_VREND_FORCE_LINEAR) outEnv.VREND_FORCE_LINEAR = process.env.CRUISER_VREND_FORCE_LINEAR;
+    if (process.env.CRUISER_QEMU_SURFACE_LINEAR) outEnv.QEMU_SURFACE_LINEAR = process.env.CRUISER_QEMU_SURFACE_LINEAR;
     if (spec.gpu.mode === "venus" && !spec.gpu.softwareVk) {
         // Venus exposes every host VkPhysicalDevice to the guest — including
         // lavapipe. A guest app that asks wgpu for the software/fallback

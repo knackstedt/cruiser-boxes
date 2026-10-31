@@ -3,24 +3,24 @@
 // or owned), reattaches over monitor/QGA sockets, and exposes disk/usb ops.
 // ============================================================================
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { mkdir, writeFile, readFile, copyFile, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
 import type { ChildProcess } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
+import { run, spawnChild, virtiofsdPath, which } from "../../../sys/src/exec";
+import { bootRelevantChanges } from "../config/boot-diff";
 import type { VmSpec } from "../config/schema";
 import { parseVmSpec } from "../config/schema";
-import { bootRelevantChanges } from "../config/boot-diff";
-import { vmPaths, diskPath as resolveDiskPath, diskKeyPath, homeDiskPath as resolveHomeDiskPath, type VmPaths } from "../paths";
+import * as disk from "../disk/ops";
+import { appendVmLog } from "../logs";
+import { diskKeyPath, diskPath as resolveDiskPath, homeDiskPath as resolveHomeDiskPath, vmPaths, type VmPaths } from "../paths";
 import { buildArgs, ovmfVarsTemplate, type BuildOpts, type BuiltArgs } from "../qemu/args";
 import { resolveToolchain, type Toolchain } from "../qemu/resolve";
-import { QmpClient } from "../qmp/client";
 import { QgaClient } from "../qga/client";
-import * as disk from "../disk/ops";
+import { QmpClient } from "../qmp/client";
 import * as usb from "../usb/usb";
-import { appendVmLog } from "../logs";
 import { killDdproxy, spawnDdproxy } from "./ddproxy";
-import { run, spawnChild, virtiofsdPath, which } from "../../../sys/src/exec";
 
 export type VmState = "stopped" | "starting" | "running" | "stopping" | "paused" | "crashed" | "unknown";
 
@@ -699,6 +699,14 @@ done
     async suspend(): Promise<void> { await this.withQmp((q) => q.stop()); }
     async resume(): Promise<void> { await this.withQmp((q) => q.cont()); }
 
+    /** QMP send-key — injects a key combo into the guest console regardless
+     *  of viewer focus/grab state (qcode names: "ctrl", "alt", "delete", …). */
+    async sendKeys(keys: string[]): Promise<void> {
+        await this.withQmp((q) =>
+            q.execute("send-key", { keys: keys.map((k) => ({ type: "qcode", data: k })) }));
+    }
+    async sendCtrlAltDel(): Promise<void> { return this.sendKeys(["ctrl", "alt", "delete"]); }
+
     /** PNG screendump of the primary console — writes `file` (default
      *  run/screenshot.png) and returns the path. Running VM required. */
     async screenshot(file?: string): Promise<string> {
@@ -995,6 +1003,8 @@ done
         return this.withQmp((q) => usb.usbAttach(q, d));
     }
     async usbDetach(id: string) { return this.withQmp((q) => usb.usbDetach(q, id)); }
+    /** qmp ids + product labels of the passthrough'd USB devices QEMU reports. */
+    usbAttachedList() { return this.withQmp((q) => usb.usbAttached(q)); }
 
     // ── guest ops ──
 

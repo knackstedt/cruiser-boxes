@@ -46,6 +46,13 @@ extern "C" {
     fn glEnable(cap: u32);
     fn glDisable(cap: u32);
     fn glScissor(x: i32, y: i32, w: i32, h: i32);
+    fn glGenFramebuffers(n: i32, out: *mut u32);
+    fn glBindFramebuffer(t: u32, fb: u32);
+    fn glFramebufferTexture2D(t: u32, att: u32, tt: u32, tex: u32, lvl: i32);
+    fn glDeleteTextures(n: i32, t: *const u32);
+    fn glDeleteFramebuffers(n: i32, f: *const u32);
+    fn glDeleteProgram(p: u32);
+    fn glDeleteShader(s: u32);
 }
 
 #[link(name = "X11")]
@@ -281,6 +288,21 @@ pub fn x11_resize(e: &XEgl, w: u32, h: u32) {
     }
 }
 
+/// Set once by main from `--dump-raw <path>`: the next dmabuf import
+/// raw-mmaps the GEM and writes it, then clears.
+static DUMP_RAW: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+pub fn set_dump_raw(path: &str) {
+    *DUMP_RAW.lock().unwrap() = Some(path.to_string());
+}
+
+/// Set once by main from `--probe-mods <dir>`: on the next dmabuf import,
+/// opens a Mesa EGL context on renderD129 and tries every importable
+/// modifier, writing <dir>/mod-<hex>.ppm for each that imports.
+static PROBE_MODS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+pub fn set_probe_mods(dir: &str) {
+    *PROBE_MODS.lock().unwrap() = Some(dir.to_string());
+}
+
 /// EGL_BUFFER_AGE of the next back buffer, when EGL_EXT_buffer_age is
 /// supported — the caller uses it to bound partial repaints.
 pub fn x11_buffer_age(e: &XEgl) -> Option<i32> {
@@ -310,6 +332,31 @@ pub fn x11_import(e: &mut XEgl, ci: usize, fd: RawFd, x: u32, y: u32, w: u32, h:
         })
     };
     if head.key.is_some() && head.key == key { return Ok(()); }
+    // Debug: raw-mmap the dmabuf once to capture producer-side content
+    // (tells a tiled/garbage buffer apart from an import failure).
+    if let Some(path) = DUMP_RAW.lock().unwrap().take() {
+        unsafe {
+            let need = poff as usize + stride as usize * bh as usize;
+            let p = libc::mmap(std::ptr::null_mut(), need, libc::PROT_READ,
+                               libc::MAP_SHARED, fd, 0);
+            if p == libc::MAP_FAILED {
+                eprintln!("[xegl] dmabuf mmap failed: {}", std::io::Error::last_os_error());
+            } else {
+                let px = std::slice::from_raw_parts(p as *const u8, need);
+                if let Ok(mut f) = std::fs::File::create(&path) {
+                    use std::io::Write;
+                    let _ = f.write_all(px);
+                    eprintln!("[xegl] dmabuf raw mmap → {path} ({need}B)");
+                }
+                libc::munmap(p, need);
+            }
+        }
+    }
+    // dup BEFORE eglCreateImage claims the fd so the modifier probe still
+    // has a live handle on the same GEM.
+    let probe_fd = if PROBE_MODS.lock().unwrap().is_some() {
+        Some(unsafe { libc::dup(fd) })
+    } else { None };
     unsafe {
         const EGL_LINUX_DMA_BUF_EXT: u32 = 0x3270;
         const EGL_WIDTH: i32 = 0x3057;
@@ -320,6 +367,11 @@ pub fn x11_import(e: &mut XEgl, ci: usize, fd: RawFd, x: u32, y: u32, w: u32, h:
         const EGL_DMA_BUF_PLANE0_PITCH_EXT: i32 = 0x3274;
         const EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT: i32 = 0x3443;
         const EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT: i32 = 0x3444;
+        // DRM_FORMAT_MOD_INVALID (2^56-1) means implicit/linear layout —
+        // NVIDIA's eglCreateImage treats it as an unknown modifier and
+        // either rejects the image or samples black. Substitute LINEAR.
+        const DRM_FORMAT_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
+        let modifier = if modifier == DRM_FORMAT_MOD_INVALID { 0 } else { modifier };
         let attribs: Vec<usize> = vec![
             EGL_WIDTH as usize, bw as usize, EGL_HEIGHT as usize, bh as usize,
             EGL_LINUX_DRM_FOURCC_EXT as usize, fourcc as usize,
@@ -342,14 +394,297 @@ pub fn x11_import(e: &mut XEgl, ci: usize, fd: RawFd, x: u32, y: u32, w: u32, h:
         // backing top-down (v_top=v(y)), !y0_top bottom-up (v_top=v(y+h)).
         let (bf, hf) = (bw as f32, bh as f32);
         let v = |py: u32| py as f32 / hf;
-        let (vb, vt) = if y0_top { (v(y), v(y + h)) } else { (v(y + h), v(y)) };
+        let (vb, vt) = if y0_top { (v(y + h), v(y)) } else { (v(y + h), v(y)) };
         head.uv = [x as f32 / bf, vb, (x + w) as f32 / bf, vt];
         head.key = key;
         head.kind_cpu = false;
         let old = head.img.replace(img);
         if let Some(oi) = old { let _ = e.inst.destroy_image(e.dpy, oi); }
     }
+
+    if let (Some(dir), Some(pfd)) = (PROBE_MODS.lock().unwrap().take(), probe_fd) {
+        probe_modifiers(e, pfd, bw, bh, poff, stride, fourcc, &dir);
+        unsafe { libc::close(pfd); }
+    }
     Ok(())
+}
+
+/// Diagnostic: import `fd` on a Mesa EGL display bound to renderD129
+/// (the producing driver knows its own tiling) once per supported
+/// modifier, dumping <dir>/mod-<hex>.ppm so the real layout can be
+/// identified by eye. QEMU reports modifier=INVALID for venus scanouts;
+/// this finds what the producer actually used.
+fn probe_modifiers(e: &XEgl, fd: RawFd, bw: u32, bh: u32, poff: u32,
+                   stride: u32, fourcc: u32, dir: &str) {
+    type QueryDevicesFn = extern "system" fn(i32, *mut *mut c_void, *mut i32) -> u32;
+    type QueryDevStringFn = extern "system" fn(*mut c_void, i32) -> *const i8;
+    type QueryModsFn = extern "system" fn(*mut c_void, i32, i32, *mut u64,
+                                        *mut u8, *mut i32) -> u32;
+    const EGL_PLATFORM_DEVICE_EXT: u32 = 0x313F;
+    const EGL_DRM_DEVICE_FILE_EXT: i32 = 0x3355;
+    const EGL_DRM_RENDER_NODE_FILE_EXT: i32 = 0x3377;
+    unsafe {
+        let link = std::fs::read_link(format!("/proc/self/fd/{fd}"))
+            .map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut st: libc::stat = std::mem::zeroed();
+        libc::fstat(fd, &mut st);
+        eprintln!("[probe] fd={fd} link={link} dev={} ino={} size={} mode={:#o}",
+                  st.st_dev, st.st_ino, st.st_size, st.st_mode);
+        // Ground truth: import the dma-buf into amdgpu and ask the kernel
+        // what tiling the BO was allocated with.
+        #[repr(C)]
+        struct PrimeHandle { handle: u32, flags: u32, fd: i32 }
+        #[repr(C)]
+        struct GemMeta {
+            handle: u32, op: u64, flags: u64,
+            tiling_flags: u32, data_size_bytes: u32, data: [u32; 8],
+        }
+        if let Ok(drm) = std::fs::File::open("/dev/dri/renderD129") {
+            use std::os::fd::AsRawFd;
+            let mut ph = PrimeHandle { handle: 0, flags: 0, fd };
+            // DRM_IOWR('d', 0x2e, drm_prime_handle) — size 12
+            let r = libc::ioctl(drm.as_raw_fd(), 0xC010642eu64 as _, &mut ph as *mut _);
+            if r < 0 {
+                eprintln!("[probe] prime fd_to_handle: {}", std::io::Error::last_os_error());
+            } else {
+                let mut gm: GemMeta = std::mem::zeroed();
+                gm.handle = ph.handle;
+                // DRM_IOWR('d', 0x4e, drm_amdgpu_gem_metadata) — size 0x40
+                let r2 = libc::ioctl(drm.as_raw_fd(), 0xC040644eu64 as _, &mut gm as *mut _);
+                if r2 < 0 {
+                    eprintln!("[probe] gem_metadata: {}", std::io::Error::last_os_error());
+                } else {
+                    eprintln!("[probe] gem tiling_flags={:#010x} data={:?}",
+                              gm.tiling_flags, gm.data);
+                }
+            }
+            drop(drm);
+        }
+        let old_ctx = e.inst.get_current_context();
+        let old_draw = e.inst.get_current_surface(0x305D); // EGL_DRAW
+        let old_read = e.inst.get_current_surface(0x305A); // EGL_READ
+        let restore = |inst: &egl::DynamicInstance<egl::EGL1_5>, dpy| {
+            let _ = inst.make_current(dpy, old_draw, old_read, old_ctx);
+        };
+        let Some(qd) = e.inst.get_proc_address("eglQueryDevicesEXT")
+            .map(|f| std::mem::transmute::<extern "system" fn(), QueryDevicesFn>(f)) else {
+            eprintln!("[probe] no eglQueryDevicesEXT"); return;
+        };
+        let qds = e.inst.get_proc_address("eglQueryDeviceStringEXT")
+            .map(|f| std::mem::transmute::<extern "system" fn(), QueryDevStringFn>(f));
+        let mut devs = vec![std::ptr::null_mut(); 32];
+        let mut ndev = 0i32;
+        if qd(32, devs.as_mut_ptr(), &mut ndev) == 0 { eprintln!("[probe] query devices failed"); return; }
+        devs.truncate(ndev.max(0) as usize);
+        eprintln!("[probe] {ndev} egl devices");
+        let mut amd_dpy = None;
+        for dev in &devs {
+            let node = qds.and_then(|f| {
+                for att in [EGL_DRM_RENDER_NODE_FILE_EXT, EGL_DRM_DEVICE_FILE_EXT] {
+                    let s = f(*dev, att);
+                    if !s.is_null() {
+                        return Some(std::ffi::CStr::from_ptr(s).to_string_lossy().into_owned());
+                    }
+                }
+                None
+            });
+            eprintln!("[probe]   dev node={node:?}");
+            if node.as_deref() != Some("/dev/dri/renderD129") { continue; }
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                e.inst.get_platform_display(EGL_PLATFORM_DEVICE_EXT, *dev, &[egl::ATTRIB_NONE]))) {
+                Ok(Ok(d)) => {
+                    if e.inst.initialize(d).is_ok() { amd_dpy = Some(d); }
+                }
+                _ => {}
+            }
+        }
+        let Some(dpy) = amd_dpy else { eprintln!("[probe] no renderD129 egl display"); restore(&e.inst, e.dpy); return; };
+        // modifier candidates from the driver itself
+        let mut cands: Vec<Option<u64>> = vec![None, Some(0)];
+        if let Some(f) = e.inst.get_proc_address("eglQueryDmaBufModifiersEXT")
+            .map(|f| std::mem::transmute::<extern "system" fn(), QueryModsFn>(f)) {
+            let mut n = 0i32;
+            if f(dpy.as_ptr(), fourcc as i32, 0, std::ptr::null_mut(),
+                 std::ptr::null_mut(), &mut n) != 0 && n > 0 {
+                let mut mods = vec![0u64; n as usize];
+                let mut ext_only = vec![0u8; n as usize];
+                if f(dpy.as_ptr(), fourcc as i32, n, mods.as_mut_ptr(),
+                     ext_only.as_mut_ptr(), &mut n) != 0 {
+                    for m in mods { cands.push(Some(m)); }
+                }
+            }
+        }
+        eprintln!("[probe] candidates: {cands:?}");
+        // Brute-force AMD DCC/tile-version variants around the advertised
+        // bases — the EGL import list omits producer-only modifiers like DCC.
+        let mut extra = Vec::new();
+        for ver in 1u64..=3 {
+            for tile in [0x09u64, 0x1b, 0x0f] { // 64K_S, GFX10_RB+ tile, 64K_D?
+                for dc in 0u64..64 { // bits[16:25] tile_split+dcc+retile+const
+                    extra.push(Some((ver) | (tile << 8) | (dc << 16) | (0x02u64 << 56)));
+                }
+            }
+        }
+        cands.extend(extra);
+        let cfg_attrs = [egl::SURFACE_TYPE, egl::PBUFFER_BIT, egl::RENDERABLE_TYPE,
+            egl::OPENGL_ES2_BIT, egl::RED_SIZE, 8, egl::GREEN_SIZE, 8, egl::BLUE_SIZE, 8, egl::NONE];
+        let mut cfgs: Vec<egl::Config> = Vec::with_capacity(8);
+        if e.inst.choose_config(dpy, &cfg_attrs, &mut cfgs).is_err() || cfgs.is_empty() {
+            eprintln!("[probe] no pbuffer config"); restore(&e.inst, e.dpy); return;
+        }
+        let ctx = match e.inst.create_context(dpy, cfgs[0], None,
+            &[egl::CONTEXT_CLIENT_VERSION, 2, egl::NONE]) {
+            Ok(c) => c, Err(_) => { restore(&e.inst, e.dpy); return; }
+        };
+        let surf = match e.inst.create_pbuffer_surface(dpy, cfgs[0],
+            &[egl::WIDTH, 1, egl::HEIGHT, 1, egl::NONE]) {
+            Ok(s) => s, Err(_) => { restore(&e.inst, e.dpy); return; }
+        };
+        if e.inst.make_current(dpy, Some(surf), Some(surf), Some(ctx)).is_err() {
+            eprintln!("[probe] make current failed"); restore(&e.inst, e.dpy); return;
+        }
+        let _ = std::fs::create_dir_all(dir);
+        let mut tries: Vec<(Option<u64>, u32)> = cands.iter().map(|m| (*m, stride)).collect();
+        for p in [8192u32, 16384, 9216] {
+            tries.push((Some(0), p));
+            tries.push((None, p));
+        }
+        // sanity: draw a known checkerboard through the same FBO/readback —
+        // if this shows stripes the probe machinery is broken, not the buf.
+        unsafe {
+            let mut fbtex = 0u32; let mut fbo = 0u32; let mut ctex = 0u32;
+            let mut chk = vec![0u8; 256 * 256 * 4];
+            for i in 0..256 { for j in 0..256 {
+                let v = if (i / 32 + j / 32) % 2 == 0 { 255u8 } else { 0 };
+                chk[(i * 256 + j) * 4] = v; chk[(i * 256 + j) * 4 + 2] = v; chk[(i * 256 + j) * 4 + 3] = 255;
+            } }
+            glGenTextures(1, &mut ctex); glBindTexture(0x0DE1, ctex);
+            glTexParameteri(0x0DE1, 0x2801, 0x2600); glTexParameteri(0x0DE1, 0x2800, 0x2600);
+            glTexImage2D(0x0DE1, 0, 0x1908, 256, 256, 0, 0x1908, 0x1401, chk.as_ptr() as *const _);
+            glGenTextures(1, &mut fbtex); glBindTexture(0x0DE1, fbtex);
+            glTexImage2D(0x0DE1, 0, 0x1908, 256, 256, 0, 0x1908, 0x1401, std::ptr::null());
+            glGenFramebuffers(1, &mut fbo); glBindFramebuffer(0x8D40, fbo);
+            glFramebufferTexture2D(0x8D40, 0x8CE0, 0x0DE1, fbtex, 0);
+            let fs2 = glCreateShader(0x8B30);
+            let fsrc2 = b"#version 100\nprecision mediump float; varying vec2 v; uniform sampler2D t; void main(){gl_FragColor=texture2D(t,v);}\0";
+            glShaderSource(fs2, 1, &fsrc2.as_ptr(), std::ptr::null()); glCompileShader(fs2);
+            let vs2 = glCreateShader(0x8B31);
+            let vsrc2 = b"attribute vec2 p; varying vec2 v; void main(){v=p*.5+.5; gl_Position=vec4(p,0.,1.);}\0";
+            glShaderSource(vs2, 1, &vsrc2.as_ptr(), std::ptr::null()); glCompileShader(vs2);
+            let pr2 = glCreateProgram(); glAttachShader(pr2, vs2); glAttachShader(pr2, fs2); glLinkProgram(pr2);
+            glUseProgram(pr2);
+            let verts: [f32; 8] = [-1., -1., 1., -1., -1., 1., 1., 1.];
+            let loc2 = glGetAttribLocation(pr2, c"p".as_ptr().cast());
+            glEnableVertexAttribArray(loc2 as u32);
+            glVertexAttribPointer(loc2 as u32, 2, 0x1406, 0, 0, verts.as_ptr() as *const _);
+            glViewport(0, 0, 256, 256); glDrawArrays(5, 0, 4); glFinish();
+            let mut px = vec![0u8; 256 * 256 * 4];
+            glReadPixels(0, 0, 256, 256, 0x1908, 0x1401, px.as_mut_ptr() as *mut _);
+            if let Ok(mut f) = std::fs::File::create(format!("{dir}/sanity.ppm")) {
+                use std::io::Write;
+                let _ = write!(f, "P6\n256 256\n255\n");
+                for i in (0..256usize).rev() { let _ = f.write_all(&px[i * 1024..(i + 1) * 1024]); }
+            }
+            eprintln!("[probe] sanity checkerboard wrote {dir}/sanity.ppm");
+        }
+        let mut fails = 0u32;
+        for (ti, (cand, pitch)) in tries.iter().enumerate() {
+            let mut at: Vec<usize> = vec![
+                0x3057, bw as usize, 0x3056, bh as usize,       // W/H
+                0x3271, fourcc as usize,                        // DRM fourcc
+                0x3272, libc::dup(fd) as usize,                 // fd
+                0x3273, poff as usize,                          // offset
+                0x3274, *pitch as usize,                        // pitch
+            ];
+            // 2-plane (DCC) variant for the 0x56bb03 modifier — RADV puts
+            // the metadata plane at end-of-image.
+            if *cand == Some(0x020000000056bb03) {
+                at.push(0x3275); at.push(libc::dup(fd) as usize); // PLANE1_FD
+                at.push(0x3276); at.push(8847360usize);           // PLANE1_OFFSET
+                at.push(0x3277); at.push(2048usize);              // PLANE1_PITCH
+            }
+            let tag = match cand {
+                Some(m) => {
+                    at.push(0x3443); at.push((m & 0xFFFFFFFF) as usize);
+                    at.push(0x3444); at.push((m >> 32) as usize);
+                    if *m == 0x020000000056bb03 {
+                        at.push(0x3445); at.push((m & 0xFFFFFFFF) as usize); // PLANE1_MOD_LO
+                        at.push(0x3446); at.push((m >> 32) as usize);        // PLANE1_MOD_HI
+                    }
+                    format!("{m:#018x}-p{pitch}")
+                }
+                None => format!("nomod-p{pitch}"),
+            };
+            at.push(egl::ATTRIB_NONE);
+            let img = match e.inst.create_image(dpy, egl::Context::from_ptr(egl::NO_CONTEXT),
+                0x3270, egl::ClientBuffer::from_ptr(std::ptr::null_mut()), &at) {
+                Ok(i) => i,
+                Err(err) => {
+                    if fails < 8 { eprintln!("[probe] mod {tag}: import failed {err:?}"); }
+                    fails += 1;
+                    continue;
+                }
+            };
+            let mut tex = 0u32;
+            glGenTextures(1, &mut tex);
+            for target in [0x8D65u32, 0x0DE1] { // EXTERNAL_OES then TEXTURE_2D
+                glBindTexture(target, tex);
+                IMG_TARGET.unwrap()(target, img.as_ptr());
+                if glGetError() == 0 { break; }
+            }
+            // draw into an FBO and read back
+            let mut fbtex = 0u32; let mut fbo = 0u32;
+            glGenTextures(1, &mut fbtex);
+            glBindTexture(0x0DE1, fbtex);
+            glTexImage2D(0x0DE1, 0, 0x1908, bw as i32, bh as i32, 0, 0x1908, 0x1401, std::ptr::null());
+            glGenFramebuffers(1, &mut fbo);
+            glBindFramebuffer(0x8D40, fbo);
+            glFramebufferTexture2D(0x8D40, 0x8CE0, 0x0DE1, fbtex, 0);
+            let vs = glCreateShader(0x8B31);
+            let vsrc = b"attribute vec2 p; varying vec2 v; void main(){v=p*.5+.5; gl_Position=vec4(p,0.,1.);}\0";
+            glShaderSource(vs, 1, &vsrc.as_ptr(), std::ptr::null()); glCompileShader(vs);
+            let fs = glCreateShader(0x8B30);
+            let fsrc = b"#version 100\n#extension GL_OES_EGL_image_external : require\nprecision mediump float; varying vec2 v; uniform samplerExternalOES t; void main(){gl_FragColor=texture2D(t,v);}\0";
+            glShaderSource(fs, 1, &fsrc.as_ptr(), std::ptr::null()); glCompileShader(fs);
+            let pr = glCreateProgram(); glAttachShader(pr, vs); glAttachShader(pr, fs); glLinkProgram(pr);
+            glUseProgram(pr);
+            let verts: [f32; 8] = [-1., -1., 1., -1., -1., 1., 1., 1.];
+            let loc = glGetAttribLocation(pr, c"p".as_ptr().cast());
+            glEnableVertexAttribArray(loc as u32);
+            glVertexAttribPointer(loc as u32, 2, 0x1406, 0, 0, verts.as_ptr() as *const _);
+            glViewport(0, 0, bw as i32, bh as i32);
+            glDrawArrays(5, 0, 4);
+            glFinish();
+            let mut px = vec![0u8; (bw * bh * 4) as usize];
+            glReadPixels(0, 0, bw as i32, bh as i32, 0x1908, 0x1401, px.as_mut_ptr() as *mut _);
+            // flat-region metric: real UI has big runs of equal pixels,
+            // misdecoded tiling reads as near-random noise.
+            let mut flat = 0u64;
+            for i in 0..bh as usize {
+                for j in 0..(bw as usize - 1) * 4 / 4 {
+                    let a = i * bw as usize * 4 + j * 4;
+                    if px[a..a + 4] == px[a + 4..a + 8] { flat += 1; }
+                }
+            }
+            let frac = flat as f64 / (bw as f64 * bh as f64);
+            if frac > 0.30 {
+                let path = format!("{dir}/mod-{tag}.ppm");
+                if let Ok(mut f) = std::fs::File::create(&path) {
+                    use std::io::Write;
+                    let _ = write!(f, "P6\n{bw} {bh}\n255\n");
+                    for i in (0..bh as usize).rev() {
+                        let _ = f.write_all(&px[i * bw as usize * 4..(i + 1) * bw as usize * 4]);
+                    }
+                    eprintln!("[probe] mod {tag}: flat={frac:.2} wrote {path}");
+                }
+            } else if ti < 12 { // quiet during the sweep
+                eprintln!("[probe] mod {tag}: flat={frac:.2} noise");
+            }
+            let _ = e.inst.destroy_image(dpy, img);
+        }
+        eprintln!("[probe] sweep done: {} tries, {fails} import failures", tries.len());
+        restore(&e.inst, e.dpy);
+    }
 }
 
 // ── CPU scanout path (raw Scanout + ScanoutMap) ──
@@ -390,21 +725,23 @@ fn cpu_fmt(fmt: u32, has_bgra: bool) -> Option<(i32, u32, u32, Swz, usize)> {
     const GL_UNSIGNED_SHORT_5_6_5_: u32 = 0x8363;
     Some(match fmt {
         // a8r8g8b8 / x8r8g8b8 — LE bytes B G R A|X
-        0x02028888 | 0x02020888 =>
-            if has_bgra { (GL_RGBA_ as i32, GL_BGRA_EXT, GL_UNSIGNED_BYTE_, Swz::Noop, 4) }
+        // ES2 requires internalformat == format: BGRA_EXT is legal for both
+        // when GL_EXT_texture_format_BGRA8888 is present.
+        0x20028888 | 0x20020888 =>
+            if has_bgra { (GL_BGRA_EXT as i32, GL_BGRA_EXT, GL_UNSIGNED_BYTE_, Swz::Noop, 4) }
             else { (GL_RGBA_ as i32, GL_RGBA_, GL_UNSIGNED_BYTE_, Swz::Swap02, 4) },
         // a8b8g8r8 / x8b8g8r8 — LE bytes R G B A|X
-        0x02038888 | 0x02030888 =>
+        0x20038888 | 0x20030888 =>
             (GL_RGBA_ as i32, GL_RGBA_, GL_UNSIGNED_BYTE_, Swz::Noop, 4),
         // b8g8r8a8 / b8g8r8x8 — LE bytes A|X R G B
-        0x02088888 | 0x02080888 =>
-            if has_bgra { (GL_RGBA_ as i32, GL_BGRA_EXT, GL_UNSIGNED_BYTE_, Swz::Rev4, 4) }
+        0x20048888 | 0x20040888 =>
+            if has_bgra { (GL_BGRA_EXT as i32, GL_BGRA_EXT, GL_UNSIGNED_BYTE_, Swz::Rev4, 4) }
             else { (GL_RGBA_ as i32, GL_RGBA_, GL_UNSIGNED_BYTE_, Swz::Shift1, 4) },
         // r8g8b8a8 / r8g8b8x8 — LE bytes A|X B G R
-        0x02098888 | 0x02090888 =>
+        0x20058888 | 0x20050888 =>
             (GL_RGBA_ as i32, GL_RGBA_, GL_UNSIGNED_BYTE_, Swz::Rev4, 4),
         // r5g6b5
-        0x01020565 =>
+        0x10020565 =>
             (GL_RGB_ as i32, GL_RGB_, GL_UNSIGNED_SHORT_5_6_5_, Swz::Noop, 2),
         _ => return None,
     })
@@ -469,6 +806,9 @@ pub fn x11_cpu_upload(e: &mut XEgl, ci: usize, pixels: Option<&[u8]>,
         glTexParameteri(GL_TEXTURE_2D_, 0x2803, 0x812F); // WRAP_T
         glTexImage2D(GL_TEXTURE_2D_, 0, internal, w as i32, h as i32, 0,
                      gl_fmt, gl_ty, packed.as_ptr() as *const c_void);
+        let sum: u64 = packed.iter().step_by(4096).map(|&b| b as u64).sum();
+        eprintln!("[cpu] upload ci={ci} {w}x{h} bytes={} checksum={sum} glerr={:#x}",
+                  packed.len(), glGetError());
     }
     head.w = w as i32;
     head.h = h as i32;
@@ -584,6 +924,14 @@ unsafe fn paint(e: &mut XEgl, rects: &[(i32, i32, i32, i32)], geom: (i32, i32),
             glVertexAttribPointer(pa2 as u32, 2, 0x1406, 0, 16, quad.as_ptr() as *const c_void);
             glVertexAttribPointer(pu2 as u32, 2, 0x1406, 0, 16, quad.as_ptr().offset(2) as *const c_void);
             glDrawArrays(0x0005, 0, 4);
+            if head.kind_cpu {
+                static DRW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let n = DRW.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if n % 240 == 1 {
+                    eprintln!("[cpu] draw ci={i} rect={rx},{ry} {rw}x{rh} img={}x{} glerr={:#x}",
+                              head.w, head.h, glGetError());
+                }
+            }
         };
         if need.is_empty() {
             for i in 0..nh { draw_head(i); }

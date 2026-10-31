@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { defaultSpec } from "../libraries/vm-core/src/config/schema";
-import { buildArgs, guestCid, hostVirtFlag } from "../libraries/vm-core/src/qemu/args";
 import { vmPaths } from "../libraries/vm-core/src/paths";
+import { buildArgs, guestCid, hostVirtFlag, joinQemuArgs, splitQemuArgs } from "../libraries/vm-core/src/qemu/args";
 
 const env = { ldLibraryPath: "/opt/lib" };
 
@@ -159,5 +159,33 @@ describe("buildArgs", () => {
     test("owned persist drops -daemonize", () => {
         const a = build((s) => { s.persist = "owned"; });
         expect(a).not.toContain("-daemonize");
+    });
+
+    test("spec.qemu.extraArgs appends verbatim to the tail of argv", () => {
+        const a = build((s) => { s.qemu.extraArgs = ["-rtc", "base=localtime", "-boot", "menu=on"]; });
+        expect(a).toContain("-rtc\nbase=localtime");
+        expect(a).toContain("-boot\nmenu=on");
+    });
+});
+
+describe("splitQemuArgs/joinQemuArgs", () => {
+    test("splits on whitespace, groups on leading quotes", () => {
+        expect(splitQemuArgs("")).toEqual([]);
+        expect(splitQemuArgs("-rtc base=localtime")).toEqual(["-rtc", "base=localtime"]);
+        expect(splitQemuArgs(`-smbios "type=1,serial=some value" -boot menu=on`))
+            .toEqual(["-smbios", "type=1,serial=some value", "-boot", "menu=on"]);
+        expect(splitQemuArgs(`-append 'root=/dev/vda2 quiet'`))
+            .toEqual(["-append", "root=/dev/vda2 quiet"]);
+    });
+
+    test("an unterminated quote swallows the tail", () => {
+        expect(splitQemuArgs(`-x "tail rest`)).toEqual(["-x", "tail rest"]);
+    });
+
+    test("join quotes only whitespace-bearing args; split∘join is identity", () => {
+        expect(joinQemuArgs(["-rtc", "base=localtime"])).toBe("-rtc base=localtime");
+        expect(joinQemuArgs(["-smbios", "a b"])).toBe(`-smbios "a b"`);
+        const args = ["-rtc", "base=localtime", "-smbios", "type=1,serial=x y", "-boot", "menu=on"];
+        expect(splitQemuArgs(joinQemuArgs(args))).toEqual(args);
     });
 });

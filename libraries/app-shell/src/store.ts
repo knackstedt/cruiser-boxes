@@ -3,11 +3,10 @@
 // ============================================================================
 
 import { createStore } from "zustand/vanilla";
-import type { VmState } from "../../vm-core/src/lifecycle/vm";
 import { syncFormDefaults, type SyncFormKey } from "../../vm-core/src/config/sync-channels";
+import type { VmState } from "../../vm-core/src/lifecycle/vm";
 
-export type { VmState };
-export type { SyncFormKey };
+export type { SyncFormKey, VmState };
 
 /** The flat sync* fields — keys derive from SYNC_CHANNELS.formKey, so the
  *  create form and spec.sync can never drift apart. */
@@ -37,6 +36,21 @@ export interface VmSummary {
     memMiB: number;
     diskGiB: number;
     nestedVirt: boolean;           // spec.resources.nestedVirt
+    /** spec.resources.limits — host-side cgroup caps on QEMU (systemd --user
+     *  scope; boot-frozen). cpuQuota "50%" = half a core, "200%" = two;
+     *  memoryMax caps QEMU's RSS incl. guest RAM ("8G"); ioWeight 1-10000. */
+    limits: { cpuQuota?: string; memoryMax?: string; ioWeight?: number };
+    /** spec.security — swtpm + edk2 secure boot (boot-frozen). */
+    security: { tpm: boolean; secureBoot: boolean };
+    /** spec.display channel/device flags editable in the form (boot-frozen). */
+    dispFlags: { sound: boolean; microphone: boolean; clipboard: boolean; urlOpen: boolean };
+    vsock: boolean;                 // spec.network.vsock — vhost-vsock device
+    qemuArgs: string[];             // spec.qemu.extraArgs — raw argv escape hatch
+    hibernated: boolean;            // a pending hibernate.vmstate — Start resumes it
+    /** Live balloon readout (guest-visible MiB) — only fetched while running. */
+    memBalloonMiB?: number;
+    /** USB devices QEMU reports as passed through (info usb qmp ids). */
+    usbAttached?: { id: string; label: string }[];
     sshPort?: number;
     rdpPort?: number;
     provisioned?: string;          // method or undefined
@@ -89,6 +103,17 @@ export type CreateForm = SyncFormFields & {
     memMiB: number;
     diskGiB: number;
     nestedVirt: boolean;           // pass vmx/svm through — run KVM inside the guest
+    cpuQuota: string;              // resources.limits.cpuQuota — "50%", "" = uncapped
+    memMax: string;                // resources.limits.memoryMax — "8G", "" = uncapped
+    ioWeight: string;              // resources.limits.ioWeight — "1"-"10000", "" = default 100
+    qemuArgs: string;              // spec.qemu.extraArgs as one shell-lite string
+    tpm: boolean;                  // spec.security.tpm — swtpm 2.0
+    secureBoot: boolean;           // spec.security.secureBoot — edk2 secboot + SMM
+    sound: boolean;                // spec.display.sound — intel-hda guest audio
+    microphone: boolean;           // spec.display.microphone — hda-duplex mic in
+    clipboard: boolean;            // spec.display.clipboard — text clipboard sync
+    urlOpen: boolean;              // spec.display.urlOpen — guest links open on host
+    vsock: boolean;                // spec.network.vsock — vhost-vsock channel
     gpu: string;                   // venus|virgl|software
     swVk: boolean;                 // venus: expose host lavapipe (CPU Vulkan) to the guest
     headMode: string;              // fullscreen-monitor|windowed|virtual-desktop|app
@@ -281,6 +306,8 @@ export interface CruiserState {
     unlockPw: string;
     /** Detail-screen password reveal — keyed to the VM, cleared on nav. */
     pwReveal: { vm: string; pw: string } | null;
+    /** Live balloon target input on the vm detail screen (MiB, session only). */
+    memTarget: string;
     /** Home-list filter string — matched against name/state/mode/desc. */
     vmFilter: string;
     /** USB picker: show devices that lack host access too. */
@@ -340,6 +367,7 @@ export interface CruiserActions {
     setAutoSnapPrompt(p: AutoSnapPrompt | null): void;
     setUnlockPrompt(p: UnlockPrompt | null): void;
     setPwReveal(r: { vm: string; pw: string } | null): void;
+    setMemTarget(v: string): void;
     setVmFilter(v: string): void;
     toggleUsbBlocked(): void;
 }
@@ -354,6 +382,9 @@ const defaultLogs = (): LogsState => ({
 
 const defaultCreate = (): CreateForm => ({
     name: "", cpus: 4, memMiB: 8192, diskGiB: 100, nestedVirt: false,
+    cpuQuota: "", memMax: "", ioWeight: "", qemuArgs: "",
+    tpm: false, secureBoot: false,
+    sound: true, microphone: true, clipboard: true, urlOpen: true, vsock: true,
     gpu: "venus", swVk: false, headMode: "virtual-desktop", viewer: "dmabuf", persist: "daemonize",
     autostart: false, netMode: "nat",
     method: "cloudimg", distro: "ubuntu", release: "26.04", desktop: "gnome",
@@ -398,6 +429,7 @@ export function createCruiserStore() {
         unlockPrompt: null,
         unlockPw: "",
         pwReveal: null,
+        memTarget: "",
         vmFilter: "",
         usbShowBlocked: false,
         setRoute: (route, vm = null) => set({ route, selectedVm: vm, confirm: null, editVm: null, pwReveal: null, unlockPrompt: null, unlockPw: "" }),
@@ -424,6 +456,7 @@ export function createCruiserStore() {
         setAutoSnapPrompt: (autoSnapPrompt) => set({ autoSnapPrompt }),
         setUnlockPrompt: (unlockPrompt) => set({ unlockPrompt }),
         setPwReveal: (pwReveal) => set({ pwReveal }),
+        setMemTarget: (memTarget) => set({ memTarget }),
         setVmFilter: (vmFilter) => set({ vmFilter }),
         toggleUsbBlocked: () => set((s) => ({ usbShowBlocked: !s.usbShowBlocked })),
         toggleUsb: (key) => set((s) => ({
