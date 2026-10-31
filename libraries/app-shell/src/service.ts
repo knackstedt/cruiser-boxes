@@ -21,6 +21,7 @@ import { run, which } from "../../sys/src/exec";
 import { cpus, totalmem, homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { mark } from "./startup-profile";
 import { VmMetricsSampler } from "./metrics";
 import type { ActionState, CreateForm, DoctorRow, HostInfo, Store, VmSummary } from "./store";
@@ -158,7 +159,7 @@ export class CruiserService {
         st.setDesktops(desktops.map((d) => ({ index: d.index, name: d.name, current: d.current })), rows);
         this.usbToStore(usb);
         st.setSshKeys(sshKeys);
-        st.setHostRes({ cpus: cpus().length, memGiB: Math.round(totalmem() / 1073741824), diskFreeGiB: Math.round(freeGiB) });
+        st.setHostRes({ cpus: cpus().length, memGiB: Math.round(totalmem() / 1073741824), diskFreeGiB: Math.round(freeGiB), nestedOn: await kvmNestedOn() });
     }
 
     /** Native file dialogs via kdialog (KDE) or zenity — both optional. */
@@ -499,14 +500,14 @@ export class CruiserService {
         const nice = f.nice.trim();
         if (nice) {
             const n = Number(nice);
-            if (!Number.isInteger(n) || n < -20 || n > 19) return "nice must be an integer from -20 to 19";
+            if (!Number.isInteger(n) || n < -20 || n > 19) return "CPU priority must be an integer from -20 to 19";
             // 0 is the effective default — persisting it would flag an
             // untouched spec as changed vs the launch snapshot.
             if (n !== 0) out.nice = n;
         }
         if (f.ioClass !== "default") {
             if (!["realtime", "best-effort", "idle"].includes(f.ioClass))
-                return "I/O class must be default, realtime, best-effort or idle";
+                return "Disk priority must be default, realtime, best-effort or idle";
             out.ioClass = f.ioClass as VmSpec["resources"]["sched"]["ioClass"];
         }
         // ioPrio is only meaningful (and only rendered) for rt/be classes —
@@ -514,7 +515,7 @@ export class CruiserService {
         const ioPrio = f.ioPrio.trim();
         if (ioPrio && (out.ioClass === "realtime" || out.ioClass === "best-effort")) {
             const n = Number(ioPrio);
-            if (!Number.isInteger(n) || n < 0 || n > 7) return "I/O priority must be an integer from 0 to 7";
+            if (!Number.isInteger(n) || n < 0 || n > 7) return "Disk priority (0–7) must be an integer from 0 to 7";
             if (n !== 4) out.ioPrio = n;   // 4 = the class default
         }
         return out;
@@ -1430,6 +1431,16 @@ export class CruiserService {
         } catch { /* qemu-img unavailable — fall through to default */ }
         return { format: "qcow2", encrypted: false };
     }
+}
+
+/** Same probe doctor runs: the host kvm module's nested= parameter. */
+async function kvmNestedOn(): Promise<boolean> {
+    try {
+        const mod = ["kvm_intel", "kvm_amd"].find((m) => existsSync(`/sys/module/${m}/parameters/nested`));
+        if (!mod) return false;
+        const v = (await readFile(`/sys/module/${mod}/parameters/nested`, "utf8")).trim();
+        return v === "Y" || v === "1" || v === "y" || v.toLowerCase() === "true";
+    } catch { return false; }
 }
 
 /** Free GiB on the filesystem containing `dir` (via df; dir needn't exist). */

@@ -127,6 +127,27 @@ input:focus { border-color:#5ee6a8; outline:none; }
    colored fringes. */
 .opt.dim { background:#1b1b1b; color:#505050; border-color:#242424; }
 .opt.sm { padding:4px 9px; font-size:12px; }
+/* Single-select dropdown. blitz hit_inner only descends into a child when
+   the point lands inside the parent's own rect, scrollable overflow, or
+   stacking-context area — an abspos menu hanging outside .sel's box is
+   unreachable, so .selmenu is emitted as the LAST child of .content instead
+   (positioned, end of DOM → it paints and hit-tests above every row; no
+   z-index anywhere). It anchors in .content's scroll space via coordinates
+   measured by menu-toggle, so it scrolls with the form. Outside clicks
+   dismiss via the shell's event-path check — every element reports a click
+   event, so no click-eating backdrop layer is needed. */
+.sel { width:250px; }
+.selhead { display:flex; justify-content:space-between; align-items:center; gap:12px;
+           padding:7px 13px; border-radius:4px; font-size:13px; border:1px solid #303030;
+           background:#1b1b1b; color:#ececec; }
+.selhead:hover { border-color:#555555; }
+.sel[data-open="true"] .selhead { border-color:#5ee6a8; }
+.selcaret { font-size:10px; color:#666666; }
+.selmenu { position:absolute; background:#222222; border:1px solid #3d3d3d;
+           border-radius:4px; overflow:hidden; padding:3px 0; }
+.selitem { padding:7px 13px; font-size:13px; color:#939393; white-space:nowrap; }
+.selitem:hover { background:#2e2e2e; color:#ececec; }
+.selitem.on { color:#5ee6a8; font-weight:bold; }
 /* .tog marks the lone on/off switch — a track + knob so it reads as a
    switch, not a status badge or an option in a group. The ::before box is
    the knob; padding-left parks it on the off/on side so the state flip is
@@ -250,6 +271,8 @@ const HEAD_LABEL: Record<string, string> = {
     windowed: "windowed",
     app: "app-only",
 };
+/** spec.display.viewer → what the form calls it. */
+const VIEWER_LABEL: Record<string, string> = { dmabuf: "direct" };
 /** spec.persist → layman phrasing for the detail kv ("daemonize" means
  *  nothing to someone who didn't read the QEMU docs). */
 const PERSIST_LABEL: Record<string, string> = {
@@ -390,7 +413,7 @@ function vmRowInner(vm: VmSummary, s: CruiserState): string {
         ? [vm.sshPort && `ssh :${vm.sshPort}`, vm.rdpPort && `rdp :${vm.rdpPort}`]
             .filter(Boolean).join(" · ")
         : "";
-    const mode = [GPU_LABEL[vm.gpuMode] ?? vm.gpuMode, HEAD_LABEL[vm.headMode] ?? vm.headMode, vm.viewer, ports,
+    const mode = [GPU_LABEL[vm.gpuMode] ?? vm.gpuMode, HEAD_LABEL[vm.headMode] ?? vm.headMode, VIEWER_LABEL[vm.viewer] ?? vm.viewer, ports,
         vm.encrypt !== "off" ? `luks ${vm.encrypt}` : ""]
         .filter(Boolean).join(" · ");
     // Markup appended after esc(mode) — a colored "locked" badge, not text.
@@ -452,7 +475,7 @@ export function vmListInner(s: CruiserState): string {
     const q = s.vmFilter.trim().toLowerCase();
     const match = (vm: VmSummary) => !q ||
         [vm.name, vm.state, vm.description ?? "", GPU_LABEL[vm.gpuMode] ?? vm.gpuMode,
-         HEAD_LABEL[vm.headMode] ?? vm.headMode, vm.viewer].some((t) => t.toLowerCase().includes(q));
+         HEAD_LABEL[vm.headMode] ?? vm.headMode, VIEWER_LABEL[vm.viewer] ?? vm.viewer, vm.viewer].some((t) => t.toLowerCase().includes(q));
     const rows = s.vms.filter(match).map((vm) => ({ id: `vmrow-${vm.name}`, html: vmRowInner(vm, s) }));
     if (!rows.length) {
         return s.vms.length
@@ -467,7 +490,7 @@ function home(s: CruiserState): RouteBody {
     const q = s.vmFilter.trim().toLowerCase();
     const match = (vm: VmSummary) => !q ||
         [vm.name, vm.state, vm.description ?? "", GPU_LABEL[vm.gpuMode] ?? vm.gpuMode,
-         HEAD_LABEL[vm.headMode] ?? vm.headMode, vm.viewer].some((t) => t.toLowerCase().includes(q));
+         HEAD_LABEL[vm.headMode] ?? vm.headMode, VIEWER_LABEL[vm.viewer] ?? vm.viewer, vm.viewer].some((t) => t.toLowerCase().includes(q));
     const rows = s.vms.filter(match).map((vm) => ({ id: `vmrow-${vm.name}`, html: vmRowInner(vm, s) }));
     const head = `${unlockBanner(s)}${autoSnapBanner(s)}<div class="vmlist-head"><div class="h1">Virtual Machines</div>
         <div class="vmfilter"><span class="meta">filter</span>
@@ -494,11 +517,32 @@ function field(label: string, key: string, val: string | number, w = 220, tag = 
         <input${type ? ` type="${type}"` : ""} data-field="${esc(key)}" value="${esc(shown)}" style="width:${w}px">${tag}</div>`;
 }
 
-function optRow(label: string, key: string, cur: string, choices: [string, string][], action = "set-field", tag = ""): string {
-    return `<div class="row"><div class="lbl">${esc(label)}</div><div class="opts">${
-        choices.map(([v, l]) =>
-            `<div class="opt${cur === v ? " on" : ""}" data-action="${action}" data-field="${esc(key)}" data-value="${esc(v)}">${esc(l)}</div>`).join("")
-    }</div>${tag}</div>`;
+/** Single-select field as a dropdown — the head shows the current choice;
+ *  while s.openMenu matches `key` the option list is pushed into `menus`,
+ *  which the route appends at the END of .content so it hit-tests above
+ *  every row (see the .sel CSS — hit_inner can't reach abspos children
+ *  outside their parent's box). sx/sy are the head's .content scroll-space
+ *  coords measured on toggle. itemExtra appends extra attrs per item (the
+ *  vd picker's data-vd). */
+function selRow(label: string, key: string, cur: string, choices: [string, string][],
+    s: CruiserState, menus: string[], action = "set-field", tag = "",
+    itemExtra?: (v: string) => string): string {
+    const curLabel = choices.find(([v]) => v === cur)?.[1] ?? cur;
+    const m = s.openMenu;
+    if (m?.key === key) {
+        const est = choices.length * 31 + 10;
+        const top = m.up ? m.sy - 4 - est : m.sy + m.h + 4;
+        menus.push(
+            `<div class="selmenu" style="left:${m.sx}px;top:${top}px;min-width:${m.w}px">` +
+            choices.map(([v, l]) =>
+                `<div class="selitem${cur === v ? " on" : ""}" data-action="${action}" data-field="${esc(key)}" data-value="${esc(v)}"${itemExtra?.(v) ?? ""}>${esc(l)}</div>`).join("") +
+            `</div>`);
+    }
+    return `<div class="row"><div class="lbl">${esc(label)}</div>
+        <div class="sel" data-open="${m?.key === key ? "true" : "false"}">
+            <div class="selhead" data-action="menu-toggle" data-menu="${esc(key)}" data-count="${choices.length}">
+                <span>${esc(curLabel)}</span><span class="selcaret">▾</span></div>
+        </div>${tag}</div>`;
 }
 
 function checkRow(label: string, key: string, cur: boolean, hint = "", tag = ""): string {
@@ -508,9 +552,9 @@ function checkRow(label: string, key: string, cur: boolean, hint = "", tag = "")
 }
 
 const PERSIST_HINT: Record<string, string> = {
-    daemonize: "keeps running after you close cruiser — reattach anytime",
-    owned: "shuts down when you close cruiser — the VM and its disk are kept",
-    ephemeral: "shuts down and deletes the VM (config + disk) when you close cruiser",
+    daemonize: "the VM keeps running — reopen cruiser to get back to it",
+    owned: "the VM shuts down with the app — nothing is lost",
+    ephemeral: "the VM and its disk are deleted — for throwaway testing",
 };
 
 /* Inline validation hints. The create form writes field values straight to
@@ -548,6 +592,9 @@ export function createHints(s: CruiserState): Record<string, string> {
 function create(s: CruiserState): string {
     const f = s.create;
     const r = s.hostRes;
+    // selRow pushes the open dropdown's overlay list here — appended last so
+    // it paints + hit-tests above the whole form.
+    const menus: string[] = [];
     const editing = s.editVm !== null;
     const editTarget = editing ? s.vms.find((v) => v.name === s.editVm) : undefined;
     // Edit mode on a live VM: tag each field by whether it can apply now —
@@ -566,58 +613,59 @@ function create(s: CruiserState): string {
         <div class="opts">${(["MiB", "GiB"] as const).map((u) =>
             `<div class="opt${f.memUnit === u ? " on" : ""}" data-action="set-field" data-field="memUnit" data-value="${u}">${u}</div>`).join("")}</div>
         ${r ? `<div class="meta">of ${r.memGiB} GiB</div>` : ""}${aptag("boot")}</div>
+        <div class="hint">RAM the VM can use — it's off-limits to other apps while the VM runs.</div>
         <div id="hint-mem">${hintMem(s)}</div>`;
     const diskRow = `<div class="row"><div class="lbl">Disk GiB</div>
         <input data-field="diskGiB" value="${f.diskGiB}" style="width:100px">
         ${editing ? `<div class="meta">grow-only</div>` : r ? `<div class="meta">of ${r.diskFreeGiB} GiB free</div>` : ""}${aptag("boot")}</div>
+        <div class="hint">size of the VM's hard drive — you can grow it later, never shrink it.</div>
         <div id="hint-disk">${hintDisk(s)}</div>
         ${editing ? "" : `<div class="row"><div class="lbl">Disk location</div>
         <div class="meta" style="width:280px">${esc(f.diskDir || `${VMS_DIR}/‹name›/`)}</div>
-        <div class="opt" data-action="pick-disk-dir">Choose…</div></div>`}`;
+        <div class="opt" data-action="pick-disk-dir">Choose…</div></div>
+        <div class="hint">which drive the VM's disk file lands on.</div>`}`;
     const vmDirRow = `<div class="row"><div class="lbl">VM location</div>
         <div class="meta" style="width:280px">${esc(f.vmDir || VMS_DIR)}</div>
         <div class="opt" data-action="pick-vm-dir">Choose…</div></div>
         <div class="hint">${editing
-            ? "where the VM dir actually lives — moving it to another disk needs the VM stopped"
-            : "the whole VM dir (config, disk image, secrets) goes under ‹dir›/‹name› — pick another drive to keep big VMs off the system disk"}</div>`;
+            ? "the folder holding everything for this VM — moving it to another drive needs the VM stopped"
+            : "the folder that holds everything for this VM — point it at a bigger drive if your system disk is small"}</div>`;
     const vdPicker = f.headMode === "virtual-desktop" && s.desktops.length
-        ? `<div class="row"><div class="lbl">Desktop</div>
-            <div class="opt${f.vd === 0 ? " on" : ""}" data-action="set-vd" data-vd="0">auto</div>
-            <div class="vdgrid" style="grid-template-columns:repeat(${Math.max(1, Math.ceil(s.desktops.length / Math.max(1, s.vdRows)))},auto)">
-            ${s.desktops.map((d) =>
-                `<div class="opt${f.vd === d.index ? " on" : ""}" data-action="set-vd" data-vd="${d.index}">${esc(d.name || String(d.index))}${d.current ? "•" : ""}</div>`).join("")}
-            </div>${aptag("live")}</div>
-            <div class="hint">the viewer window lands on this desktop (${s.vdRows > 1 ? `${s.vdRows}×${Math.ceil(s.desktops.length / s.vdRows)} grid` : "row"} layout) — • is where you are now</div>`
+        ? selRow("Desktop", "vd", String(f.vd),
+            [["0", "auto"], ...s.desktops.map((d): [string, string] =>
+                [String(d.index), `${d.name || String(d.index)}${d.current ? " •" : ""}`])],
+            s, menus, "set-vd", aptag("live"), (v) => ` data-vd="${esc(v)}"`) +
+            `<div class="hint">which virtual desktop the VM's screen lands on — • marks the one you're using now</div>`
         : "";
     const kdeOk = f.distro in DISTROS && supportsKrdp(f.distro as keyof typeof DISTROS, f.release);
     const provRows =
         f.method === "cloudimg" ? `
-            <div class="hint">A <b>cloud image</b> is a prebuilt disk published by the distro — cruiser downloads it once, resizes it to your disk size, and injects a cloud-init seed that creates your user, sets the password, and enables SSH/RDP. Fastest path to a working VM — no installer.</div>
-            ${optRow("Guest OS", "distro", f.distro, [["ubuntu", "Ubuntu"], ["debian", "Debian"], ["fedora", "Fedora"]], "set-distro")}
-            ${optRow("Release", "release", f.release, (DISTROS[f.distro as keyof typeof DISTROS]?.releases ?? []).map((r) => [r.id, r.label] as [string, string]))}` :
+            <div class="hint">cruiser downloads a ready-made disk from the distro, resizes it to your Disk GiB, and sets up your user — the fastest way to a working VM.</div>
+            ${selRow("Guest OS", "distro", f.distro, [["ubuntu", "Ubuntu"], ["debian", "Debian"], ["fedora", "Fedora"]], s, menus, "set-distro")}
+            ${selRow("Release", "release", f.release, (DISTROS[f.distro as keyof typeof DISTROS]?.releases ?? []).map((r) => [r.id, r.label] as [string, string]), s, menus)}` :
         f.method === "iso" ? `${field("ISO path or URL", "iso", f.iso, 340)}
-            <div class="hint">Boots the ISO with a NoCloud autoinstall seed — slower (~20 min) but runs the real installer unattended. Ubuntu ISOs only for now.</div>` :
+            <div class="hint">runs the distro's real installer for you — slower (~20 min). Ubuntu ISOs only for now.</div>` :
         f.method === "imported" ? `
             <div class="row"><div class="lbl">Image file</div>
                 <input data-field="importPath" value="${esc(f.importPath)}" style="width:340px">
                 <div class="opt" data-action="pick-import">Browse…</div></div>
-            <div class="hint">Boots an existing disk image in place (qcow2/raw/vmdk/… — format is auto-detected). Use for images you've already installed elsewhere.</div>` : "";
+            <div class="hint">runs a disk image you already have (qcow2/raw/vmdk — auto-detected). For VMs you installed elsewhere.</div>` : "";
     const syncSection = `<div class="h2">Host → guest sync ${aptag("live")}</div>
-        <div class="hint" style="margin-left:0">mirrored into the guest while a viewer session is open (and at provision). Turn off per channel.</div>
-        ${checkRow("Dark / light theme", "syncTheme", f.syncTheme, "xdg portal color-scheme — watches host changes live")}
-        ${checkRow("Accent color", "syncAccent", f.syncAccent, "portal accent-color → nearest GNOME accent / KDE AccentColor")}
-        ${checkRow("Contrast", "syncContrast", f.syncContrast, "portal high-contrast preference")}
-        ${checkRow("Timezone", "syncTimezone", f.syncTimezone, "host tz → guest timedatectl — follows laptop travel")}
-        ${checkRow("Locale", "syncLocale", f.syncLocale, "host LANG → guest localectl")}
-        ${checkRow("Keyboard layout", "syncKeyboard", f.syncKeyboard, "host X11 keymap → guest input sources")}
-        ${checkRow("Monitor topology", "syncMonitors", f.syncMonitors, "host layout + scale → guest monitors.xml (GNOME guests)")}
-        ${checkRow("Display scale", "syncScale", f.syncScale, "host display scale → guest monitor scale + font DPI")}
-        ${checkRow("Host wallpaper", "syncHostWallpaper", f.syncHostWallpaper, "host's wallpaper as the composite source — an explicit wallpaper path always wins")}
-        ${checkRow("Share mounts", "syncShares", f.syncShares, "reconciles the shared-folders fstab inside the guest whenever the share list changes")}
-        ${checkRow("Git identity", "syncGit", f.syncGit, "pushes host ~/.gitconfig user.name/email into the guest")}
-        ${checkRow("Proxy settings", "syncProxy", f.syncProxy, "pushes host proxy config (gsettings/kioslaverc + /etc/environment) into the guest")}
-        ${checkRow("Custom CA roots", "syncCa", f.syncCa, "pushes host /usr/local/share/ca-certificates + pki anchors into the guest trust store")}
-        ${checkRow("SSH agent", "syncAgent", f.syncAgent, "forwards an agent socket into the guest via ssh -R (viewer-session lifetime); pick keys for a dedicated agent, none picked = your session agent as-is")}
+        <div class="hint" style="margin-left:0">cruiser keeps these matching your host while a viewer is connected — untick anything the guest shouldn't follow.</div>
+        ${checkRow("Dark / light theme", "syncTheme", f.syncTheme, "the guest follows your dark/light mode")}
+        ${checkRow("Accent color", "syncAccent", f.syncAccent, "the guest's accent color matches the host's")}
+        ${checkRow("Contrast", "syncContrast", f.syncContrast, "the guest follows your high-contrast setting")}
+        ${checkRow("Timezone", "syncTimezone", f.syncTimezone, "the guest clock follows your timezone — handy when traveling")}
+        ${checkRow("Locale", "syncLocale", f.syncLocale, "the guest's language matches the host's")}
+        ${checkRow("Keyboard layout", "syncKeyboard", f.syncKeyboard, "typing works the same inside the VM as on the host")}
+        ${checkRow("Monitor topology", "syncMonitors", f.syncMonitors, "guest screens are arranged like your host's (GNOME guests)")}
+        ${checkRow("Display scale", "syncScale", f.syncScale, "the guest's UI size matches your screen scaling")}
+        ${checkRow("Host wallpaper", "syncHostWallpaper", f.syncHostWallpaper, "the guest desktop shows your wallpaper — one picked inside the guest still wins")}
+        ${checkRow("Share mounts", "syncShares", f.syncShares, "shared folders appear inside the guest automatically")}
+        ${checkRow("Git identity", "syncGit", f.syncGit, "git in the guest already knows your name and email")}
+        ${checkRow("Proxy settings", "syncProxy", f.syncProxy, "the guest goes through the same proxy as the host")}
+        ${checkRow("Custom CA roots", "syncCa", f.syncCa, "the guest trusts the same custom (e.g. work) certificates as the host")}
+        ${checkRow("SSH agent", "syncAgent", f.syncAgent, "git/ssh inside the guest can use your host's SSH keys while a viewer is connected — nothing is copied")}
         ${!f.syncAgent ? "" : `<div class="opts wrap" style="margin-left:140px">${[
             ...s.sshKeys.map((k) =>
                 `<div class="opt${f.agentKeys.includes(k.path) ? " on" : ""}" data-action="agentkey-toggle" data-key="${esc(k.path)}">${esc(k.label)}</div>`),
@@ -627,9 +675,9 @@ function create(s: CruiserState): string {
                 `<div class="opt on dim" data-action="agentkey-toggle" data-key="${esc(p)}">${esc(p)} <span class="meta">missing</span></div>`),
         ].join("") || `<div class="meta">no private keys detected under ~/.ssh</div>`}</div>
         <div class="hint" style="margin-left:140px">${f.agentKeys.length
-            ? "picked keys are loaded into a dedicated agent forwarded to this VM — passphrase-protected keys can't load unattended"
-            : "no keys picked — your session agent is forwarded as-is"}</div>`}
-        ${checkRow("Git SSH key", "syncGitKey", f.syncGitKey, "installs a host private key into the guest (credentials.gitSshKeyPath, else ~/.ssh/<git email>) + an ssh config block for the common forges")}`;
+            ? "these are the keys the guest can use — passphrase-protected ones can't be unlocked for you"
+            : "no keys picked — the guest uses whatever your session agent already holds"}</div>`}
+        ${checkRow("Git SSH key", "syncGitKey", f.syncGitKey, "copies one of your host SSH keys into the guest itself — when the guest should have a key of its own")}`;
     // Identical devices share a vid:pid:serial key — and the saved spec
     // can't tell them apart either — so collapse them into one chip with a
     // ×n badge instead of a row of indistinguishable duplicates.
@@ -652,7 +700,7 @@ function create(s: CruiserState): string {
                 usbBlocked.length
                     ? `<div class="opt${s.usbShowBlocked ? " on" : ""}" data-action="usb-blocked-toggle">${s.usbShowBlocked ? "hide devices without access" : `+ ${usbBlocked.length} more — no host access`}</div>`
                     : ""}</div>
-               <div class="hint" style="margin-left:0">selected devices are passed straight to the guest at boot — "no access" needs a udev rule or group fix</div>`
+               <div class="hint" style="margin-left:0;margin-top:8px">checked devices get plugged straight into the VM — "no access" needs a host permission fix (see doctor)</div>`
             : `<div class="meta">no USB devices found</div>`}`;
     // grouped devtools checklist — categories render in DEVTOOLS order, each
     // with an all/none toggle chip beside the header
@@ -665,17 +713,15 @@ function create(s: CruiserState): string {
             <div class="opts wrap" style="margin-left:140px">${items.map((t) =>
                 `<div class="opt${f.devtools.includes(t.id) ? " on" : ""}" data-action="devtools-toggle" data-key="${esc(t.id)}"
                      title="${esc(t.desc)}">${esc(t.label)} <span class="meta">${esc(t.desc)}</span></div>`).join("")}</div>`;
-        }).join("") + `<div class="hint">installs during guest setup — uncheck what you don't want.
-            distro packages where they exist; upstream installers/repos for the rest
-            (fnm, bun, hashicorp, github, microsoft, mongodb…). "Containers" includes
-            distrobox, which shells into other distros' packages.</div>`;
+        }).join("") + `<div class="hint">installed while the VM sets itself up — untick what you don't want.
+            "Containers" includes distrobox, which borrows other distros' apps.</div>`;
     const importSection = editing ? "" : `<div class="h2">Import a config</div>
         <div class="row"><div class="lbl">Gist or file</div>
             <input data-field="importRef" value="${esc(f.importRef)}" style="width:340px">
             <div class="opt" data-action="import-config">Import</div></div>
-        <div class="hint">a gist url/id or a local <b>*.cruiser.{yaml,toml,json}</b> doc creates the VM
-            straight from the config — ports re-allocate, everything else (resources, shares, sync
-            channels, os profile) comes along. Export a VM from its detail page.</div>`;
+        <div class="hint">paste a cruiser export (a gist link or a <b>*.cruiser.{yaml,toml,json}</b> file)
+            to recreate that VM here — its settings, shares and tweaks all come along.
+            Export lives on a VM's detail page.</div>`;
     return `<div class="crumb" data-action="nav" data-route="home">‹ VMs</div>
         <div class="h1">${editing ? `${esc(s.editVm ?? "")} <span class="meta" style="font-weight:normal">editing</span>` : "New VM"}</div>
         ${hostsum}
@@ -684,84 +730,105 @@ function create(s: CruiserState): string {
             ? `<div class="row"><div class="lbl">Name</div><div class="meta" style="color:#ececec">${esc(s.editVm ?? "")}</div></div>
         <div class="row"><div class="lbl">Description</div>
             <input data-field="vm-desc" value="${esc(s.vmDesc)}" style="width:320px">${aptag("live")}</div>
-        <div class="hint">exported with the config — a one-liner like "work dev box, cuda testing".</div>`
-            : field("Name", "name", f.name) + `<div id="hint-name">${hintName(s)}</div>`}
+        <div class="hint">a one-liner for your own notes — travels with the VM's config.</div>`
+            : field("Name", "name", f.name) + `<div class="hint">what the VM is called in the list and window titles.</div>
+        <div id="hint-name">${hintName(s)}</div>`}
         <div class="h2">Resources</div>
         ${field("vCPUs", "cpus", f.cpus, 80, aptag("boot"))}
+        <div class="hint">how many processor cores the VM can use at once — they're borrowed from the host.</div>
         <div id="hint-cpus">${hintCpus(s)}</div>
         ${memRow}
         ${diskRow}
         ${vmDirRow}
-        ${checkRow("Nested virtualization", "nestedVirt", f.nestedVirt, "pass the host's vmx/svm flag to the guest — run KVM inside the VM (needs the host kvm module's nested=1, see doctor)", aptag("boot"))}
-        ${field("QEMU nice", "nice", f.nice, 80, aptag("boot"))}
-        ${optRow("QEMU I/O class", "ioClass", f.ioClass, [["default", "default"], ["idle", "idle"], ["best-effort", "best-effort"], ["realtime", "realtime"]], "set-field", aptag("boot"))}
-        ${f.ioClass === "realtime" || f.ioClass === "best-effort" ? field("I/O priority", "ioPrio", f.ioPrio, 80, aptag("boot")) : ""}
-        <div class="hint">scheduling for the QEMU process — the I/O class covers virtiofsd too.
-            Lower numbers = higher priority; above default (nice &lt; 0, realtime, prio &lt; 4) needs root.</div>
+        ${checkRow("Nested virtualization", "nestedVirt", f.nestedVirt, s.hostRes && !s.hostRes.nestedOn
+            ? "lets you run VMs inside this VM — not enabled on this host (see doctor)"
+            : "lets you run VMs inside this VM — needs it turned on for the host too (see doctor)", aptag("boot"))}
+        ${f.nestedVirt && s.hostRes && !s.hostRes.nestedOn
+            ? `<div class="hint warn">nested virtualization isn't enabled on this host — the VM will fail to boot until you fix it (see doctor)</div>` : ""}
+        ${field("CPU priority", "nice", f.nice, 80, aptag("boot"))}
+        <div class="hint">how much CPU the VM gets when the host is busy — 0 shares fairly,
+            negative gives the VM more (needs admin rights), positive leaves more for your other apps.</div>
+        ${selRow("Disk priority", "ioClass", f.ioClass, [["default", "default"], ["idle", "idle"], ["best-effort", "best-effort"], ["realtime", "realtime"]], s, menus, "set-field", aptag("boot"))}
+        ${f.ioClass === "realtime" || f.ioClass === "best-effort" ? field("Priority (0–7)", "ioPrio", f.ioPrio, 80, aptag("boot")) : ""}
+        <div class="hint">how much disk time the VM (and its shared folders) get vs. other apps —
+            "idle" waits until nobody else wants the disk. Above default needs admin rights.${f.ioClass === "realtime" || f.ioClass === "best-effort" ? " The 0–7 number fine-tunes: 0 goes first." : ""}</div>
         ${editing ? "" : `<div class="h2">Disk encryption</div>
-        ${optRow("Encryption", "encrypt", f.encrypt, [["off", "off"], ["full", "full disk"], ["home", "/home only"]])}
-        <div class="hint">qcow2 LUKS — the image file is encrypted at rest and QEMU unlocks it with a
-            passphrase (the guest sees a plain disk). <b>full disk</b> encrypts the whole system image;
-            <b>/home only</b> keeps the system disk plaintext and adds a second encrypted volume
-            mounted at /home. Baked into the image — can't be changed after creation.</div>
+        ${selRow("Encryption", "encrypt", f.encrypt, [["off", "off"], ["full", "full disk"], ["home", "/home only"]], s, menus)}
+        <div class="hint">locks the VM's disk file so it can't be opened without a password —
+            <b>full disk</b> protects everything; <b>/home only</b> keeps the system readable and
+            protects just user files. Set once at creation — can't be changed later.</div>
         ${f.encrypt === "off" && f.method !== "imported" ? "" : `
-        ${f.method === "imported" ? `<div class="hint">importing an image? If it's already LUKS-encrypted it's detected
-            automatically — enter its disk password below so the VM can unlock it. Plaintext images stay plaintext
-            (encryption can't be retrofitted).</div>` : ""}
-        ${f.method === "imported" ? "" : optRow("Key storage", "keyStore", f.keyStore, [["store", "remember"], ["prompt", "ask each time"]])}
+        ${f.method === "imported" ? `<div class="hint">importing an already-encrypted image? it's detected
+            automatically — enter its password below. Plain images stay plain; encryption can't be added later.</div>` : ""}
+        ${f.method === "imported" ? "" : selRow("Key storage", "keyStore", f.keyStore, [["store", "remember"], ["prompt", "ask each time"]], s, menus)}
         ${f.encrypt !== "off" && f.method !== "imported" ? `<div class="hint">${f.keyStore === "store"
-            ? "the passphrase is kept in the VM's secrets/ dir (0600) — the VM boots unattended"
-            : "nothing is kept on disk — starting, cloning, and snapshotting each ask for the passphrase"}</div>` : ""}
+            ? "the VM boots without asking — the password is saved in the VM's own folder (locked to your user)"
+            : "nothing is saved — starting, cloning, or snapshotting will each ask for the password"}</div>` : ""}
         ${f.encrypt === "home" && f.method !== "imported" ? field("Home disk GiB", "homeGiB", f.homeGiB, 80) : ""}
+        ${f.encrypt === "home" && f.method !== "imported" ? `<div class="hint">size of the encrypted home volume.</div>` : ""}
         ${field("Disk password", "diskPassword", f.diskPassword, 220, "", "password")}
         ${f.encrypt !== "off" || f.method !== "imported" ? field("Repeat", "diskPassword2", f.diskPassword2, 220, "", "password") : ""}
         <div id="hint-pw2">${hintPw2(s)}</div>
-        <div class="hint">unlocks the qcow2 image itself — separate from the guest login below, and
-            <b>not recoverable</b> if lost.</div>`}`}
+        <div class="hint">this password locks the disk file itself — separate from the guest login below,
+            and <b>there's no recovery</b> if you lose it.</div>`}`}
         <div class="h2">Graphics &amp; display</div>
-        ${optRow("GPU mode", "gpu", f.gpu, [["venus", "Venus (Vulkan)"], ["virgl", "virgl (GL)"], ["software", "software"]], "set-field", aptag("boot"))}
-        ${f.gpu === "venus" ? checkRow("Host software Vulkan", "swVk", f.swVk, "expose the host's lavapipe (CPU renderer) to the guest — off keeps software Vulkan on the guest's own lavapipe", aptag("boot")) : ""}
-        ${optRow("Viewer", "viewer", f.viewer, [["dmabuf", "dmabuf"], ["rdp", "rdp"]], "set-field", aptag("boot"))}
+        ${selRow("GPU mode", "gpu", f.gpu, [["venus", "Venus (Vulkan)"], ["virgl", "virgl (GL)"], ["software", "software"]], s, menus, "set-field", aptag("boot"))}
+        <div class="hint">how the VM draws graphics — <b>venus</b> is the best pick: fastest, and built for
+            the direct viewer. <b>virgl</b> is the fallback when venus misbehaves on your GPU/driver.
+            software renders on the CPU: slow, but works everywhere.${f.gpu === "software"
+            ? " <b>software can't use the direct viewer — Viewer is switched to rdp.</b>" : ""}</div>
+        ${f.gpu === "venus" ? checkRow("Host software Vulkan", "swVk", f.swVk, "shares the host's CPU-rendered Vulkan with the guest — leave off unless you know you need it", aptag("boot")) : ""}
+        ${selRow("Viewer", "viewer", f.viewer, [["dmabuf", "direct"], ["rdp", "rdp"]], s, menus, "set-field", aptag("boot"))}
         <div class="hint">${f.viewer === "dmabuf"
-            ? "the guest's display straight on your screen — lower latency than rdp; needs a venus/virgl GPU"
-            : "remote-desktop into the guest — works with any GPU mode"}</div>
-        ${optRow("Head mode", "headMode", f.headMode, [["virtual-desktop", "virtual desktop"], ["fullscreen-monitor", "fullscreen monitor"], ["windowed", "windowed"], ["app", "app-only"]], "set-field", aptag("live"))}
+            ? "the guest's screen shows up as a window on your desktop — the fastest option, needs a real GPU mode"
+            : "connects like remote desktop — works with any GPU mode, slightly more lag"}</div>
+        ${selRow("Viewer mode", "headMode", f.headMode, [["virtual-desktop", "virtual desktop"], ["fullscreen-monitor", "fullscreen monitor"], ["windowed", "windowed"], ["app", "app-only"]], s, menus, "set-field", aptag("live"))}
+        <div class="hint">where the VM's screen shows up — a whole virtual desktop, a fullscreen monitor,
+            a regular window, or only its app windows.</div>
         ${vdPicker}
-        ${optRow("Persist", "persist", f.persist, [["daemonize", "survives app"], ["owned", "stops with app"], ["ephemeral", "deleted on exit"]], "set-field", aptag("live"))}
+        ${selRow("When cruiser closes", "persist", f.persist, [["daemonize", "survives app"], ["owned", "stops with app"], ["ephemeral", "deleted on exit"]], s, menus, "set-field", aptag("live"))}
         <div class="hint">${PERSIST_HINT[f.persist] ?? ""}</div>
-        ${checkRow("Start on boot", "autostart", f.autostart, "start with the app and at login — headless (open a console yourself); a systemd --user unit is installed while any VM is flagged", aptag("live"))}
-        ${optRow("Network", "netMode", f.netMode, [["nat", "nat"], ["restricted", "restricted"], ["isolated", "isolated"], ["vmnet", "vmnet"]], "set-field", aptag("boot"))}
+        ${checkRow("Start on boot", "autostart", f.autostart, "boots this VM in the background when you log in — no window until you open one", aptag("live"))}
+        ${selRow("Network", "netMode", f.netMode, [["nat", "nat"], ["restricted", "restricted"], ["isolated", "isolated"], ["vmnet", "vmnet"]], s, menus, "set-field", aptag("boot"))}
         <div class="hint">${{
-            nat: "full outbound internet + LAN via slirp, with port forwards into the guest.",
-            restricted: "sandbox: the guest can only talk to the host — no internet/LAN egress. ssh + forwards still work.",
-            isolated: "no network at all — QGA, serial console and vsock still reach the guest; ssh and app-mode don't.",
-            vmnet: "nat plus a second NIC on a layer-2 net shared by every vmnet VM on this host (multi-VM labs — no DHCP, use link-local or static IPs).",
+            nat: "normal internet + LAN for the VM — you can also forward ports into it.",
+            restricted: "the VM can only reach this host — no internet, no LAN. SSH and port forwards still work.",
+            isolated: "completely offline — nothing gets in or out except the console.",
+            vmnet: "like nat, plus VMs marked vmnet can see each other — for multi-VM labs.",
         }[f.netMode] ?? ""}</div>
         <div class="h2">Snapshots ${aptag("live")}</div>
-        ${optRow("Auto snapshot", "snapAuto", f.snapAuto, [["off", "off"], ["daily", "daily"], ["weekly", "weekly"], ["monthly", "monthly"]])}
+        ${selRow("Auto snapshots", "snapAuto", f.snapAuto, [["off", "off"], ["daily", "daily"], ["weekly", "weekly"], ["monthly", "monthly"]], s, menus)}
+        <div class="hint">cruiser keeps rollback points of the VM's disk automatically — restore from the VM's page.</div>
         ${f.snapAuto === "off" ? "" : `
-        ${optRow("Take it", "snapTrigger", f.snapTrigger, [["stop", "after shutdown"], ["start", "before start"], ["both", "both"]])}
-        ${field("Keep", "snapKeep", f.snapKeep, 80)}
-        <div class="hint">auto snapshots are named <b>auto-*</b> and rotate down to the keep count — manual snapshots are never pruned. Only a clean edge can snapshot (qemu-img needs the disk offline): a kill or a host power loss can't.</div>`}
+        ${selRow("When", "snapTrigger", f.snapTrigger, [["stop", "after shutdown"], ["start", "before start"], ["both", "both"]], s, menus)}
+        ${field("Keep last", "snapKeep", f.snapKeep, 80)}
+        <div class="hint">older auto snapshots are deleted past this count — snapshots you take yourself are
+            never touched. A snapshot can only happen while the VM is fully off: a crash or host power
+            loss means none is captured.</div>`}
         ${editing ? "" : `<div class="h2">Provisioning</div>
-        ${optRow("Method", "method", f.method, [["none", "none"], ["cloudimg", "cloud image"], ["iso", "ISO autoinstall"], ["imported", "import existing"]])}
+        ${selRow("Install method", "method", f.method, [["none", "none"], ["cloudimg", "cloud image"], ["iso", "ISO autoinstall"], ["imported", "import existing"]], s, menus)}
+        <div class="hint">how the OS gets onto the VM — cloud image is the fast path, none leaves a blank machine.</div>
         ${provRows}
         ${f.method === "none" ? "" : `<div class="h2">Guest software</div>
-        ${optRow("Desktop", "desktop", f.desktop, [["gnome", "GNOME"], ["kde", "KDE Plasma"]])}
+        ${selRow("Desktop", "desktop", f.desktop, [["gnome", "GNOME"], ["kde", "KDE Plasma"]], s, menus)}
+        <div class="hint">the desktop inside the VM — GNOME is the safe default.</div>
         ${f.method === "cloudimg" && f.desktop === "kde" && !kdeOk ? `<div class="hint">KDE needs a guest release that ships krdp — ${esc(f.distro)} ${esc(f.release)} doesn't have one; pick a newer release.</div>` : ""}
-        ${optRow("Browser", "browser", f.browser, [["none", "none"], ["firefox", "Firefox"], ["chrome", "Chrome"], ["chromium", "Chromium"], ["vivaldi", "Vivaldi"], ["brave", "Brave"]])}
-        <div class="hint">installed via Flathub</div>
-        ${checkRow("Snap support", "snap", f.snap, "off → flatpak is the only app channel")}
-        ${checkRow("Extra fonts", "extraFonts", f.extraFonts, "CJK + MS core fonts on top of the base bundle")}
-        ${checkRow("Autologin", "autologin", f.autologin, "boot straight into the desktop — KDE needs this for RDP (krdpserver runs in the user session)")}
-        ${optRow("Preset", "preset", f.preset, [["standard", "Standard"], ["developer", "Developer"]], "set-preset")}
+        ${selRow("Browser", "browser", f.browser, [["none", "none"], ["firefox", "Firefox"], ["chrome", "Chrome"], ["chromium", "Chromium"], ["vivaldi", "Vivaldi"], ["brave", "Brave"]], s, menus)}
+        <div class="hint">pre-installed in the guest — pick "none" if you'll install your own.</div>
+        ${checkRow("Snap support", "snap", f.snap, "also install apps from the snap store — off means flatpak apps only")}
+        ${checkRow("Extra fonts", "extraFonts", f.extraFonts, "CJK and Microsoft-compatible fonts for documents and web pages")}
+        ${checkRow("Autologin", "autologin", f.autologin, "skip the login screen and boot straight to the desktop — KDE's remote desktop also needs this")}
+        ${selRow("Preset", "preset", f.preset, [["standard", "Standard"], ["developer", "Developer"]], s, menus, "set-preset")}
+        <div class="hint">Developer adds a checklist of dev tools below; Standard is just the desktop.</div>
         ${devtoolsSection}
-        <div class="hint">The base bundle — desktop, RDP/audio/GPU stack, flatpak + software store, fonts — is always installed.</div>`}`}
+        <div class="hint">a working desktop with remote-viewer support, an app store and fonts is always included.</div>`}`}
         ${syncSection}
         ${usbSection}
         ${editing ? "" : `<div class="h2">Credentials</div>
         ${field("Username", "username", f.username)}
-        ${field("Password", "password", f.password, 220, "", "password")}`}
+        <div class="hint">the user account created inside the guest.</div>
+        ${field("Password", "password", f.password, 220, "", "password")}
+        <div class="hint">that account's password — cruiser keeps it so you don't have to type it.</div>`}
         ${vmUp
             ? `<div class="hint" style="margin-left:0">the VM is ${esc(editTarget!.state)} —
                 <span class="aptag boot">needs restart</span> fields are frozen into the running QEMU and apply at the next boot;
@@ -769,7 +836,8 @@ function create(s: CruiserState): string {
                     ? ` Already pending from earlier changes: <b>${esc(editTarget!.pendingRestart.join(", "))}</b>.` : ""}</div>` : ""}
         <div style="margin-top:18px">${editing
             ? btn("Save", "vm-save") + btn("Cancel", "nav", attr("route", "vm") + attr("vm", s.editVm ?? ""), "btn dim")
-            : btn("Create VM", "vm-create") + btn("Cancel", "nav", attr("route", "home"), "btn dim")}</div>`;
+            : btn("Create VM", "vm-create") + btn("Cancel", "nav", attr("route", "home"), "btn dim")}</div>
+        ${menus.join("")}`;
 }
 
 // ── vm detail ──
@@ -836,10 +904,10 @@ function vmDetail(s: CruiserState): RouteBody {
         ${autoSnapBanner(s)}
         ${unlockBanner(s)}
         <div class="kv">
-            <div class="k">resources</div><div>${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB · ${vm.diskGiB} GiB disk${vm.nestedVirt ? " · nested virt" : ""}${vm.nice !== undefined ? ` · nice ${vm.nice}` : ""}${vm.ioClass ? ` · io ${vm.ioClass}${vm.ioPrio !== undefined ? `/${vm.ioPrio}` : ""}` : ""}</div>
+            <div class="k">resources</div><div>${vm.cpus} vCPU · ${Math.round(vm.memMiB / 1024)} GiB · ${vm.diskGiB} GiB disk${vm.nestedVirt ? " · nested virt" : ""}${vm.nice !== undefined ? ` · cpu prio ${vm.nice}` : ""}${vm.ioClass ? ` · disk prio ${vm.ioClass}${vm.ioPrio !== undefined ? `/${vm.ioPrio}` : ""}` : ""}</div>
             ${diskDetail ? `<div class="k">disk usage</div><div>${esc(diskDetail)}</div>` : ""}
             <div class="k">location</div><div>${esc(vm.vmDir)}${kvTog("copy", "kv-copy", attr("copy", vm.vmDir))}${kvTog("open", "kv-open", attr("path", vm.vmDir))}</div>
-            <div class="k">gpu / head / viewer</div><div>${esc(vm.gpuMode)} / ${esc(vm.headMode)} / ${esc(vm.viewer)}</div>
+            <div class="k">gpu / head / viewer</div><div>${esc(GPU_LABEL[vm.gpuMode] ?? vm.gpuMode)} / ${esc(HEAD_LABEL[vm.headMode] ?? vm.headMode)} / ${esc(VIEWER_LABEL[vm.viewer] ?? vm.viewer)}</div>
             <div class="k">encryption</div><div>${vm.encrypt === "off" ? "off"
                 : `qcow2 LUKS — ${vm.encrypt === "full" ? "full disk" : "/home volume"}`
                   + ` · ${vm.keyStorage === "prompt" ? "passphrase not stored" : "key stored"}${locked ? ` · <span style="color:#f0c98a">locked</span>` : ""}`}</div>

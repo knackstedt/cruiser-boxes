@@ -199,6 +199,8 @@ export interface HostResources {
     memGiB: number;
     /** Free space (GiB) at the chosen disk directory. */
     diskFreeGiB: number;
+    /** The host kvm module's nested=1 — lets a guest run VMs of its own. */
+    nestedOn: boolean;
 }
 
 /** USB device row for the passthrough picker (subset of vm-core UsbDevice). */
@@ -291,6 +293,10 @@ export interface CruiserState {
     vmFilter: string;
     /** USB picker: show devices that lack host access too. */
     usbShowBlocked: boolean;
+    /** The open single-select dropdown: its field key + the head's rect in
+     *  document px (the overlay list renders at .content's end so it
+     *  hit-tests above every row). */
+    openMenu: { key: string; up: boolean; sx: number; sy: number; w: number; h: number } | null;
 }
 
 export interface ShareForm {
@@ -349,6 +355,7 @@ export interface CruiserActions {
     setPwReveal(r: { vm: string; pw: string } | null): void;
     setVmFilter(v: string): void;
     toggleUsbBlocked(): void;
+    setOpenMenu(m: CruiserState["openMenu"]): void;
 }
 
 export type CruiserStore = CruiserState & CruiserActions;
@@ -407,7 +414,8 @@ export function createCruiserStore() {
         pwReveal: null,
         vmFilter: "",
         usbShowBlocked: false,
-        setRoute: (route, vm = null) => set({ route, selectedVm: vm, confirm: null, editVm: null, pwReveal: null, unlockPrompt: null, unlockPw: "" }),
+        openMenu: null,
+        setRoute: (route, vm = null) => set({ route, selectedVm: vm, confirm: null, editVm: null, pwReveal: null, unlockPrompt: null, unlockPw: "", openMenu: null }),
         setVms: (vms) => set({ vms }),
         setStatus: (status, kind = "info") => set({ status, statusKind: kind }),
         setBusy: (busy) => set({ busy }),
@@ -438,6 +446,7 @@ export function createCruiserStore() {
         setPwReveal: (pwReveal) => set({ pwReveal }),
         setVmFilter: (vmFilter) => set({ vmFilter }),
         toggleUsbBlocked: () => set((s) => ({ usbShowBlocked: !s.usbShowBlocked })),
+        setOpenMenu: (openMenu) => set({ openMenu }),
         toggleUsb: (key) => set((s) => ({
             create: {
                 ...s.create,
