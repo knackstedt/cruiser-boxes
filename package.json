@@ -50,7 +50,9 @@
     "linux": {
       "target": [
         "deb",
-        "appimage"
+        "appimage",
+        "flatpak",
+        "rpm"
       ],
       "category": "Development;System;",
       "maintainer": "Andrew G. Knackstedt",
@@ -66,6 +68,28 @@
         "libvulkan1",
         "libusb-1.0-0",
         "libusbredirparser1t64"
+      ]
+    },
+    "flatpak": {
+      "finishArgs": [
+        "--socket=wayland",
+        "--socket=fallback-x11",
+        "--share=ipc",
+        "--device=all",
+        "--socket=pulseaudio",
+        "--socket=session-bus",
+        "--filesystem=home",
+        "--share=network"
+      ]
+    },
+    "rpm": {
+      "license": "Proprietary",
+      "depends": [
+        "glibc",
+        "libstdc++",
+        "vulkan-loader",
+        "libusb1",
+        "libusbredir"
       ]
     }
   }

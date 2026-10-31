@@ -46,11 +46,14 @@ export interface VmSummary {
     dispFlags: { sound: boolean; microphone: boolean; clipboard: boolean; urlOpen: boolean };
     vsock: boolean;                 // spec.network.vsock — vhost-vsock device
     qemuArgs: string[];             // spec.qemu.extraArgs — raw argv escape hatch
-    hibernated: boolean;            // a pending hibernate.vmstate — Start resumes it
+    hibernated: boolean;            // a pending suspend.mig/vmstate — Start resumes it
     /** Live balloon readout (guest-visible MiB) — only fetched while running. */
     memBalloonMiB?: number;
     /** USB devices QEMU reports as passed through (info usb qmp ids). */
     usbAttached?: { id: string; label: string }[];
+    nice?: number;                 // spec.resources.sched.nice
+    ioClass?: string;              // spec.resources.sched.ioClass — realtime|best-effort|idle
+    ioPrio?: number;               // spec.resources.sched.ioPrio
     sshPort?: number;
     rdpPort?: number;
     provisioned?: string;          // method or undefined
@@ -114,6 +117,9 @@ export type CreateForm = SyncFormFields & {
     clipboard: boolean;            // spec.display.clipboard — text clipboard sync
     urlOpen: boolean;              // spec.display.urlOpen — guest links open on host
     vsock: boolean;                // spec.network.vsock — vhost-vsock channel
+    nice: string;                  // spec.resources.sched.nice — prefilled "0" (device default)
+    ioClass: string;               // spec.resources.sched.ioClass — default|realtime|best-effort|idle
+    ioPrio: string;                // spec.resources.sched.ioPrio — prefilled "4" (class default)
     gpu: string;                   // venus|virgl|software
     swVk: boolean;                 // venus: expose host lavapipe (CPU Vulkan) to the guest
     headMode: string;              // fullscreen-monitor|windowed|virtual-desktop|app
@@ -273,7 +279,10 @@ export interface CruiserState {
     status: string;
     statusKind: StatusKind;
     busy: boolean;                 // an async action is in flight
-    action: ActionState | null;    // which action — renders on its VM's button
+    /** In-flight actions keyed by target VM ("" = global op) — concurrent
+     *  per-VM ops each keep their own row glyph; one finishing can't clear
+     *  another's. */
+    actions: Record<string, ActionState>;
     create: CreateForm;
     doctor: DoctorRow[] | null;
     host: HostInfo | null;
@@ -344,7 +353,8 @@ export interface CruiserActions {
     setVms(vms: VmSummary[]): void;
     setStatus(status: string, kind?: StatusKind): void;
     setBusy(busy: boolean): void;
-    setAction(a: ActionState | null): void;
+    setAction(a: ActionState): void;
+    clearAction(vm: string | null): void;
     setField<K extends keyof CreateForm>(k: K, v: CreateForm[K]): void;
     resetCreate(): void;
     setDoctor(rows: DoctorRow[] | null): void;
@@ -385,6 +395,7 @@ const defaultCreate = (): CreateForm => ({
     cpuQuota: "", memMax: "", ioWeight: "", qemuArgs: "",
     tpm: false, secureBoot: false,
     sound: true, microphone: true, clipboard: true, urlOpen: true, vsock: true,
+    nice: "0", ioClass: "default", ioPrio: "4",
     gpu: "venus", swVk: false, headMode: "virtual-desktop", viewer: "dmabuf", persist: "daemonize",
     autostart: false, netMode: "nat",
     method: "cloudimg", distro: "ubuntu", release: "26.04", desktop: "gnome",
@@ -408,7 +419,7 @@ export function createCruiserStore() {
         status: "ready",
         statusKind: "info",
         busy: false,
-        action: null,
+        actions: {},
         create: defaultCreate(),
         doctor: null,
         host: null,
@@ -436,7 +447,12 @@ export function createCruiserStore() {
         setVms: (vms) => set({ vms }),
         setStatus: (status, kind = "info") => set({ status, statusKind: kind }),
         setBusy: (busy) => set({ busy }),
-        setAction: (action) => set({ action }),
+        setAction: (a) => set((s) => ({ actions: { ...s.actions, [a.vm ?? ""]: a } })),
+        clearAction: (vm) => set((s) => {
+            const next = { ...s.actions };
+            delete next[vm ?? ""];
+            return { actions: next };
+        }),
         setField: (k, v) => set((s) => ({ create: { ...s.create, [k]: v } })),
         resetCreate: () => set({ create: defaultCreate() }),
         setDoctor: (doctor) => set({ doctor }),

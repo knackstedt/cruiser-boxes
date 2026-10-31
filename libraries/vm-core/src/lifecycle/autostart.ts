@@ -21,8 +21,11 @@ const UNIT_DIR = join(homedir(), ".config", "systemd", "user");
 const UNIT_PATH = join(UNIT_DIR, "cruiser-autostart.service");
 
 /** argv the unit invokes. The packaged binary IS the cli (arg1 dispatch);
- *  under bun/dev, execPath is the bun binary and argv[1] the script. */
+ *  under bun/dev, execPath is the bun binary and argv[1] the script.
+ *  Flatpak: the unit runs on the host — the in-sandbox execPath doesn't
+ *  exist there, so route through `flatpak run <app-id>`. */
 function cliArgv(): string[] {
+    if (process.env.FLATPAK_ID) return ["flatpak", "run", process.env.FLATPAK_ID];
     const exe = process.execPath;
     const script = process.argv[1];
     if (/(^|[/\\])bun([/\\]|$)/.test(exe) && script) return [exe, "run", script];

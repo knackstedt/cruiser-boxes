@@ -39,7 +39,19 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 
 - `.github/workflows/ci.yml` — typecheck + lint + `bun test tests/` on push/PR;
   reused by `release.yml` (tag `v*` → `draft release --target=linux` →
-  deb + AppImage uploaded to a GitHub release; `-` in the tag = prerelease).
+  deb + AppImage + flatpak + rpm uploaded to a GitHub release; `-` in the
+  tag = prerelease). Formats come from package.json build.linux.target
+  (the packager's KNOWN_FORMATS are dir/deb/appimage/flatpak/rpm — dir is
+  left out as it produces no uploadable artifact). The flatpak/rpm formats
+  need extra tooling the runner doesn't have — release.yml apt-installs
+  `flatpak flatpak-builder rpm cpio` and pulls
+  org.freedesktop.{Platform,Sdk}//25.08 from flathub before packaging.
+  build.flatpak.finishArgs replaces the packager defaults wholesale —
+  the set is defaults + `--device=all` (kvm + /dev/bus/usb passthrough),
+  `--socket=session-bus` (kglobalaccel/gsd shortcut registration, KDE
+  window rules via qdbus, `systemctl --user` for the autostart unit),
+  keeping wayland/x11/ipc/pulseaudio/home/network. build.rpm mirrors the
+  deb dep set under Fedora names (libusb1, libusbredir).
   ci.yml also runs `cargo check --locked` + `cargo clippy --locked` on
   `viewer-dd/` and `term-dd/`; release.yml runs `bun run viewer-dd:stage`,
   `bun run term-dd:stage` (same `cargo build --release --locked` →
@@ -59,7 +71,16 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   the CLI: native-entry.ts dispatches argv to src/cli.ts when arg1 is a cli
   area (`cruiser vm start x`, `cruiser doctor`), so OVMF_CODE/OVMF_VARS
   resolve system-first then opt's edk2 fds, and {cli} shortcuts expand to
-  the appdir launcher.
+  the appdir launcher. `cruiser` on PATH: deb/rpm ship /usr/bin/cruiser via
+  the packager; flatpak can't touch host PATH, so service.init (and `host
+  install-cli`) drops marker-checked wrappers exec'ing `flatpak run
+  dev.cruiser.app` into ~/.local/share/flatpak/exports/bin + ~/.local/bin
+  (host-cli.ts — also used for AppImage/dev via ~/.local/bin). Every
+  host-EXECUTED cli expansion checks FLATPAK_ID first and routes through
+  `flatpak run <id>` — session.ts cruiserCliArgv (escape shortcuts,
+  app-mode .desktop Exec lines) and autostart.ts cliArgv (the systemd
+  --user unit's ExecStart) — the in-sandbox launcher path is dead on the
+  host.
 - CI does NOT use the sibling engine checkout — deps are already npm specs;
   `.github/actions/downdraft-deps` can still pin `@downdraft/*` to a chosen
   published version (`downdraft-version` input — empty default = keep
@@ -122,6 +143,36 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   save and the cli falls back (explicit --viewer dmabuf --gpu software
   is a create error). Guests provision their RDP server either way, so
   an rdp flip needs no re-provision.
+  resources.limits {cpuQuota,memoryMax,ioWeight} wraps QEMU in a
+  `systemd-run --user --scope cruiser-<name>` cgroup; resources.sched
+  {nice,ioClass,ioPrio} prepends nice(1)/ionice(1) wrappers INSIDE that
+  scope (start() builds inner argv first); the io fields also wrap each
+  virtiofsd spawn (it does the real share I/O — nice stays QEMU-only).
+  Priority-raising values
+  (nice<0, io realtime, be prio<4) need CAP_SYS_NICE/SYS_ADMIN. ionice
+  EXITS WITHOUT EXEC on a denied ioprio_set (nice(1) warns + continues),
+  so the io wrap is `sh -c 'ionice … "$@" || exec "$@"'` (schedIoArgv) —
+  denied or missing ionice falls back to default io class + a log line;
+  nice is which()-gated. Both surfaces expose it — create/edit
+  "QEMU nice"/"QEMU I/O class"/"I/O priority" rows ("" = unset) and the
+  cli's --nice/--io-class/--io-prio.
+  `vm hibernate` is suspend-to-disk via QMP `migrate "exec:cat >
+  run/suspend.mig"` — NOT snapshot-save/internal snapshots (that path
+  tagged every disk, needed qcow2, and a mid-load kill rolled disk vs RAM
+  inconsistently → guest fs corruption). start() detects the file, adds
+  `-incoming "exec:cat …"`, polls query-migrate → cont → deletes it.
+  virtio-gpu's `conf.max_outputs` is VMSTATE_UINT32_EQUAL — the resume
+  argv MUST carry the save-time guestMonitors or the element load fails
+  ("1 != 3"); hibernate() stashes launch-monitors.json as
+  run/suspend-mons.json for exactly this. Gates: gpu.mode=software (virgl/
+  venus host GL state isn't serializable) and no mount-mode shares
+  (vhost-user-fs state lives in virtiofsd). A boot-frozen spec drift vs
+  run/launch-spec.json refuses resume with the diff named; `--discard-state`
+  cold-boots (discardHibernate also sweeps the legacy
+  run/hibernate.vmstate + "hibernate" disk tags — start() still resumes
+  that older format via -S + snapshot-load). waitJob() polls query-jobs
+  once after listener registration — a concluded JOB_STATUS_CHANGE event
+  emitted pre-registration is otherwise missed to the 10min timeout.
   `logs.ts` — the Logs screen's backends: run/ file tails (cruiser.log is
   tee'd from lifecycle + provision via `appendVmLog`; serial.log is attached
   on every boot) and guest journalctl with filters over QGA, falling back to
@@ -645,6 +696,15 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   wizard's edit mode owns only fields buffered into Save (description,
   resources, display, persist, sync channels, usb). Don't render
   instant-effect widgets inside the Save-gated form.
+  Every `<input data-field="x">` gets a ✕ clear chip via
+  `withClearButtons` in screens.ts — a regex wrap applied in
+  renderRouteParts to BOTH content markup and the regions/rowGroup patch
+  surface (one without the other strips chips on the first same-route
+  patch). The shell's `clear-field` action routes by field name exactly
+  like wireInputs (log-*/share-*/fwd-*/vm-desc/vm-filter/unlock-pw/
+  memInput/create) then attr-mutates value="" so the box empties even
+  while the press gate holds the notify render; numeric fields clear to
+  0 like keyboard-clearing does.
   `metrics.ts` — the running-VM sparklines (cpu/mem %; disk iops via QMP
   query-blockstats — no agent needed; net bytes/s via QGA /proc/net/dev;
   gpu util+mem via host `/proc/<qemu>/fdinfo` DRM client stats, absent in

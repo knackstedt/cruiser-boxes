@@ -210,6 +210,24 @@ const VmSpecObject = z.object({
             /** IOWeight — blkio scheduling weight 1..10000 (default 100). */
             ioWeight: z.number().int().min(1).max(10000).optional(),
         }).prefault({}),
+        /** Host-side scheduling of the QEMU process — nice(1)/ionice(1)
+         *  wrappers prepended to the launch argv (inside the systemd scope
+         *  when limits also apply). The io fields also wrap each virtiofsd
+         *  daemon — it does the real share I/O (nice stays QEMU-only).
+         *  Boot-frozen. Values that RAISE priority above default (nice<0,
+         *  io realtime, be prio<4) need CAP_SYS_NICE/SYS_ADMIN — an
+         *  unprivileged spawn still runs, just at default priority (a line
+         *  lands in cruiser.log). */
+        sched: z.object({
+            /** CPU niceness -20 (highest) .. 19 (lowest); unset = inherit. */
+            nice: z.number().int().min(-20).max(19).optional(),
+            /** ionice class — idle only gets disk time when nothing else
+             *  wants it; realtime preempts everything (needs root). */
+            ioClass: z.enum(["realtime", "best-effort", "idle"]).optional(),
+            /** ionice level 0 (highest) .. 7 — realtime/best-effort only;
+             *  unset = the class default (4 for best-effort). */
+            ioPrio: z.number().int().min(0).max(7).optional(),
+        }).prefault({}),
     }).prefault({}),
 
     disk: z.object({

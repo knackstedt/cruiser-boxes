@@ -135,7 +135,8 @@ export class CruiserShell {
         // Spinner ticks only while busy (status text itself re-renders the
         // overlay) — direct setText so it doesn't trip the RenderGate.
         this.spinTimer = setInterval(() => {
-            if (!this.store.getState().busy) return;
+            const now = this.store.getState();
+            if (!now.busy && !Object.keys(now.actions).length) return;
             // same teardown-race guard as pushRender — a dead panel's
             // setText must not kill the interval's process either
             try { this.panel?.setText("[data-spin]", SPIN[this.spinIdx++ % SPIN.length]!); } catch { /* panel gone */ }
@@ -212,6 +213,33 @@ export class CruiserShell {
             }
             if (k === "winDriver" && v === "yttrium") st().setField("gpu", "venus");
         });
+        // Input ✕ chips — routes by data-field exactly like wireInputs:
+        // "" to the same store slot the input binds to (numeric fields get
+        // 0, matching what keyboard-clearing writes), then a direct attr
+        // mutate so the box empties even while the press gate holds the
+        // store-notify re-render.
+        this.host.onAction("clear-field", (d) => {
+            const field = d.field;
+            if (!field) return;
+            const st = this.store.getState();
+            if (field.startsWith("log-")) {
+                (st.logs as unknown as Record<string, unknown>)[field.slice(4)] = "";
+                void svc.refreshLogs();
+            } else if (field === "vm-desc") st.setVmDesc("");
+            else if (field.startsWith("share-")) st.setShareForm({ [field.slice(6)]: "" } as never);
+            else if (field.startsWith("fwd-")) st.setFwdForm({ [field.slice(4)]: "" } as never);
+            else if (field === "vm-filter") {
+                st.setVmFilter("");
+                this.panel?.setInnerHtml("#vmlist", vmListInner(st));
+            } else if (field === "unlock-pw") this.store.setState({ unlockPw: "" });
+            else if (field === "memInput") st.create.memMiB = 0;
+            else {
+                const k = field as keyof CreateForm;
+                (st.create as unknown as Record<string, unknown>)[k] = NUM_FIELDS.has(k) ? 0 : "";
+            }
+            this.panel?.mutate([{ op: "attr", sel: `input[data-field=${field}]`, name: "value", value: "" }] as never);
+            this.patchHints();
+        });
         this.host.onAction("set-distro", (d) => {
             const fam = d.value as keyof typeof DISTROS;
             if (!DISTROS[fam]) return;
@@ -264,6 +292,9 @@ export class CruiserShell {
                 nestedVirt: vm.nestedVirt,
                 cpuQuota: vm.limits.cpuQuota ?? "", memMax: vm.limits.memoryMax ?? "",
                 ioWeight: vm.limits.ioWeight ? String(vm.limits.ioWeight) : "",
+                nice: String(vm.nice ?? 0),
+                ioClass: vm.ioClass ?? "default",
+                ioPrio: String(vm.ioPrio ?? 4),
                 // family only re-scopes which linux-only sections render —
                 // provisioning fields are frozen for an existing VM anyway.
                 distro: vm.osFamily,
@@ -343,7 +374,8 @@ export class CruiserShell {
             if (d.vm && this.armed(`share-rm:${d.vm}:${d.idx}`)) void svc.shareRemove(d.vm, Number(d.idx));
         });
         this.host.onAction("share-attr", (d) => {
-            if (d.vm && d.field) void svc.shareAttr(d.vm, Number(d.idx), String(d.field), String(d.value ?? ""));
+            if (!d.vm || !d.field) return;
+            void svc.shareAttr(d.vm, Number(d.idx), String(d.field), String(d.value ?? ""));
         });
         this.host.onAction("share-form", (d) => {
             if (!d.field) return;
@@ -523,7 +555,9 @@ export class CruiserShell {
      * topbar/content/footer via innerHtml — and routes that declare a fine
      * surface (regions/rowGroup) go one level deeper: contentPatch diffs
      * per-region markup and emits a single batched mutate() covering only
-     * the changed subtrees, so a metrics tick reparses the one row that
+     * the changed subtrees — attr/text-level ops when the structure is
+     * unchanged (keeping nodes alive so CSS transitions run), innerHtml
+     * when it isn't — so a metrics tick reparses the one row that
      * moved instead of the whole page. The .content scrollport node always
      * survives, so scroll offset persists with no restore scroll —
      * which means no scroll=0 frame between rebuild and restore (the

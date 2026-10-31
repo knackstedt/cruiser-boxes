@@ -52,6 +52,9 @@ usage: cruiser <area> <command> [args]
                    [--snap] [--xfonts] [--no-autologin] [--devtools toolchain,python,rust,…]
                    [--provision-script <host-path>]  run at end of guest-setup (root, idempotent)
                    [--cpu-quota 50%] [--mem-max 8G] [--io-weight 500]  cgroup caps (user scope)
+                   [--nice -20..19] [--io-class realtime|best-effort|idle]
+                   [--io-prio 0..7]                    QEMU process scheduling —
+                                                      raising above default needs root
                    [--tpm] [--secure-boot]          swtpm 2.0 + edk2 secboot firmware
                    [--qemu-args "…"]                  raw QEMU argv appended verbatim — escape
                                                       hatch for flags cruiser doesn't model
@@ -85,12 +88,16 @@ usage: cruiser <area> <command> [args]
   vm share rm <name> <tag|hostPath>
   vm filesync <name> [--watch]     run copy-mode shares now (--watch keeps syncing live)
   vm start <name...> [--all] [--mode <headmode>] [--no-view]   (1 name → auto-opens the viewer like the UI)
+                   [--discard-state]     drop a pending hibernate state and cold-boot
   vm stop <name...> [--all]             vm kill <name>
   vm reboot <name>                      vm suspend|resume <name>   (QGA reboot / QMP pause+cont)
   vm send-key <name> <qcode…>           inject a key combo via QMP — 'vm cad <name>' is
                                         ctrl+alt+del shorthand (hung guests, login screens)
-  vm hibernate <name>                   save RAM+disk state and power off — 'vm start'
-                                       resumes it (≈ guest-RAM-sized vmstate file)
+  vm hibernate <name>                   save RAM+device state and power off — 'vm start'
+                                       resumes it (needs gpu software; no mount shares;
+                                       ≈ guest-RAM-sized suspend.mig). A spec change
+                                       since the save blocks resume — 'vm start
+                                       --discard-state' cold-boots instead
   vm status <name>                      vm args <name>   (print QEMU argv)
   vm stats <name>                       point-in-time summary — state, guest OS, memory
                                        (incl. balloon), host+guest disk usage, ifaces
@@ -147,6 +154,9 @@ usage: cruiser <area> <command> [args]
            [--units]                    guest journal via QGA (ssh fallback on confined agents)
   host session                         detected DE/session + adapter caps
   host monitors|desktops               probe host display topology
+  host install-cli                     put a 'cruiser' command on PATH
+                                       (flatpak exports/bin + ~/.local/bin wrappers)
+  host uninstall-cli                   remove the installed cli wrappers
   usb ls                                usb attach <vm> <vid:pid>
   usb detach <vm> <id>
   usb auto <vm> <vid:pid[:serial]> [--boot]   hot-plug whenever seen (--boot = also at launch)
@@ -348,6 +358,14 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             const cpuQ = flagVal("--cpu-quota"); if (cpuQ) spec.resources.limits.cpuQuota = cpuQ;
             const memM = flagVal("--mem-max"); if (memM) spec.resources.limits.memoryMax = memM;
             const ioW = num("--io-weight"); if (ioW) spec.resources.limits.ioWeight = ioW;
+            if (num("--nice") !== undefined) spec.resources.sched.nice = num("--nice")!;
+            const ioC = flagVal("--io-class");
+            if (ioC) {
+                const p = z.enum(["realtime", "best-effort", "idle"]).safeParse(ioC);
+                if (!p.success) { console.error(`bad --io-class '${ioC}' — expected realtime|best-effort|idle`); process.exit(2); }
+                spec.resources.sched.ioClass = p.data;
+            }
+            if (num("--io-prio") !== undefined) spec.resources.sched.ioPrio = num("--io-prio")!;
             if (has("--tpm")) spec.security.tpm = true;
             if (has("--secure-boot")) spec.security.secureBoot = true;
             const qargs = flagVal("--qemu-args");
@@ -440,6 +458,9 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
                 // Encrypted VMs need the passphrase materialized before QEMU —
                 // flag/env, then a tty prompt for key-storage=prompt VMs.
                 await ensureDiskKey(h);
+                // --discard-state: cold-boot past a saved hibernate state —
+                // drops the suspend.mig stream (+ legacy vmstate/disk tags).
+                if (has("--discard-state")) await h.discardHibernate();
                 if (!existsSync(h.diskPath())) {
                     await mkdir(h.paths.dir, { recursive: true });
                     console.log(`creating disk ${h.diskPath()} (${h.spec.disk.sizeGiB}G sparse)`);
@@ -573,7 +594,14 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
             console.log(`sent ${keys.join("+")}`);
             break;
         }
-        case "status": { const h = await needVm(args[0]); console.log(await h.probe()); break; }
+        case "status": {
+            const h = await needVm(args[0]);
+            const st = await h.probe();
+            console.log(st === "stopped" && h.hibernated()
+                ? "hibernated (saved state — 'vm start' resumes it)"
+                : st);
+            break;
+        }
         case "stats": {
             const h = await needVm(args[0]);
             const s = h.spec;
@@ -1321,6 +1349,21 @@ switch (area) {
             }
             case "monitors": console.log(JSON.stringify(await a.monitors(), null, 2)); break;
             case "desktops": console.log(JSON.stringify(await a.desktops(), null, 2)); break;
+            case "install-cli": {
+                const { installHostCli } = await import("../libraries/host-int/src/host-cli");
+                const r = await installHostCli();
+                r.installed.forEach((p) => console.log(`installed ${p}`));
+                r.notes.forEach((n) => console.log(n));
+                if (!r.installed.length && !r.notes.length) console.log("nothing to do");
+                break;
+            }
+            case "uninstall-cli": {
+                const { uninstallHostCli } = await import("../libraries/host-int/src/host-cli");
+                const rm = await uninstallHostCli();
+                console.log(rm.length ? `removed ${rm.length} wrapper(s)` : "no cli wrappers installed");
+                rm.forEach((p) => console.log(`  ${p}`));
+                break;
+            }
             default: usage();
         }
         break;

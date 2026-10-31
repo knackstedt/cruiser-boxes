@@ -7,6 +7,7 @@ import { readFile } from "node:fs/promises";
 import { cpus, homedir, totalmem } from "node:os";
 import { dirname, join } from "node:path";
 import { detectAdapter, detectSession } from "../../host-int/src/detect";
+import { flatpakId, installHostCli } from "../../host-int/src/host-cli";
 import { hostSshKeys } from "../../host-int/src/hoststate";
 import { defaultMountpoint, isMounted } from "../../host-int/src/mount";
 import { ViewerSession } from "../../host-int/src/session";
@@ -51,6 +52,13 @@ export class CruiserService {
     private busyVms = new Set<string>();
     private metrics = new VmMetricsSampler();
     private refreshing = false;
+    /** A refresh requested mid-pass reruns once the current one lands —
+     *  post-action refreshes must never be dropped onto the 3s poll. */
+    private refreshAgain = false;
+    /** VMs mid graceful-shutdown drain — QEMU still answers probes as
+     *  "running", so the pill's "stopping" comes from here until the pid
+     *  dies (the renderer's transitional branch hides Start/Edit for it). */
+    private stopping = new Set<string>();
     private snapCache = new Map<string, { names: string[]; at: number }>();
     /** Set by the shell — drops a VM's terminal session+view on removal. */
     termDropped?: (name: string) => void;
@@ -83,6 +91,10 @@ export class CruiserService {
         // `vm autostart-run`. Prompt-locked disks park on the unlock
         // banner; low-space autosnap parks on the space prompt.
         this.autostartVms().catch(() => {});
+        // A flatpak can't ship a host PATH entry — drop the `cruiser` cli
+        // wrappers (flatpak exports/bin + ~/.local/bin) on every launch so a
+        // user delete self-heals. No-op outside flatpak.
+        if (flatpakId()) installHostCli().catch(() => {});
         // "follow" on the logs screen — re-fetch while it's open; a slow
         // journal fetch just overlaps the next tick (loading flag guards).
         this.logTimer = setInterval(() => {
@@ -223,7 +235,7 @@ export class CruiserService {
             return undefined;
         } finally {
             if (opts.vm) this.busyVms.delete(opts.vm); else st.setBusy(false);
-            st.setAction(null);
+            st.clearAction(opts.vm ?? null);
             this.refresh().catch(() => {});
         }
     }
@@ -245,6 +257,8 @@ export class CruiserService {
             vsock: s.network.vsock,
             qemuArgs: [...s.qemu.extraArgs],
             hibernated: h.hibernated(),
+            nice: s.resources.sched.nice, ioClass: s.resources.sched.ioClass,
+            ioPrio: s.resources.sched.ioPrio,
             sshPort: s.network.sshPort, rdpPort: s.network.rdpPort,
             provisioned: s.provisioned.method, persist: s.persist, autostart: s.autostart,
             netMode: s.network.mode,
@@ -294,12 +308,18 @@ export class CruiserService {
         return s;
     }
 
+    /** Socket-free row state: pidfile liveness + the local drain flag. */
+    private rowState(h: VmHandle): VmSummary["state"] {
+        if (!h.isRunning()) return "stopped";
+        return this.stopping.has(h.spec.name) ? "stopping" : "running";
+    }
+
     /** Push spec+pidfile rows immediately — scan/refresh refine them in
      *  place as the real probes land. */
     private paintFast(): void {
         const prev = new Map(this.store.getState().vms.map((v) => [v.name, v]));
         const vms = [...this.handles.values()].map((h) =>
-            this.carryPrev(this.baseSummary(h, h.isRunning() ? "running" : "stopped"), prev.get(h.spec.name)));
+            this.carryPrev(this.baseSummary(h, this.rowState(h)), prev.get(h.spec.name)));
         vms.sort((a, b) => a.name.localeCompare(b.name));
         this.store.getState().setVms(vms);
     }
@@ -307,6 +327,9 @@ export class CruiserService {
     private async summarize(h: VmHandle, onEarly?: (s: VmSummary) => void): Promise<VmSummary> {
         let state: VmSummary["state"] = "stopped";
         try { state = await h.probe(); } catch { state = "unknown"; }
+        // A guest mid shutdown-drain still probes "running" — the drain is
+        // only observable locally.
+        if (state !== "stopped" && this.stopping.has(h.spec.name)) state = "stopping";
         const base = this.baseSummary(h, state);
         onEarly?.(base);   // real state before the slow metrics/snaps pass
         const [mt, snaps, usbA, balloon] = await Promise.all([
@@ -344,30 +367,33 @@ export class CruiserService {
     private invalidateSnaps(name: string): void { this.snapCache.delete(name); }
 
     async refresh(): Promise<void> {
-        if (this.refreshing) return;
+        if (this.refreshing) { this.refreshAgain = true; return; }
         this.refreshing = true;
         try {
-            // Seed from the last summaries: rows update in place as each
-            // summary lands instead of disappearing behind the slow ones.
-            const acc = new Map(this.store.getState().vms.map((v) => [v.name, v]));
-            const live = new Set(this.handles.keys());
-            acc.forEach((_, k) => { if (!live.has(k)) acc.delete(k); });
-            const flush = () => this.store.getState().setVms(
-                [...acc.values()].sort((a, b) => a.name.localeCompare(b.name)));
-            const put = (h: VmHandle, s: VmSummary) => {
-                acc.set(h.spec.name, this.carryPrev(s, acc.get(h.spec.name)));
+            do {
+                this.refreshAgain = false;
+                // Seed from the last summaries: rows update in place as each
+                // summary lands instead of disappearing behind the slow ones.
+                const acc = new Map(this.store.getState().vms.map((v) => [v.name, v]));
+                const live = new Set(this.handles.keys());
+                acc.forEach((_, k) => { if (!live.has(k)) acc.delete(k); });
+                const flush = () => this.store.getState().setVms(
+                    [...acc.values()].sort((a, b) => a.name.localeCompare(b.name)));
+                const put = (h: VmHandle, s: VmSummary) => {
+                    acc.set(h.spec.name, this.carryPrev(s, acc.get(h.spec.name)));
+                    flush();
+                };
+                // Instant pass — spec + pidfile rows before any socket I/O.
+                this.handles.forEach((h) => acc.set(h.spec.name,
+                    this.carryPrev(this.baseSummary(h, this.rowState(h)), acc.get(h.spec.name))));
                 flush();
-            };
-            // Instant pass — spec + pidfile rows before any socket I/O.
-            this.handles.forEach((h) => acc.set(h.spec.name,
-                this.carryPrev(this.baseSummary(h, h.isRunning() ? "running" : "stopped"), acc.get(h.spec.name))));
-            flush();
-            // Progressive: probe lands the real state first, metrics/snaps
-            // fill in behind it (QGA can take ~2.5s on a dead agent).
-            await Promise.all([...this.handles.values()].map(async (h) => {
-                const s = await this.summarize(h, (early) => put(h, early)).catch(() => null);
-                if (s) put(h, s);
-            }));
+                // Progressive: probe lands the real state first, metrics/snaps
+                // fill in behind it (QGA can take ~2.5s on a dead agent).
+                await Promise.all([...this.handles.values()].map(async (h) => {
+                    const s = await this.summarize(h, (early) => put(h, early)).catch(() => null);
+                    if (s) put(h, s);
+                }));
+            } while (this.refreshAgain);
         } finally {
             this.refreshing = false;
         }
@@ -503,6 +529,34 @@ export class CruiserService {
         return lim;
     }
 
+    /** Parse the form's sched text inputs — "" = unset. Returns an error
+     *  string on a bad value so create/save can bail before touching spec. */
+    private parseSchedForm(f: CreateForm): VmSpec["resources"]["sched"] | string {
+        const out: VmSpec["resources"]["sched"] = {};
+        const nice = f.nice.trim();
+        if (nice) {
+            const n = Number(nice);
+            if (!Number.isInteger(n) || n < -20 || n > 19) return "nice must be an integer from -20 to 19";
+            // 0 is the effective default — persisting it would flag an
+            // untouched spec as changed vs the launch snapshot.
+            if (n !== 0) out.nice = n;
+        }
+        if (f.ioClass !== "default") {
+            if (!["realtime", "best-effort", "idle"].includes(f.ioClass))
+                return "I/O class must be default, realtime, best-effort or idle";
+            out.ioClass = f.ioClass as VmSpec["resources"]["sched"]["ioClass"];
+        }
+        // ioPrio is only meaningful (and only rendered) for rt/be classes —
+        // a leftover value from a class that hides the field stays ignored.
+        const ioPrio = f.ioPrio.trim();
+        if (ioPrio && (out.ioClass === "realtime" || out.ioClass === "best-effort")) {
+            const n = Number(ioPrio);
+            if (!Number.isInteger(n) || n < 0 || n > 7) return "I/O priority must be an integer from 0 to 7";
+            if (n !== 4) out.ioPrio = n;   // 4 = the class default
+        }
+        return out;
+    }
+
     /** First zod issue as "field: message" — friendlier than the raw dump. */
     private validateSpec(spec: VmSpec): void {
         const r = VmSpec.safeParse(spec);
@@ -543,12 +597,15 @@ export class CruiserService {
         }
         const lim = this.parseLimits(f);
         if (!lim) return;
+        const sched = this.parseSchedForm(f);
+        if (typeof sched === "string") { st.setStatus(sched, "warn"); return; }
         await this.run(`create ${f.name}`, async () => {
             const spec = defaultSpec(f.name);
             spec.resources.cpus = f.cpus;
             spec.resources.memoryMiB = f.memMiB;
             spec.resources.nestedVirt = f.nestedVirt;
             spec.resources.limits = lim;
+            spec.resources.sched = sched;
             spec.disk.sizeGiB = f.diskGiB;
             spec.gpu.mode = f.gpu as VmSpec["gpu"]["mode"];
             spec.gpu.softwareVk = f.swVk;
@@ -721,20 +778,29 @@ export class CruiserService {
     async stop(name: string): Promise<void> {
         const h = this.handles.get(name); if (!h) return;
         const st = this.store.getState();
-        const out = await this.run(`stop ${name}`, () => {
-            st.setStatus(`stopping ${name} — sent shutdown request to the guest OS`);
-            return h.stop(60_000, (ms) => st.setStatus(
-                `stopping ${name} — guest is shutting down… ${Math.floor(ms / 1000)}s ` +
-                `(power off, not suspend — memory is not saved)`,
-            ));
-        }, {
-            done: (out) => out === "stopped"
-                ? `${name} powered off cleanly`
-                : `${name} ignored the shutdown request — still running; use Kill to force power off`,
-            vm: name, verb: "stopping",
-        });
-        // Auto-snapshot "after stop" edge — only a clean power-off qualifies.
-        if (out === "stopped") await this.autoSnapEdge(h, "stop");
+        // Flip the pill to "stopping" up front — a drain probe only reads
+        // "running", so without this the row sits unchanged for the drain.
+        this.stopping.add(name);
+        this.paintFast();
+        try {
+            const out = await this.run(`stop ${name}`, () => {
+                st.setStatus(`stopping ${name} — sent shutdown request to the guest OS`);
+                return h.stop(60_000, (ms) => st.setStatus(
+                    `stopping ${name} — guest is shutting down… ${Math.floor(ms / 1000)}s ` +
+                    `(power off, not suspend — memory is not saved)`,
+                ));
+            }, {
+                done: (out) => out === "stopped"
+                    ? `${name} powered off cleanly`
+                    : `${name} ignored the shutdown request — still running; use Kill to force power off`,
+                vm: name, verb: "stopping",
+            });
+            // Auto-snapshot "after stop" edge — only a clean power-off qualifies.
+            if (out === "stopped") await this.autoSnapEdge(h, "stop");
+        } finally {
+            this.stopping.delete(name);
+            this.paintFast();
+        }
     }
 
     /** Auto-snapshot hook for the start/stop lifecycle edges. Returns false
@@ -970,6 +1036,8 @@ export class CruiserService {
         }
         const lim = this.parseLimits(f);
         if (!lim) return;
+        const sched = this.parseSchedForm(f);
+        if (typeof sched === "string") { st.setStatus(sched, "warn"); return; }
         // A changed VM location physically moves the dir — QEMU must not
         // hold open files under it.
         const curParent = dirname(vmRealDir(name));
@@ -986,6 +1054,7 @@ export class CruiserService {
             spec.resources.memoryMiB = f.memMiB;
             spec.resources.nestedVirt = f.nestedVirt;
             spec.resources.limits = lim;
+            spec.resources.sched = sched;
             spec.disk.sizeGiB = f.diskGiB;
             spec.gpu.mode = f.gpu as VmSpec["gpu"]["mode"];
             spec.gpu.softwareVk = f.swVk;
@@ -1102,10 +1171,10 @@ export class CruiserService {
         const name = h.spec.name;
         const st = this.store.getState();
         st.setStatus(`waiting for ${name} guest login (rdp :${h.spec.network.rdpPort ?? "–"})…`);
-        // Only claim the indicator when it's free or already ours — don't
-        // stomp another in-flight action, and don't clear one either.
+        // Only claim the indicator when it's free — don't stomp another
+        // in-flight action, and don't clear one either.
         let ours: ActionState | null = null;
-        if (!st.action || st.action.vm === name) {
+        if (!st.actions[name]) {
             ours = { vm: name, verb: "opening viewer", at: Date.now() };
             st.setAction(ours);
         }
@@ -1115,7 +1184,7 @@ export class CruiserService {
         } catch (e) {
             st.setStatus(`viewer for ${name}: ${e instanceof Error ? e.message : e}`, "error");
         } finally {
-            if (ours && this.store.getState().action === ours) st.setAction(null);
+            if (ours && this.store.getState().actions[name] === ours) st.clearAction(name);
         }
     }
 

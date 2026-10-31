@@ -11,6 +11,7 @@
 // ============================================================================
 
 import type { DocMutation } from "@downdraft/engine/modules/html-ui";
+import { diffFragmentOps } from "./fragment-diff";
 import type { RouteParts } from "./screens";
 
 /** The slice of UiPanelHandle the patcher drives — structurally satisfied
@@ -41,10 +42,17 @@ export function contentPatch(prev: RouteParts, cur: RouteParts): DocMutation[] |
     const cRegs = cur.regions ?? [];
     if (pRegs.length !== cRegs.length) return null;
     const ops: DocMutation[] = [];
+    // Same-shape markup changes get attr/text mutations on the live nodes —
+    // the node keeps its old style so CSS transitions actually run. Any
+    // structural diff falls back to replacing the subtree's innerHtml.
+    const patchFrag = (sel: string, prevHtml: string, curHtml: string) => {
+        const fine = diffFragmentOps(prevHtml, curHtml, sel);
+        if (fine) ops.push(...fine);
+        else ops.push({ op: "innerHtml", sel, html: curHtml });
+    };
     for (let i = 0; i < cRegs.length; i++) {
         if (cRegs[i]!.sel !== pRegs[i]!.sel) return null;
-        if (cRegs[i]!.html !== pRegs[i]!.html)
-            ops.push({ op: "innerHtml", sel: cRegs[i]!.sel, html: cRegs[i]!.html });
+        if (cRegs[i]!.html !== pRegs[i]!.html) patchFrag(cRegs[i]!.sel, pRegs[i]!.html, cRegs[i]!.html);
     }
 
     const pg = prev.rowGroup;
@@ -57,8 +65,7 @@ export function contentPatch(prev: RouteParts, cur: RouteParts): DocMutation[] |
         if (sameRows && cr.length) {
             // Same row set + order → patch just the rows whose markup moved.
             for (let i = 0; i < cr.length; i++) {
-                if (cr[i]!.html !== pr[i]!.html)
-                    ops.push({ op: "innerHtml", sel: `#${cr[i]!.id}`, html: cr[i]!.html });
+                if (cr[i]!.html !== pr[i]!.html) patchFrag(`#${cr[i]!.id}`, pr[i]!.html, cr[i]!.html);
             }
         } else if (cg.containerHtml !== pg.containerHtml) {
             // Add/remove/reorder — or the empty-state body itself changed.
@@ -79,15 +86,24 @@ export function applySameRoute(prev: RouteParts, parts: RouteParts, p: PatchTarg
     if (parts.content !== prev.content) {
         const ops = contentPatch(prev, parts);
         if (ops === null) {
-            p.setInnerHtml(".content", parts.content);
-            // The scrollport node survives the patch with its scroll
-            // offset, and nothing re-clamps it when the content shrinks —
-            // the Create button sits at the bottom of a long form, so the
-            // form→spinner swap leaves a near-max offset pointing past the
-            // end of the 540px .spinwrap and the pane paints empty. A
-            // spinner↔content swap resets to the top.
-            if (isSpinwrap(prev.content) !== isSpinwrap(parts.content))
-                p.scrollTo(".content", 0, 0);
+            // No fine surface — diff the whole .content fragment: an
+            // attr/text-only change still preserves nodes (so CSS
+            // transitions can run) while structural changes get the
+            // innerHtml rebuild they've always had.
+            const fine = diffFragmentOps(prev.content, parts.content, ".content");
+            if (fine) {
+                if (fine.length) p.mutate(fine);
+            } else {
+                p.setInnerHtml(".content", parts.content);
+                // The scrollport node survives the patch with its scroll
+                // offset, and nothing re-clamps it when the content shrinks —
+                // the Create button sits at the bottom of a long form, so the
+                // form→spinner swap leaves a near-max offset pointing past the
+                // end of the 540px .spinwrap and the pane paints empty. A
+                // spinner↔content swap resets to the top.
+                if (isSpinwrap(prev.content) !== isSpinwrap(parts.content))
+                    p.scrollTo(".content", 0, 0);
+            }
         } else if (ops.length) {
             p.mutate(ops);
         }

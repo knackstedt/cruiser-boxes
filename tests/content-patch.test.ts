@@ -187,6 +187,107 @@ describe("route patch surfaces", () => {
     });
 });
 
+// ── fragment-diff: attr-level ops keep nodes alive for CSS transitions ──
+
+describe("fragment-diff patching", () => {
+    const parts = (regs: RouteParts["regions"], rows?: RouteParts["rowGroup"], content = "c"): RouteParts => ({
+        topbar: "t", content, footer: "f", log: null, regions: regs, rowGroup: rows, html: "h",
+    });
+
+    test("class flip emits an attr op on the live node, not innerHtml", () => {
+        const row = (on: boolean) =>
+            `<div class="frow"><div class="lbl">Nested virtualization</div>` +
+            `<div class="opt tog${on ? " on" : ""}" data-action="set-field" ` +
+            `data-field="nestedVirt" data-value="${!on}"></div></div>`;
+        const grp = (html: string) => ({
+            container: "#c", containerHtml: "x", rows: [{ id: "r0", html }],
+        });
+        const prev = parts([], grp(row(false)));
+        const cur = parts([], grp(row(true)), "c2");
+        expect(contentPatch(prev, cur)).toEqual([
+            { op: "attr", sel: "#r0 > :nth-child(1) > :nth-child(2)", name: "class", value: "opt tog on" },
+            { op: "attr", sel: "#r0 > :nth-child(1) > :nth-child(2)", name: "data-value", value: "false" },
+        ]);
+    });
+
+    test("nested attr + leaf text diffs get nth-child path selectors", () => {
+        const reg = (pct: string, cls: string) => [
+            `<div><span class="lbl ${cls}">${pct}</span>` +
+            `<div><div class="bar" style="width:${pct}"></div></div></div>`,
+        ];
+        const prev = parts([{ sel: "#m", html: reg("10%", "ok")[0]! }]);
+        const cur = parts([{ sel: "#m", html: reg("40%", "hot")[0]! }], undefined, "c2");
+        expect(contentPatch(prev, cur)).toEqual([
+            { op: "attr", sel: "#m > :nth-child(1) > :nth-child(1)", name: "class", value: "lbl hot" },
+            { op: "text", sel: "#m > :nth-child(1) > :nth-child(1)", text: "40%" },
+            { op: "attr", sel: "#m > :nth-child(1) > :nth-child(2) > :nth-child(1)", name: "style", value: "width:40%" },
+        ]);
+    });
+
+    test("removed attribute → rattr op", () => {
+        const prev = parts([{ sel: "#a", html: `<div class="x" title="t">v</div>` }]);
+        const cur = parts([{ sel: "#a", html: `<div class="x">v</div>` }], undefined, "c2");
+        expect(contentPatch(prev, cur)).toEqual([
+            { op: "rattr", sel: "#a > :nth-child(1)", name: "title" },
+        ]);
+    });
+
+    test("structural changes still fall back to innerHtml", () => {
+        // added element
+        expect(contentPatch(
+            parts([{ sel: "#a", html: `<div>x</div>` }]),
+            parts([{ sel: "#a", html: `<div>x</div><div>y</div>` }], undefined, "c2"),
+        )).toEqual([{ op: "innerHtml", sel: "#a", html: `<div>x</div><div>y</div>` }]);
+        // different tag
+        expect(contentPatch(
+            parts([{ sel: "#a", html: `<div>x</div>` }]),
+            parts([{ sel: "#a", html: `<span>x</span>` }], undefined, "c2"),
+        )).toEqual([{ op: "innerHtml", sel: "#a", html: `<span>x</span>` }]);
+        // unparseable markup
+        expect(contentPatch(
+            parts([{ sel: "#a", html: `<div>x</div>` }]),
+            parts([{ sel: "#a", html: `<div>x` }], undefined, "c2"),
+        )).toEqual([{ op: "innerHtml", sel: "#a", html: `<div>x` }]);
+        // text inside mixed content is structural
+        expect(contentPatch(
+            parts([{ sel: "#a", html: `<div><b>x</b> a</div>` }]),
+            parts([{ sel: "#a", html: `<div><b>x</b> b</div>` }], undefined, "c2"),
+        )).toEqual([{ op: "innerHtml", sel: "#a", html: `<div><b>x</b> b</div>` }]);
+    });
+
+    test("entities decode for comparison and emitted values", () => {
+        const prev = parts([{ sel: "#a", html: `<div title="a &amp; b">x &lt; y</div>` }]);
+        const cur = parts([{ sel: "#a", html: `<div title="a &amp; c">x &lt; z</div>` }], undefined, "c2");
+        expect(contentPatch(prev, cur)).toEqual([
+            { op: "attr", sel: "#a > :nth-child(1)", name: "title", value: "a & c" },
+            { op: "text", sel: "#a > :nth-child(1)", text: "x < z" },
+        ]);
+    });
+
+    test("void elements and self-closing tags parse", () => {
+        const prev = parts([{ sel: "#a", html: `<div><input data-f="x" value="1"><br><img src="a"></div>` }]);
+        const cur = parts([{ sel: "#a", html: `<div><input data-f="x" value="2"/><br><img src="a"></div>` }], undefined, "c2");
+        expect(contentPatch(prev, cur)).toEqual([
+            { op: "attr", sel: "#a > :nth-child(1) > :nth-child(1)", name: "value", value: "2" },
+        ]);
+    });
+
+    test("create-form tog flip emits the class attr op that starts the transition", () => {
+        // real markup: a nestedVirt toggle flip on the create route (which
+        // has no fine surface — the .content fragment diff must catch it)
+        const s1 = { ...stateWith([]), route: "create" as const };
+        const prev = renderRouteParts(s1);
+        const next = renderRouteParts({ ...s1, create: { ...s1.create, nestedVirt: true } });
+        const { calls, target } = fakePanel();
+        applySameRoute(prev, next, target);
+        const ops = allOps(calls);
+        const togOp = ops.find((o) => o.op === "attr" && o.name === "class"
+            && (o as { value?: string }).value === "opt tog on");
+        expect(togOp).toBeDefined();
+        expect(togOp!.sel).toContain(".content");
+    });
+});
+
 // ── applySameRoute against a recording panel ──
 
 describe("applySameRoute", () => {
@@ -201,10 +302,10 @@ describe("applySameRoute", () => {
         expect(calls).toHaveLength(1);
         expect(calls[0]!.kind).toBe("mutate");
         const ops = calls[0]!.ops!;
-        expect(ops).toHaveLength(1);
-        expect(ops[0]).toMatchObject({ op: "innerHtml", sel: "#vmrow-vm-2" });
-        // the changed row html really is the new row body
-        expect(innerHtmlOf(ops[0]!)).toContain("cpu");
+        expect(ops.length).toBeGreaterThan(0);
+        // same-shape row → attr/text ops rooted at the row, node stays alive
+        expect(ops.every((o) => o.sel!.startsWith("#vmrow-vm-2"))).toBe(true);
+        expect(ops.every((o) => o.op !== "innerHtml")).toBe(true);
     });
 
     test("idle tick with no visible change emits zero DOM writes", () => {
@@ -252,10 +353,10 @@ describe("applySameRoute", () => {
         const { calls, target } = fakePanel();
         applySameRoute(prev, next, target);
         const ops = allOps(calls);
-        expect(ops).toHaveLength(1);
-        expect(ops[0]).toMatchObject({ op: "innerHtml", sel: "#vmtop" });
-        expect(ops.every((o) => !(o.op === "innerHtml" && o.sel === "#vmrest"))).toBe(true);
+        expect(ops.length).toBeGreaterThan(0);
+        expect(ops.every((o) => o.sel!.startsWith("#vmtop"))).toBe(true);
         // the share form inputs live in #vmrest — untouched by metric ticks
+        expect(ops.every((o) => !o.sel!.startsWith("#vmrest"))).toBe(true);
     });
 
     test("logs route tick patches only #logmeta", () => {
@@ -269,8 +370,8 @@ describe("applySameRoute", () => {
         applySameRoute(prev, next, target);
         const ops = allOps(calls);
         // meta line + the .logpre body may both move; controls must not
-        expect(ops.every((o) => o.op !== "innerHtml" || o.sel !== "#logctl")).toBe(true);
-        expect(ops.some((o) => o.op === "innerHtml" && o.sel === "#logmeta")).toBe(true);
+        expect(ops.every((o) => o.sel !== "#logctl")).toBe(true);
+        expect(ops.some((o) => o.sel!.startsWith("#logmeta"))).toBe(true);
     });
 
     test("term route: termLine tick touches #termhead, never #termbox", () => {
@@ -280,21 +381,25 @@ describe("applySameRoute", () => {
         const { calls, target } = fakePanel();
         applySameRoute(prev, next, target);
         const ops = allOps(calls);
-        expect(ops).toHaveLength(1);
-        expect(ops[0]).toMatchObject({ op: "innerHtml", sel: "#termhead" });
+        expect(ops.length).toBeGreaterThan(0);
+        expect(ops.every((o) => o.sel!.startsWith("#termhead"))).toBe(true);
         // #termbox is composited over by the webui view — a patch targeting
         // it would blank the terminal for a frame
-        expect(ops.every((o) => !(o.op === "innerHtml" && o.sel === "#termbox"))).toBe(true);
+        expect(ops.every((o) => !o.sel!.startsWith("#termbox"))).toBe(true);
     });
 
-    test("create route keeps the wholesale .content path", () => {
+    test("create route patches .content nodes, never .content itself", () => {
         const s1 = { ...stateWith([]), route: "create" as const };
         const prev = renderRouteParts(s1);
         const next = renderRouteParts({ ...s1, create: { ...s1.create, name: "typed" } });
         const { calls, target } = fakePanel();
         applySameRoute(prev, next, target);
-        // footer status always moves with status; content must fall back
-        expect(calls.some((c) => c.sel === ".content")).toBe(true);
+        const ops = allOps(calls);
+        // a typed name is an input value-attr diff — ops stay inside
+        // .content; the form subtree is never rebuilt wholesale
+        expect(ops.length).toBeGreaterThan(0);
+        expect(ops.every((o) => o.sel!.startsWith(".content"))).toBe(true);
+        expect(calls.every((c) => c.kind !== "innerHtml" || c.sel !== ".content")).toBe(true);
     });
 });
 
@@ -313,20 +418,23 @@ describe("update storms", () => {
             applySameRoute(prev, next, target);
             const ops = allOps(calls);
             totalOps += ops.length;
-            // every op must target a node that exists in the CURRENT doc
+            // every op must target a node that exists in the CURRENT doc —
+            // attr/text ops carry nth-child paths; check their root sel
             ops.forEach((o) => {
-                if (o.op === "innerHtml" && o.sel
-                    && !next.content.includes(`id="${o.sel.slice(1)}"`)) staleSel = true;
+                const root = o.sel?.split(" ")[0];
+                if (o.sel && root?.startsWith("#")
+                    && !next.content.includes(`id="${root.slice(1)}"`)) staleSel = true;
             });
-            // >1 region+row op per tick means we're patching more than moved
-            expect(ops.length).toBeLessThanOrEqual(2);
+            // attr/text diffs emit a handful of ops per changed node —
+            // far more than 1, but still bounded vs a wholesale patch
+            expect(ops.length).toBeLessThanOrEqual(40);
             prev = next;
         }
         expect(staleSel).toBe(false);
-        // 2000 ticks × 1 changed row = at most ~2000 ops + region churn —
-        // if rows accumulated or the diff degenerated to .content we'd see
-        // per-tick wholesale patches instead of bounded row ops
-        expect(totalOps).toBeLessThanOrEqual(4100);
+        // 2000 ticks × ~4-10 fine ops per changed row — if rows accumulated
+        // or the diff degenerated to .content we'd see wholesale patches
+        // instead of bounded row ops
+        expect(totalOps).toBeLessThanOrEqual(80000);
         expect(totalOps).toBeGreaterThan(1000); // sanity: patching happened
     });
 
