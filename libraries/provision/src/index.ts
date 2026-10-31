@@ -6,3 +6,8 @@ export * from "./guest-setup";
 export * from "./provision";
 export * from "./distros";
 export * from "./packages";
+export * from "./windows/isos";
+export * from "./windows/unattend";
+export * from "./windows/install";
+export * from "./windows/setup";
+export * from "./windows/provision";

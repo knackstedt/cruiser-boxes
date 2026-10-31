@@ -223,11 +223,24 @@ export class ViewerSession extends EventEmitter {
         const ddGeo: { offsets?: string; rects?: string } = {};
         if (d.viewer === "dmabuf" && this.adapter.caps.monitors) {
             const host = await this.adapter.monitors().catch(() => []);
-            const picked = d.monitors === "all" ? host : host.filter((m) => d.monitors.includes(m.name));
+            // Clip to the guest's console count (same cap as
+            // guestMonitors — virtio's 4) — a window spanning more
+            // monitors than consoles shows dead space.
+            const maxOut = 4;
+            const picked = (d.monitors === "all" ? host : host.filter((m) => d.monitors.includes(m.name)))
+                .slice(0, maxOut);
             if (picked.length > 1) {
-                const ox = Math.min(...picked.map((m) => m.x));
-                const oy = Math.min(...picked.map((m) => m.y));
-                ddGeo.offsets = picked.map((m) => `${m.x - ox},${m.y - oy}`).join(" ");
+                if (this.spec.os.family === "windows") {
+                    // Windows multi-device gets a virtio-tablet bound to each
+                    // gpu (args.ts winMulti) — every console owns its absolute
+                    // device, so SetAbsPosition is console-local. An all-zero
+                    // offsets list tells viewer-dd to skip composite rescale.
+                    ddGeo.offsets = picked.map(() => "0,0").join(" ");
+                } else {
+                    const ox = Math.min(...picked.map((m) => m.x));
+                    const oy = Math.min(...picked.map((m) => m.y));
+                    ddGeo.offsets = picked.map((m) => `${m.x - ox},${m.y - oy}`).join(" ");
+                }
             }
             if (picked.length && d.headMode !== "windowed")
                 ddGeo.rects = picked.map((m) => `${m.x},${m.y},${m.w},${m.h}`).join(" ");

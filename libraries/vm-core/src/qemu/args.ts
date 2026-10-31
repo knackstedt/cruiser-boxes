@@ -12,7 +12,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { VmSpec } from "../config/schema";
 import { DISK_SECRET_ID } from "../disk/ops";
-import { diskPath, diskKeyPath, homeDiskPath, optDir, type VmPaths } from "../paths";
+import { diskKeyPath, diskPath, homeDiskPath, optDir, type VmPaths } from "../paths";
 
 const SYS_OVMF_CODE = "/usr/share/OVMF/OVMF_CODE_4M.fd";
 const SYS_OVMF_VARS_TEMPLATE = "/usr/share/OVMF/OVMF_VARS_4M.fd";
@@ -47,7 +47,19 @@ export interface BuildOpts {
     /** virtiofsd socket per share when virtiofsd is available; else 9p. */
     virtiofs?: boolean;
     /** iso omitted → seed-only boot (cloudimg first-boot provisioning). */
-    install?: { iso?: string; seedIso: string; kernel?: string; initrd?: string; serialLog?: string };
+    install?: {
+        iso?: string; seedIso: string; kernel?: string; initrd?: string; serialLog?: string;
+        /** Additional cdrom drives attached after iso+seedIso — the windows
+         *  install uses this for the virtio-win driver disc. */
+        extraCds?: string[];
+        /** Attach install cdroms on the q35's native AHCI instead of
+         *  virtio-scsi — driverless WinPE sees them with no vioscsi. The
+         *  system DISK stays virtio even in install mode: the seed ISO's
+         *  DriverPaths gives WinPE viostor, and installing on the real
+         *  production device is what makes the first virtio boot not
+         *  0x7B (INACCESSIBLE_BOOT_DEVICE). */
+        sata?: boolean;
+    };
     /** display.viewer=dmabuf: rendernode QEMU exports scanouts from — must be
      *  the host display GPU (resolved by the lifecycle, auto-detected). */
     dbusRenderNode?: string;
@@ -89,6 +101,29 @@ export function hostVirtFlag(): "vmx" | "svm" | null {
     return null;
 }
 
+/** Shell-lite split for spec.qemu.extraArgs' text representation —
+ *  whitespace-separated, single/double quotes group, no escapes or
+ *  expansions. Unterminated quotes just swallow the tail as one arg. */
+export function splitQemuArgs(s: string): string[] {
+    const out: string[] = [];
+    const re = /"([^"]*)"?|'([^']*)'?|(\S+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(s))) out.push(m[1] ?? m[2] ?? m[3]!);
+    return out;
+}
+/** Inverse of splitQemuArgs — quote only when an arg needs it. Args with
+ *  a `"` wrap in single quotes (split restores them verbatim); a `'` needs
+ *  double quotes. Both quote types can't be represented (no escapes in the
+ *  split grammar) — fold `"` to `'` as the last resort. */
+export function joinQemuArgs(args: string[]): string {
+    return args.map((a) => {
+        if (!/[\s"']/.test(a)) return a;
+        if (a.includes("'")) return `"${a.replace(/"/g, "'")}"`;
+        if (a.includes('"')) return `'${a}'`;
+        return `"${a}"`;
+    }).join(" ");
+}
+
 /** Deterministic vsock guest CID per VM name (>= 1024 avoids reserved cids). */
 export function guestCid(name: string): number {
     let h = 0;
@@ -100,7 +135,7 @@ export function buildArgs(
     spec: VmSpec,
     paths: VmPaths,
     opts: BuildOpts,
-    env: { ldLibraryPath: string },
+    env: { ldLibraryPath: string; renderServerExec?: string },
 ): BuiltArgs {
     const a: string[] = [];
     const push = (...v: (string | number)[]) => a.push(...v.map(String));
@@ -116,7 +151,15 @@ export function buildArgs(
     push("-object", `memory-backend-memfd,share=on,id=mem0,size=${memBytes}`);
     push("-accel", "kvm");
     const nestedFlag = spec.resources.nestedVirt ? hostVirtFlag() : null;
-    push("-cpu", `host${nestedFlag ? `,+${nestedFlag}` : ""}`);
+    // Windows guests get the standard Hyper-V enlightenments — the same
+    // flags every libvirt/win guest ships; measurable win on scheduling,
+    // timers and TLB shootdowns. Linux -cpu host already gets them via
+    // the kernel's own detection so they're omitted there.
+    // hv_time is required by hv_stimer (QEMU refuses to start without it).
+    const winHv = spec.os.family === "windows"
+        ? ",hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_vpindex,hv_runtime,hv_synic,hv_stimer,hv_time"
+        : "";
+    push("-cpu", `host${winHv}${nestedFlag ? `,+${nestedFlag}` : ""}`);
     push("-smp", `${cpus},sockets=${spec.resources.sockets},cores=${cpus},threads=${spec.resources.threads}`);
     push("-drive", `if=pflash,format=raw,unit=0,readonly=on,file=${ovmfCode(sb)}`);
     push("-drive", `if=pflash,format=raw,unit=1,file=${paths.ovmfVars}`);
@@ -147,7 +190,12 @@ export function buildArgs(
         if (enc === "full" && spec.disk.format !== "qcow2")
             throw new Error(`disk.encrypt=full requires disk.format=qcow2 (got ${spec.disk.format})`);
     }
-    push("-drive", `file=${disk},if=virtio,format=${spec.disk.format},discard=unmap` +
+    // install.sata scopes to cdroms only — the system disk is always
+    // virtio so install and production boot paths match (installing on
+    // IDE then booting virtio is a 0x7B INACCESSIBLE_BOOT_DEVICE on
+    // windows; the seed ISO's WinPE DriverPaths supplies viostor).
+    const diskIf = "virtio";
+    push("-drive", `file=${disk},if=${diskIf},format=${spec.disk.format},discard=unmap` +
         (enc === "full" ? `,encrypt.key-secret=${DISK_SECRET_ID}` : ""));
     if (enc === "home") {
         push("-drive", `if=none,id=home0,file=${homeDiskPath(spec, paths.dir)},format=qcow2,discard=unmap,encrypt.key-secret=${DISK_SECRET_ID}`);
@@ -156,7 +204,13 @@ export function buildArgs(
 
     // ── GPU ──
     const outs = opts.guestMonitors ?? [{ name: "cruiser-1", xres: 1920, yres: 1080 }];
-    const maxOut = Math.max(1, outs.length);
+    // Windows virtio display drivers (viogpudo/viogpu3d) are single-head:
+    // max_outputs>1 leaves the extra consoles dark. Give Windows one
+    // virtio-gpu DEVICE per monitor instead — the guest binds the driver to
+    // each and QEMU exports each device head as its own D-Bus console (in
+    // device creation order, matching outs[]).
+    const winMulti = spec.os.family === "windows" && outs.length > 1;
+    const maxOut = winMulti ? 1 : Math.max(1, outs.length);
     const primary = outs[0];
     if (spec.gpu.mode === "venus") {
         push("-device", JSON.stringify({
@@ -164,14 +218,14 @@ export function buildArgs(
             venus: true, blob: true,
             hostmem: spec.gpu.hostmemMiB * 1024 * 1024,
             max_outputs: maxOut, xres: primary.xres, yres: primary.yres,
-            outputs: outs,
+            outputs: winMulti ? [primary] : outs,
         }));
     } else if (spec.gpu.mode === "virgl") {
         const dd = spec.display.viewer === "dmabuf";
         push("-device", JSON.stringify({
             driver: "virtio-vga-gl", id: "gpu0",
             max_outputs: maxOut, xres: primary.xres, yres: primary.yres,
-            outputs: outs,
+            outputs: winMulti ? [primary] : outs,
             // dmabuf viewer needs host-resident scanouts — blob keeps the
             // guest's buffers on the virgl rendernode (no per-flip transfer).
             ...(dd ? { blob: true, hostmem: spec.gpu.hostmemMiB * 1024 * 1024 } : {}),
@@ -181,6 +235,18 @@ export function buildArgs(
             driver: "virtio-vga", id: "gpu0",
             max_outputs: maxOut, xres: primary.xres, yres: primary.yres,
         }));
+    }
+    if (winMulti) {
+        // QEMU permits only ONE virtio-gpu-gl device per machine — secondary
+        // monitors are plain 2D virtio-gpu. viogpudo binds them the same;
+        // their consoles export via the CPU Scanout path (viewer-dd handles
+        // both), just without GPU-resident scanout buffers.
+        outs.slice(1).forEach((o, i) => push("-device", JSON.stringify({
+            driver: "virtio-gpu-pci",
+            id: `gpu${i + 1}`,
+            max_outputs: 1, xres: o.xres, yres: o.yres,
+            outputs: [o],
+        })));
     }
 
     // dmabuf viewer: QEMU D-Bus display backend (org.qemu.Display1, p2p).
@@ -231,7 +297,20 @@ export function buildArgs(
     if (netMode !== "isolated") {
         const fwd = spec.network.hostfwd
             .map((f) => `hostfwd=${f.proto}:127.0.0.1:${f.hostPort}-:${f.guestPort}`);
-        push("-netdev", `user,id=n0${netMode === "restricted" ? ",restrict=on" : ""}${fwd.length ? "," + fwd.join(",") : ""}`);
+        // Windows pointer agent: the guest's cruiser-agent dials a fixed
+        // slirp address; guestfwd wires it to chardev agfwd (a unix socket
+        // QEMU owns server-side — viewer-dd --inject unix: connects to it as
+        // a client, so it may attach/detach freely). guestfwd -unix: would
+        // instead require the socket to already exist at parse time and
+        // fails the whole launch. SendInput-based multi-monitor pointer —
+        // virtio tablets pin to the primary.
+        if (spec.os.family === "windows") {
+            push("-chardev", `socket,id=agfwd,path=${paths.agentSock},server=on,wait=off`);
+        }
+        const guestfwd = spec.os.family === "windows"
+            ? `,guestfwd=tcp:10.0.2.250:28090-chardev:agfwd`
+            : "";
+        push("-netdev", `user,id=n0${netMode === "restricted" ? ",restrict=on" : ""}${fwd.length ? "," + fwd.join(",") : ""}${guestfwd}`);
         push("-device", "virtio-net-pci,netdev=n0");
         if (netMode === "vmnet") {
             push("-netdev", "socket,id=n1,mcast=230.0.0.1:1234");
@@ -239,7 +318,18 @@ export function buildArgs(
         }
     }
 
-    push("-device", "virtio-keyboard-pci", "-device", "virtio-tablet-pci");
+    push("-device", "virtio-keyboard-pci");
+    if (winMulti) {
+        // Per-display tablet (QEMU multiseat pattern): console N's Mouse
+        // events route to the tablet bound to gpuN, so each Windows adapter
+        // gets its own absolute pointer. One shared tablet is exposed to
+        // the guest as a single digitizer that Windows maps onto ONE
+        // display — the cursor can't cross monitors.
+        outs.forEach((_o, i) =>
+            push("-device", `virtio-tablet-pci,id=tab${i},display=gpu${i}`));
+    } else {
+        push("-device", "virtio-tablet-pci");
+    }
     push("-object", "rng-random,filename=/dev/urandom,id=rng0", "-device", "virtio-rng-pci,rng=rng0");
     // virtio-balloon — live guest-visible memory resize (`vm mem`, QMP
     // balloon) + query-balloon gives real in-guest free mem for metrics.
@@ -308,13 +398,21 @@ export function buildArgs(
     // ── install-mode extras (autoinstall ISO path) ──
     if (opts.mode === "install" && opts.install) {
         const ins = opts.install;
-        push("-device", "virtio-scsi-pci,id=scsi0");
-        if (ins.iso) {
-            push("-drive", `file=${ins.iso},media=cdrom,if=none,id=cd0,readonly=on`);
-            push("-device", "scsi-cd,drive=cd0");
+        // index-stable ids: iso=cd0, seedIso=cd1, extraCds=cd2… — a missing
+        // earlier slot keeps the later ids (seed is always cd1).
+        const cds = [ins.iso, ins.seedIso, ...(ins.extraCds ?? [])];
+        if (ins.sata) {
+            // native AHCI cdroms — see install.sata above (Windows PE sees
+            // them out of the box; a virtio-scsi cd is invisible to it).
+            cds.forEach((cd) => { if (cd) push("-drive", `file=${cd},media=cdrom,if=ide,readonly=on`); });
+        } else {
+            push("-device", "virtio-scsi-pci,id=scsi0");
+            cds.forEach((cd, i) => {
+                if (!cd) return;
+                push("-drive", `file=${cd},media=cdrom,if=none,id=cd${i},readonly=on`);
+                push("-device", `scsi-cd,drive=cd${i}`);
+            });
         }
-        push("-drive", `file=${ins.seedIso},media=cdrom,if=none,id=cd1,readonly=on`);
-        push("-device", "scsi-cd,drive=cd1");
         if (ins.kernel && ins.initrd) {
             push("-kernel", ins.kernel, "-initrd", ins.initrd);
             push("-append", "boot=casper autoinstall ds=nocloud console=ttyS0,115200n8 ---");
@@ -322,10 +420,10 @@ export function buildArgs(
     }
 
     // serial console to file on every boot — the Logs screen tails it.
-    // autoinstall boots (kernel+initrd) keep their dedicated log path.
-    const serialLog = opts.mode === "install" && opts.install?.kernel && opts.install?.initrd
-        ? (opts.install.serialLog ?? paths.serialLog)
-        : paths.serialLog;
+    // install-mode boots keep their dedicated log path when one is given
+    // (autoinstall AND windows-iso — the unattend scripts echo their
+    // completion markers to COM1, which lands here).
+    const serialLog = (opts.mode === "install" && opts.install?.serialLog) || paths.serialLog;
     push("-serial", `file:${serialLog}`);
 
     // Second serial port (guest ttyS1) on a host unix socket — `vm serial`
@@ -336,9 +434,19 @@ export function buildArgs(
 
     if (spec.persist === "daemonize" && opts.daemonize !== false) push("-daemonize");
     push("-pidfile", paths.pidFile, "-D", paths.log);
+    // spec escape hatch — appended last so it can override generated flags
+    // (QEMU's last-occurrence-wins for most options).
+    push(...spec.qemu.extraArgs);
     if (opts.extraArgs) a.push(...opts.extraArgs);
 
     const outEnv: Record<string, string> = { LD_LIBRARY_PATH: env.ldLibraryPath };
+    // yttrium: the patched virglrenderer keeps its venus render server beside
+    // the variant lib — point the loader at it explicitly.
+    if (env.renderServerExec) outEnv.RENDER_SERVER_EXEC_PATH = env.renderServerExec;
+    if (process.env.CRUISER_VKR_DEBUG) outEnv.VKR_DEBUG = process.env.CRUISER_VKR_DEBUG;
+    if (process.env.CRUISER_VKR_LOG_IMAGES) outEnv.VKR_LOG_IMAGES = process.env.CRUISER_VKR_LOG_IMAGES;
+    if (process.env.CRUISER_VREND_FORCE_LINEAR) outEnv.VREND_FORCE_LINEAR = process.env.CRUISER_VREND_FORCE_LINEAR;
+    if (process.env.CRUISER_QEMU_SURFACE_LINEAR) outEnv.QEMU_SURFACE_LINEAR = process.env.CRUISER_QEMU_SURFACE_LINEAR;
     if (spec.gpu.mode === "venus" && !spec.gpu.softwareVk) {
         // Venus exposes every host VkPhysicalDevice to the guest — including
         // lavapipe. A guest app that asks wgpu for the software/fallback

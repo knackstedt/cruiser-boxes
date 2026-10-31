@@ -3,7 +3,7 @@
 // first-boot with seed, guest setup, monitor layout.
 // ============================================================================
 
-import { VmSpec } from "../../vm-core/src/config/schema";
+import { VmSpec, Username } from "../../vm-core/src/config/schema";
 import type { VmHandle } from "../../vm-core/src/lifecycle/vm";
 import { appendVmLog } from "../../vm-core/src/logs";
 import { requireDiskKeyFile } from "../../vm-core/src/disk/ops";
@@ -31,18 +31,18 @@ export interface ProvisionOpts {
 }
 
 const noop = () => {};
-function log(h: VmHandle, o: ProvisionOpts, m: string) {
+export function log(h: VmHandle, o: ProvisionOpts, m: string) {
     (o.onLog ?? noop)(m);
     // tee into run/cruiser.log — the runner journal the Logs screen reads
     void appendVmLog(h.paths, m);
 }
 
 /** Generate + persist credentials; returns plaintext password for the run. */
-async function ensurePassword(spec: VmSpec, o: ProvisionOpts): Promise<string> {
+export async function ensurePassword(spec: VmSpec, o: ProvisionOpts): Promise<string> {
     const pw = o.password ?? randomBytes(9).toString("base64url");
     // o.username is unchecked CLI/UI input — run it through the schema regex
     // (POSIX username) since it lands in cloud-init YAML and guest shell.
-    if (o.username) spec.credentials.username = VmSpec.shape.credentials.unwrap().shape.username.parse(o.username);
+    if (o.username) spec.credentials.username = Username.parse(o.username);
     await writePasswordFile(spec, pw);
     return pw;
 }

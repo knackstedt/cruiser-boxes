@@ -3,24 +3,24 @@
 // or owned), reattaches over monitor/QGA sockets, and exposes disk/usb ops.
 // ============================================================================
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { mkdir, writeFile, readFile, copyFile, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
 import type { ChildProcess } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
+import { run, spawnChild, virtiofsdPath, which } from "../../../sys/src/exec";
+import { bootRelevantChanges } from "../config/boot-diff";
 import type { VmSpec } from "../config/schema";
 import { parseVmSpec } from "../config/schema";
-import { bootRelevantChanges } from "../config/boot-diff";
-import { vmPaths, diskPath as resolveDiskPath, diskKeyPath, homeDiskPath as resolveHomeDiskPath, type VmPaths } from "../paths";
+import * as disk from "../disk/ops";
+import { appendVmLog } from "../logs";
+import { diskKeyPath, diskPath as resolveDiskPath, homeDiskPath as resolveHomeDiskPath, vmPaths, type VmPaths } from "../paths";
 import { buildArgs, ovmfVarsTemplate, type BuildOpts, type BuiltArgs } from "../qemu/args";
 import { resolveToolchain, type Toolchain } from "../qemu/resolve";
-import { QmpClient } from "../qmp/client";
 import { QgaClient } from "../qga/client";
-import * as disk from "../disk/ops";
+import { QmpClient } from "../qmp/client";
 import * as usb from "../usb/usb";
-import { appendVmLog } from "../logs";
 import { killDdproxy, spawnDdproxy } from "./ddproxy";
-import { run, spawnChild, virtiofsdPath, which } from "../../../sys/src/exec";
 
 export type VmState = "stopped" | "starting" | "running" | "stopping" | "paused" | "crashed" | "unknown";
 
@@ -279,8 +279,15 @@ export class VmHandle {
                 throw new Error("display.viewer=dmabuf needs gpu.mode virgl or venus — QEMU exports no GL scanouts in software mode");
             // QEMU exports the guest scanout from this node; the viewer's EGL
             // must import same-vendor dma-bufs → always the display GPU.
+            // Exception: yttrium's venus stack is qualified on mesa/RADV —
+            // the dbus rendernode doubles as the venus GPU (virtio-vga-gl
+            // has no device-level node), so follow spec.gpu.renderNode and
+            // rely on the linear modifier=INVALID scanouts virtio produces
+            // importing fine cross-vendor.
             const { pickDisplayRenderNode } = await import("../gpu/rendernode");
-            opts.dbusRenderNode ??= (await pickDisplayRenderNode()) ?? undefined;
+            opts.dbusRenderNode ??= (this.spec.os?.winDriver === "yttrium" && this.spec.gpu.renderNode
+                ? this.spec.gpu.renderNode
+                : await pickDisplayRenderNode()) ?? undefined;
             if (!opts.dbusRenderNode)
                 throw new Error("display.viewer=dmabuf: no DRM render node found for the host display GPU");
             // Clipboard rides a qemu-vdagent chardev → org.qemu.Display1.Clipboard.
@@ -294,7 +301,14 @@ export class VmHandle {
             if (this.spec.display.sound)
                 opts.audioBackend ??= await pickAudioBackend(this.toolchain.qemu, this.toolchain.ldLibraryPath);
         }
-        return buildArgs(this.spec, this.paths, opts, { ldLibraryPath: this.toolchain.ldLibraryPath });
+        // The yttrium guest driver needs arehnman's patched virglrenderer on
+        // the host (cross-context venus resource sharing) — prefer the
+        // variant when the toolchain provides it.
+        const yt = this.spec.os?.winDriver === "yttrium" ? this.toolchain.yttriumVirgl : undefined;
+        return buildArgs(this.spec, this.paths, opts, {
+            ldLibraryPath: yt?.ldLibraryPath ?? this.toolchain.ldLibraryPath,
+            renderServerExec: yt?.renderServerExec,
+        });
     }
 
     /** Materialize boot-attached images that aren't the system disk —
@@ -657,18 +671,7 @@ export class VmHandle {
      *  the daemon self-terminates when QEMU drops the ctrl connection (-t),
      *  so a VM stop cleans it up without tracking. */
     private async spawnSwtpm(): Promise<void> {
-        const bin = await which("swtpm");
-        if (!bin) throw new Error("security.tpm is set but swtpm isn't installed — apt install swtpm");
-        await mkdir(this.paths.tpmDir, { recursive: true });
-        await rm(this.paths.tpmSock, { force: true });
-        await run(bin, ["socket", "--tpm2", "--daemon",
-            "--tpmstate", `dir=${this.paths.tpmDir},mode=0600`,
-            "--ctrl", `type=unixio,path=${this.paths.tpmSock},mode=0600`,
-            "--pid", `file=${join(this.paths.run, "swtpm.pid")}`,
-            "--log", `file=${join(this.paths.run, "swtpm.log")},level=1`,
-            "--flags", "not-need-init,startup-clear",
-            "-t",
-        ]);
+        await spawnSwtpm(this.paths);
     }
 
     /** org.cruiser.urlopen.0 bridge: the guest writes one URL per line to the
@@ -806,6 +809,14 @@ done
 
     async suspend(): Promise<void> { await this.withQmp((q) => q.stop()); }
     async resume(): Promise<void> { await this.withQmp((q) => q.cont()); }
+
+    /** QMP send-key — injects a key combo into the guest console regardless
+     *  of viewer focus/grab state (qcode names: "ctrl", "alt", "delete", …). */
+    async sendKeys(keys: string[]): Promise<void> {
+        await this.withQmp((q) =>
+            q.execute("send-key", { keys: keys.map((k) => ({ type: "qcode", data: k })) }));
+    }
+    async sendCtrlAltDel(): Promise<void> { return this.sendKeys(["ctrl", "alt", "delete"]); }
 
     /** PNG screendump of the primary console — writes `file` (default
      *  run/screenshot.png) and returns the path. Running VM required. */
@@ -1164,6 +1175,8 @@ done
         return this.withQmp((q) => usb.usbAttach(q, d));
     }
     async usbDetach(id: string) { return this.withQmp((q) => usb.usbDetach(q, id)); }
+    /** qmp ids + product labels of the passthrough'd USB devices QEMU reports. */
+    usbAttachedList() { return this.withQmp((q) => usb.usbAttached(q)); }
 
     // ── guest ops ──
 
@@ -1173,6 +1186,16 @@ done
     }
     async guestSh(script: string, timeoutMs = 60_000) {
         return this.withQga((g) => g.sh(script, { timeoutMs }));
+    }
+    /** Run a PowerShell script in a windows guest via QGA — the analogue of
+     *  guestSh. UTF-16LE+base64 encoded per -EncodedCommand's contract so
+     *  quoting/escaping never reaches the command line. Windows qemu-ga
+     *  execs as SYSTEM. */
+    async guestPs(script: string, timeoutMs = 60_000) {
+        const b64 = Buffer.from(script, "utf16le").toString("base64");
+        return this.guestExec("powershell.exe",
+            ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", b64],
+            timeoutMs);
     }
 
     /** Restart the display manager in the guest (connector-probe race fix — the old fixdisplays). */
@@ -1185,4 +1208,33 @@ done
     private async tc(): Promise<Toolchain> {
         return this.toolchain ??= await resolveToolchain();
     }
+}
+
+/** swtpm daemon for security.tpm — TPM 2.0 state persists at <vm>/tpm/;
+ *  the daemon self-terminates when QEMU drops the ctrl connection (-t),
+ *  so a VM stop (or an owned install QEMU exiting) cleans it up without
+ *  tracking. Shared by VmHandle.start() and the windows install runner —
+ *  QEMU's tpm-emulator chardev connects at machine init, so the daemon
+ *  must be listening first. */
+export async function spawnSwtpm(paths: VmPaths): Promise<void> {
+    const bin = await which("swtpm");
+    if (!bin) throw new Error("security.tpm is set but swtpm isn't installed — apt install swtpm");
+    await mkdir(paths.tpmDir, { recursive: true });
+    // A previous daemon may still hold the tpmstate dir — QEMU exits don't
+    // always reap it promptly (and -t only fires on ctrl-conn drop). Kill
+    // by pidfile before rebinding the socket.
+    const pidFile = join(paths.run, "swtpm.pid");
+    if (existsSync(pidFile)) {
+        const pid = Number(readFileSync(pidFile, "utf8").trim().split("\n")[0]);
+        if (pid > 0) try { process.kill(pid); } catch { /* already gone */ }
+    }
+    await rm(paths.tpmSock, { force: true });
+    await run(bin, ["socket", "--tpm2", "--daemon",
+        "--tpmstate", `dir=${paths.tpmDir},mode=0600`,
+        "--ctrl", `type=unixio,path=${paths.tpmSock},mode=0600`,
+        "--pid", `file=${join(paths.run, "swtpm.pid")}`,
+        "--log", `file=${join(paths.run, "swtpm.log")},level=1`,
+        "--flags", "not-need-init,startup-clear",
+        "-t",
+    ]);
 }

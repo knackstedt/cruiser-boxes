@@ -1,17 +1,20 @@
-import { describe, expect, test } from "bun:test";
 import type { DocMutation } from "@downdraft/engine/modules/html-ui";
-import { contentPatch, applySameRoute, type PatchTarget } from "../libraries/app-shell/src/content-patch";
+import { describe, expect, test } from "bun:test";
+import { applySameRoute, contentPatch, type PatchTarget } from "../libraries/app-shell/src/content-patch";
 import { renderRouteParts, type RouteParts } from "../libraries/app-shell/src/screens";
-import { createCruiserStore } from "../libraries/app-shell/src/store";
 import type { VmSummary } from "../libraries/app-shell/src/store";
+import { createCruiserStore } from "../libraries/app-shell/src/store";
 
 // ── fixtures ──
 
 function mkVm(name: string, over: Partial<VmSummary> = {}): VmSummary {
     return {
-        name, state: "stopped", gpuMode: "venus", headMode: "virtual-desktop", viewer: "dmabuf",
+        name, state: "stopped", osFamily: "ubuntu", gpuMode: "venus", headMode: "virtual-desktop", viewer: "dmabuf",
         vmDir: "/var/tmp/vm",
-        cpus: 4, memMiB: 8192, diskGiB: 100, nestedVirt: false,
+        cpus: 4, memMiB: 8192, diskGiB: 100, nestedVirt: false, limits: {},
+        security: { tpm: false, secureBoot: false },
+        dispFlags: { sound: true, microphone: true, clipboard: true, urlOpen: true },
+        vsock: true, qemuArgs: [], hibernated: false,
         persist: "daemonize", username: "cruiser", hasPassword: false,
         encrypt: "off", keyStorage: "store", diskLocked: false,
         description: "", shares: [], snapshots: [], snapAuto: "off",

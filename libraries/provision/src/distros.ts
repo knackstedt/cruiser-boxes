@@ -42,6 +42,14 @@ export const DISTROS: Record<DistroFamily, DistroInfo> = {
             { id: "43", label: "43", krdp: true },
         ],
     },
+    windows: {
+        label: "Windows",
+        releases: [
+            // provisioned from ISOs, not cloud images — cloudImageFor throws.
+            { id: "11", label: "11 Pro (consumer ISO)", krdp: false },
+            { id: "10", label: "10 Pro (consumer ISO)", krdp: false },
+        ],
+    },
 };
 
 export function defaultRelease(family: DistroFamily): string {
@@ -84,6 +92,8 @@ async function fetchText(url: string): Promise<string> {
  * Throws if no matching image is found.
  */
 export async function cloudImageFor(family: DistroFamily, release: string): Promise<{ url: string; file: string }> {
+    if (family === "windows")
+        throw new Error("windows guests install from ISO, not a cloud image — use `provision windows`");
     if (family === "ubuntu") return ubuntuImageUrl(release);
     if (family === "debian") {
         const dir = `https://cloud.debian.org/images/cloud/${release}/latest/`;

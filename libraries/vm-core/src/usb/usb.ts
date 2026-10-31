@@ -80,11 +80,19 @@ export async function usbDetach(qmp: QmpClient, id: string): Promise<void> {
     await qmp.deviceDel(id);
 }
 
-/** Devices currently attached to the VM (QMP query-pci scan for usb-host). */
-export async function usbAttached(qmp: QmpClient): Promise<{ id: string }[]> {
+/** Devices currently attached to the VM. `info usb` prints one line per
+ *  device ending in `ID: <qmp id>` — the id assigned at device_add (what
+ *  device_del needs). Hot-unplugs linger in the tree until the guest acks,
+ *  so entries are what QEMU still considers present. */
+export async function usbAttached(qmp: QmpClient): Promise<{ id: string; label: string }[]> {
     try {
         const out = await qmp.hmp("info usb");
-        return out.split("\n").filter((l) => l.includes("usb-host")).map((l) => ({ id: l.trim() }));
+        return out.split("\n").map((l) => {
+            const m = l.match(/ID:\s*(\S+)/);
+            if (!m) return null;
+            const p = l.match(/Product\s+([^,]+)/);
+            return { id: m[1]!, label: p?.[1]?.trim() ?? m[1]! };
+        }).filter((x): x is { id: string; label: string } => x !== null);
     } catch {
         return [];
     }

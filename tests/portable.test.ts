@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { defaultSpec, parseVmSpec } from "../libraries/vm-core/src/config/schema";
+import { bootRelevantChanges } from "../libraries/vm-core/src/config/boot-diff";
 import {
     exportPortable, mergePulledSpec, parsePortable, pickConfigFile,
     portableFilename, serializePortable, sniffPortable, toPortableSpec,
 } from "../libraries/vm-core/src/config/portable";
-import { bootRelevantChanges } from "../libraries/vm-core/src/config/boot-diff";
+import { defaultSpec, parseVmSpec } from "../libraries/vm-core/src/config/schema";
 
 const spec = () => {
     const s = defaultSpec("testvm");
@@ -169,6 +169,15 @@ describe("bootRelevantChanges", () => {
         b.display.monitors = ["HDMI-1"];
         b.network.vsock = false;
         expect(bootRelevantChanges(a, b)).toEqual(["resources", "gpu", "display", "network"]);
+    });
+    test("qemu.extraArgs, security and display channels flag as boot-frozen", () => {
+        const a = spec();
+        const b = spec();
+        b.qemu.extraArgs = ["-rtc", "base=localtime"];
+        b.security.secureBoot = true;
+        b.display.sound = false;
+        b.display.clipboard = false;
+        expect(bootRelevantChanges(a, b)).toEqual(["qemu", "display", "security"]);
     });
     test("hostfwd is live — edits don't flag; ports/vsock do", () => {
         const a = spec();

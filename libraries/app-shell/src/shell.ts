@@ -3,22 +3,23 @@
 // window, fed by the zustand store and wired to CruiserService actions.
 // ============================================================================
 
-import { createLogger } from "@downdraft/engine/util/logger";
 import { HtmlUiHost, createLocalBackend, type UiPanelHandle } from "@downdraft/engine/modules/html-ui";
-import type { InputBus } from "./input-bus";
-import type { CruiserService } from "./service";
-import type { Store, CreateForm } from "./store";
-import { renderRouteParts, vmListInner, createHints, type RouteParts } from "./screens";
-import { applySameRoute } from "./content-patch";
+import { createLogger } from "@downdraft/engine/util/logger";
+import { readFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DISTROS } from "../../provision/src/distros";
 import { DEVTOOLS, DEVTOOLS_PRESET } from "../../provision/src/packages";
+import { joinQemuArgs } from "../../vm-core/src/qemu/args";
+import { applySameRoute } from "./content-patch";
 import { registerUiFonts } from "./fonts";
+import type { InputBus } from "./input-bus";
 import { RenderGate } from "./render-gate";
-import { dirname } from "node:path";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { TermManager } from "./term/term-manager";
+import { createHints, renderRouteParts, vmListInner, type RouteParts } from "./screens";
+import type { CruiserService } from "./service";
 import { mark } from "./startup-profile";
+import type { CreateForm, Store } from "./store";
+import { TermManager } from "./term/term-manager";
 
 const log = createLogger("info");
 
@@ -28,6 +29,7 @@ const NUM_FIELDS: Set<string> = new Set(["cpus", "memMiB", "diskGiB", "snapKeep"
 const MASKED_FIELDS = new Set(["password", "diskPassword", "diskPassword2", "unlock-pw"]);
 const BOOL_FIELDS: Set<string> = new Set([
     "snap", "extraFonts", "autologin", "nestedVirt", "swVk",
+    "tpm", "secureBoot", "sound", "microphone", "clipboard", "urlOpen", "vsock",
     "syncTheme", "syncAccent", "syncContrast", "syncTimezone", "syncLocale",
     "syncKeyboard", "syncMonitors", "syncHostWallpaper", "syncScale", "syncShares",
     "syncGit", "syncProxy", "syncCa", "syncAgent", "syncGitKey",
@@ -167,6 +169,13 @@ export class CruiserShell {
             if (!route) return;
             st().setRoute(route, d.vm ?? null);
             if (route === "logs") void svc.loadLogUnits();
+            if (route === "vm") {
+                // The detail screen's hotplug list + balloon target want
+                // fresh host state — seed the input from the summary.
+                void svc.refreshUsb();
+                const v = st().vms.find((x) => x.name === d.vm);
+                st().setMemTarget(String(v?.memBalloonMiB ?? v?.memMiB ?? ""));
+            }
             if (route === "create") {
                 void svc.refreshCreateExtras();
                 // Fresh wizard on each entry — also clears values an Edit
@@ -232,6 +241,13 @@ export class CruiserShell {
                 else if (gpuChanged && st().create.viewer === "rdp")
                     st().setField("viewer", "dmabuf");
             }
+            // picking a windows install/disk re-scopes release + forces the
+            // gpu the chosen driver needs (yttrium = venus blob scanouts).
+            if ((k === "method" && v === "windows") || (k === "distro" && v === "windows")) {
+                st().setField("release", DISTROS.windows.releases[0]!.id);
+                if (st().create.winDriver === "yttrium") st().setField("gpu", "venus");
+            }
+            if (k === "winDriver" && v === "yttrium") st().setField("gpu", "venus");
         });
         // Input ✕ chips — routes by data-field exactly like wireInputs:
         // "" to the same store slot the input binds to (numeric fields get
@@ -312,9 +328,14 @@ export class CruiserShell {
             Object.assign(st().create, {
                 name: vm.name, cpus: vm.cpus, memMiB: vm.memMiB, diskGiB: vm.diskGiB,
                 nestedVirt: vm.nestedVirt,
+                cpuQuota: vm.limits.cpuQuota ?? "", memMax: vm.limits.memoryMax ?? "",
+                ioWeight: vm.limits.ioWeight ? String(vm.limits.ioWeight) : "",
                 nice: String(vm.nice ?? 0),
                 ioClass: vm.ioClass ?? "default",
                 ioPrio: String(vm.ioPrio ?? 4),
+                // family only re-scopes which linux-only sections render —
+                // provisioning fields are frozen for an existing VM anyway.
+                distro: vm.osFamily,
                 gpu: vm.gpuMode, swVk: vm.swVk, headMode: vm.headMode,
                 // dmabuf is preselected whenever the gpu can export scanouts
                 // — a saved rdp only survives an explicit re-pick.
@@ -324,6 +345,10 @@ export class CruiserShell {
                 autostart: vm.autostart, autoView: vm.autostartView, netMode: vm.netMode,
                 vd: vm.vd, usb: [...vm.usbKeys], agentKeys: [...(vm.agentKeys ?? [])],
                 snapAuto: vm.snapAuto, snapTrigger: vm.snapTrigger, snapKeep: vm.snapKeep,
+                tpm: vm.security.tpm, secureBoot: vm.security.secureBoot,
+                sound: vm.dispFlags.sound, microphone: vm.dispFlags.microphone,
+                clipboard: vm.dispFlags.clipboard, urlOpen: vm.dispFlags.urlOpen,
+                vsock: vm.vsock, qemuArgs: joinQemuArgs(vm.qemuArgs),
             });
             const sy = vm.sync;
             if (sy) Object.assign(st().create, {
@@ -346,6 +371,16 @@ export class CruiserShell {
         this.host.onAction("vm-start", (d) => { if (d.vm) svc.start(d.vm); });
         this.host.onAction("vm-stop", (d) => { if (d.vm) svc.stop(d.vm); });
         this.host.onAction("vm-resume", (d) => { if (d.vm) svc.resume(d.vm); });
+        this.host.onAction("vm-suspend", (d) => { if (d.vm) svc.suspend(d.vm); });
+        this.host.onAction("vm-reboot", (d) => { if (d.vm) svc.reboot(d.vm); });
+        this.host.onAction("vm-hibernate", (d) => { if (d.vm) svc.hibernate(d.vm); });
+        this.host.onAction("vm-cad", (d) => { if (d.vm) svc.sendCtrlAltDel(d.vm); });
+        this.host.onAction("vm-memset", (d) => { if (d.vm) void svc.setMemoryLive(d.vm); });
+        this.host.onAction("usb-attach", (d) => { if (d.vm && d.key) void svc.usbAttachNow(d.vm, d.key); });
+        this.host.onAction("usb-detach", (d) => { if (d.vm && d.id) void svc.usbDetachNow(d.vm, d.id); });
+        this.host.onAction("vm-backup", (d) => { if (d.vm) void svc.backupVm(d.vm); });
+        this.host.onAction("vm-fstrim", (d) => { if (d.vm) void svc.fstrimVm(d.vm); });
+        this.host.onAction("vm-compact", (d) => { if (d.vm && this.armed(`vm-compact:${d.vm}`)) void svc.compactVm(d.vm); });
         this.host.onAction("vm-kill", (d) => { if (d.vm && this.armed(`vm-kill:${d.vm}`)) svc.kill(d.vm); });
         this.host.onAction("vm-rm", (d) => { if (d.vm && this.armed(`vm-rm:${d.vm}`)) svc.remove(d.vm); });
         this.host.onAction("vm-view", (d) => { if (d.vm) svc.view(d.vm); });
@@ -474,6 +509,7 @@ export class CruiserShell {
             // vm-desc / share-* bind outside the create form — write directly
             // (a re-render would destroy the focused input).
             if (field === "vm-desc") { this.store.getState().setVmDesc(String(ev.v)); return; }
+            if (field === "memtarget") { this.store.getState().setMemTarget(String(ev.v)); return; }
             // unlock-pw binds to the banner state, not the create form — it's
             // masked, so it falls through to the MASKED_FIELDS branch below.
             if (field.startsWith("share-")) {

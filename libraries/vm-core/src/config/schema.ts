@@ -12,10 +12,10 @@ export type HeadMode = z.infer<typeof HeadMode>;
 export const GpuMode = z.enum(["venus", "virgl", "software"]);
 export type GpuMode = z.infer<typeof GpuMode>;
 
-export const DistroFamily = z.enum(["ubuntu", "debian", "fedora"]);
+export const DistroFamily = z.enum(["ubuntu", "debian", "fedora", "windows"]);
 export type DistroFamily = z.infer<typeof DistroFamily>;
 
-export const GuestDesktop = z.enum(["gnome", "kde"]);
+export const GuestDesktop = z.enum(["gnome", "kde", "windows"]);
 export type GuestDesktop = z.infer<typeof GuestDesktop>;
 
 export const GuestBrowser = z.enum(["none", "firefox", "chrome", "chromium", "vivaldi", "brave"]);
@@ -162,7 +162,11 @@ export const HostFwd = z.object({
 });
 export type HostFwd = z.infer<typeof HostFwd>;
 
-export const VmSpec = z.object({
+/** POSIX username constraint — exported so provision can re-validate
+ *  CLI/UI input without reaching into VmSpec internals. */
+export const Username = z.string().regex(/^[a-z_][a-z0-9_-]{0,31}$/);
+
+const VmSpecObject = z.object({
     version: z.literal(1).default(1),
     name: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
 
@@ -414,6 +418,21 @@ export const VmSpec = z.object({
          *  -u "$U"` for user-context steps). Re-runs on re-provision, so
          *  the script should be idempotent. */
         provisionScript: z.string().default(""),
+        /**
+         * family=windows only: which display driver the guest provisions.
+         * "yttrium" = the viogpu3d/WDDM alpha (Venus → blob scanouts → the
+         * zero-copy dmabuf viewer path); requires testsigning + Secure Boot
+         * off, so it conflicts with security.secureBoot (enforced in the
+         * spec refinement below). "virtio2d" = stock virtio-win viogpudo —
+         * 2D scanouts reach viewer-dd via the memfd Map path (one copy).
+         */
+        winDriver: z.enum(["yttrium", "virtio2d"]).default("yttrium"),
+        /**
+         * family=windows only: /IMAGE/NAME inside a multi-edition install
+         * ISO (e.g. "Windows 11 Pro"). Unset = the catalog default for
+         * os.release; set "" to let setup pick its only image (eval ISOs).
+         */
+        winEdition: z.string().optional(),
     }).prefault({}),
 
     network: z.object({
@@ -428,6 +447,16 @@ export const VmSpec = z.object({
         sshPort: z.number().int().optional(),     // resolved+stored at create
         rdpPort: z.number().int().optional(),
         vsock: z.boolean().default(true),         // vhost-vsock-pci for waypipe
+    }).prefault({}),
+
+    /**
+     * Escape hatch: raw QEMU argv appended verbatim at launch — features
+     * cruiser doesn't model land here ("-rtc base=localtime",
+     * "-boot menu=on"). Boot-frozen; unvalidated — bad args fail the
+     * launch with a qemu error in the runner log.
+     */
+    qemu: z.object({
+        extraArgs: z.array(z.string()).default([]),
     }).prefault({}),
 
     /**
@@ -452,14 +481,15 @@ export const VmSpec = z.object({
     }).prefault({}),
 
     provisioned: z.object({
-        method: z.enum(["cloudimg", "iso", "imported"]).optional(),
+        method: z.enum(["cloudimg", "iso", "imported", "windows-iso"]).optional(),
         source: z.string().optional(),
         completedAt: z.string().optional(),
     }).prefault({}),
 
     credentials: z.object({
         // POSIX username — interpolated into shell scripts and ini files.
-        username: z.string().regex(/^[a-z_][a-z0-9_-]{0,31}$/).default("cruiser"),
+        // (Also fine as a Windows local account name.)
+        username: Username.default("cruiser"),
         /** Path to a 0600 file holding the RDP/SSH password (never inline). */
         passwordFile: z.string().optional(),
         /** Host path to a private SSH key the gitKey channel installs in
@@ -479,6 +509,32 @@ export const VmSpec = z.object({
      *  leaves nothing to look at). Best-effort on the systemd edge: no
      *  display server ready = no window, the VM still starts. */
     autostartView: z.boolean().default(false),
+});
+
+/**
+ * Cross-field rules — currently all the windows-guest constraints:
+ *   - os.winDriver=yttrium needs testsigning, which Secure Boot forbids.
+ *   - disk.encrypt="home" is Linux-shaped (guest ext4 + /home migration).
+ *   - headMode "app" is waypipe — no Windows equivalent (RDP RAIL someday).
+ * Field schemas stay on the object so .shape survives for callers that
+ * introspect (create form); refinements run on parse/safeParse.
+ */
+export const VmSpec = VmSpecObject.superRefine((s, ctx) => {
+    if (s.os.family !== "windows") return;
+    if (s.os.winDriver === "yttrium" && s.security.secureBoot)
+        ctx.addIssue({ code: "custom", path: ["security", "secureBoot"],
+            message: "os.winDriver=yttrium needs testsigning — Secure Boot must be off" });
+    if (s.os.winDriver === "yttrium" && s.gpu.mode !== "venus")
+        ctx.addIssue({ code: "custom", path: ["gpu", "mode"],
+            message: "os.winDriver=yttrium needs gpu.mode=venus (blob scanouts → dmabuf viewer)" });
+    // note: software gpu is still virtio-vga (2D scanouts flow over the
+    // Map path) — a valid no-rendernode fallback for winDriver=virtio2d.
+    if (s.disk.encrypt === "home")
+        ctx.addIssue({ code: "custom", path: ["disk", "encrypt"],
+            message: "encrypt=home is a Linux guest feature — windows guests support off|full only" });
+    if (s.display.headMode === "app")
+        ctx.addIssue({ code: "custom", path: ["display", "headMode"],
+            message: "headMode=app is waypipe (Linux only) — use virtual-desktop/windowed/fullscreen-monitor" });
 });
 export type VmSpec = z.infer<typeof VmSpec>;
 

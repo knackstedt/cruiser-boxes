@@ -3,32 +3,32 @@
 // store, and executes actions (create/provision/start/stop/view/snapshots).
 // ============================================================================
 
-import { VmRegistry, linkVmDir } from "../../vm-core/src/lifecycle/registry";
-import { VmHandle } from "../../vm-core/src/lifecycle/vm";
-import { syncAutostartUnit, autostartNames } from "../../vm-core/src/lifecycle/autostart";
-import { defaultSpec, DevTool, VmSpec } from "../../vm-core/src/config/schema";
-import { makeShare } from "../../vm-core/src/config/shares";
-import { CACHE_DIR, CLOUDIMG_DIR, CONFIG_DIR, DATA_DIR, ISO_DIR, VMS_DIR, vmRealDir } from "../../vm-core/src/paths";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { cpus, homedir, totalmem } from "node:os";
+import { dirname, join } from "node:path";
 import { detectAdapter, detectSession } from "../../host-int/src/detect";
 import { flatpakId, installHostCli } from "../../host-int/src/host-cli";
 import { hostSshKeys } from "../../host-int/src/hoststate";
 import { defaultMountpoint, isMounted } from "../../host-int/src/mount";
-import type { VmSession } from "../../provision/src/session";
 import { ViewerSession } from "../../host-int/src/session";
-import { listUsbDevices } from "../../vm-core/src/usb/usb";
-import { runnerLogFiles, tailFile, guestJournal, guestJournalUnits } from "../../vm-core/src/logs";
+import type { VmSession } from "../../provision/src/session";
 import { run, which } from "../../sys/src/exec";
-import { cpus, totalmem, homedir } from "node:os";
-import { dirname, join } from "node:path";
-import { readFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { mark } from "./startup-profile";
-import { VmMetricsSampler } from "./metrics";
-import type { ActionState, CreateForm, DoctorRow, HostInfo, Store, VmSummary } from "./store";
-import { SYNC_CHANNELS, type SyncId } from "../../vm-core/src/config/sync-channels";
 import { bootRelevantChanges } from "../../vm-core/src/config/boot-diff";
+import { DevTool, VmSpec, defaultSpec } from "../../vm-core/src/config/schema";
+import { makeShare } from "../../vm-core/src/config/shares";
+import { SYNC_CHANNELS, type SyncId } from "../../vm-core/src/config/sync-channels";
 import { runAutoSnapshot } from "../../vm-core/src/lifecycle/autosnap";
-import type { SyncFormKey } from "./store";
+import { autostartNames, syncAutostartUnit } from "../../vm-core/src/lifecycle/autostart";
+import { VmRegistry, linkVmDir } from "../../vm-core/src/lifecycle/registry";
+import { VmHandle } from "../../vm-core/src/lifecycle/vm";
+import { guestJournal, guestJournalUnits, runnerLogFiles, tailFile } from "../../vm-core/src/logs";
+import { CACHE_DIR, CLOUDIMG_DIR, CONFIG_DIR, DATA_DIR, ISO_DIR, VMS_DIR, vmRealDir } from "../../vm-core/src/paths";
+import { splitQemuArgs } from "../../vm-core/src/qemu/args";
+import { listUsbDevices } from "../../vm-core/src/usb/usb";
+import { VmMetricsSampler } from "./metrics";
+import { mark } from "./startup-profile";
+import type { ActionState, CreateForm, DoctorRow, HostInfo, Store, SyncFormKey, VmSummary } from "./store";
 
 /** create/edit form sync fields → spec.sync keys — derived from the
  *  channel registry so a new channel needs no edit here. */
@@ -246,10 +246,18 @@ export class CruiserService {
         const s = h.spec;
         return {
             name: s.name, state,
+            osFamily: s.os.family,
             gpuMode: s.gpu.mode, swVk: s.gpu.softwareVk, headMode: s.display.headMode,
             viewer: s.display.viewer,
             cpus: s.resources.cpus, memMiB: s.resources.memoryMiB,
             diskGiB: s.disk.sizeGiB, nestedVirt: s.resources.nestedVirt,
+            limits: { ...s.resources.limits },
+            security: { tpm: s.security.tpm, secureBoot: s.security.secureBoot },
+            dispFlags: { sound: s.display.sound, microphone: s.display.microphone,
+                clipboard: s.display.clipboard, urlOpen: s.display.urlOpen },
+            vsock: s.network.vsock,
+            qemuArgs: [...s.qemu.extraArgs],
+            hibernated: h.hibernated(),
             nice: s.resources.sched.nice, ioClass: s.resources.sched.ioClass,
             ioPrio: s.resources.sched.ioPrio,
             sshPort: s.network.sshPort, rdpPort: s.network.rdpPort,
@@ -293,6 +301,8 @@ export class CruiserService {
         if (!s.net.length) s.net = prev.net;
         if (!s.gpu.length) s.gpu = prev.gpu;
         s.gpuMemBytes ??= prev.gpuMemBytes;
+        s.memBalloonMiB ??= prev.memBalloonMiB;
+        s.usbAttached ??= prev.usbAttached;
         s.hostDiskBytes ??= prev.hostDiskBytes;
         s.guestUsedBytes ??= prev.guestUsedBytes;
         s.guestTotalBytes ??= prev.guestTotalBytes;
@@ -324,10 +334,14 @@ export class CruiserService {
         if (state !== "stopped" && this.stopping.has(h.spec.name)) state = "stopping";
         const base = this.baseSummary(h, state);
         onEarly?.(base);   // real state before the slow metrics/snaps pass
-        const [mt, snaps] = await Promise.all([
+        const [mt, snaps, usbA, balloon] = await Promise.all([
             this.metrics.sample(h, state),
             this.snapNames(h, state),
+            state === "running" ? h.usbAttachedList().catch(() => []) : Promise.resolve([]),
+            state === "running" ? h.balloonInfo().catch(() => null) : Promise.resolve(null),
         ]);
+        base.usbAttached = usbA;
+        base.memBalloonMiB = balloon ? Math.round(balloon.actual / 1048576) : undefined;
         base.snapshots = snaps;
         base.hostDiskBytes = mt.hostDiskBytes;
         base.guestUsedBytes = mt.guestUsedBytes;
@@ -385,6 +399,12 @@ export class CruiserService {
         } finally {
             this.refreshing = false;
         }
+    }
+
+    /** Light USB-only re-enumeration — the vm detail screen's hotplug list
+     *  needs fresh host devices without the whole create-extras probe set. */
+    async refreshUsb(): Promise<void> {
+        this.usbToStore(await listUsbDevices().catch(() => []));
     }
 
     private usbToStore(usb: Awaited<ReturnType<typeof listUsbDevices>>): void {
@@ -494,6 +514,23 @@ export class CruiserService {
 
     // ── actions ──
 
+    /** Parse the cgroup-cap form fields into a resources.limits object —
+     *  shared create/save pre-flight. null = a warn was already set. */
+    private parseLimits(f: CreateForm): VmSpec["resources"]["limits"] | null {
+        const st = this.store.getState();
+        const lim: VmSpec["resources"]["limits"] = {};
+        const q = f.cpuQuota.trim();
+        if (q && !/^\d+(\.\d+)?%$/.test(q)) { st.setStatus("cpu quota must be a percent like '50%' or '200%'", "warn"); return null; }
+        if (q) lim.cpuQuota = q;
+        const m = f.memMax.trim();
+        if (m && !/^\d+(\.\d+)?[kmgtp]?$/i.test(m)) { st.setStatus("memory max must be a size like '8G' (or blank)", "warn"); return null; }
+        if (m) lim.memoryMax = m;
+        const w = f.ioWeight.trim();
+        if (w && (!/^\d+$/.test(w) || +w < 1 || +w > 10000)) { st.setStatus("io weight must be an integer between 1 and 10000", "warn"); return null; }
+        if (w) lim.ioWeight = +w;
+        return lim;
+    }
+
     /** Parse the form's sched text inputs — "" = unset. Returns an error
      *  string on a bad value so create/save can bail before touching spec. */
     private parseSchedForm(f: CreateForm): VmSpec["resources"]["sched"] | string {
@@ -560,6 +597,8 @@ export class CruiserService {
             st.setStatus("the dmabuf viewer needs a GL gpu — pick venus/virgl or the rdp viewer", "warn");
             return;
         }
+        const lim = this.parseLimits(f);
+        if (!lim) return;
         const sched = this.parseSchedForm(f);
         if (typeof sched === "string") { st.setStatus(sched, "warn"); return; }
         await this.run(`create ${f.name}`, async () => {
@@ -567,16 +606,25 @@ export class CruiserService {
             spec.resources.cpus = f.cpus;
             spec.resources.memoryMiB = f.memMiB;
             spec.resources.nestedVirt = f.nestedVirt;
+            spec.resources.limits = lim;
             spec.resources.sched = sched;
             spec.disk.sizeGiB = f.diskGiB;
             spec.gpu.mode = f.gpu as VmSpec["gpu"]["mode"];
             spec.gpu.softwareVk = f.swVk;
             spec.display.headMode = f.headMode as VmSpec["display"]["headMode"];
             spec.display.viewer = f.viewer as VmSpec["display"]["viewer"];
+            spec.display.sound = f.sound;
+            spec.display.microphone = f.microphone;
+            spec.display.clipboard = f.clipboard;
+            spec.display.urlOpen = f.urlOpen;
             spec.persist = f.persist as VmSpec["persist"];
             spec.autostart = f.autostart;
             spec.autostartView = f.autoView;
             spec.network.mode = f.netMode as VmSpec["network"]["mode"];
+            spec.network.vsock = f.vsock;
+            spec.security.tpm = f.tpm;
+            spec.security.secureBoot = f.secureBoot;
+            spec.qemu.extraArgs = splitQemuArgs(f.qemuArgs);
             spec.snapshots.auto = f.snapAuto as VmSpec["snapshots"]["auto"];
             spec.snapshots.trigger = f.snapTrigger as VmSpec["snapshots"]["trigger"];
             spec.snapshots.keep = f.snapKeep;
@@ -586,9 +634,12 @@ export class CruiserService {
             spec.credentials.username = f.username;
             // the ISO autoinstall path is subiquity — ubuntu-only for now;
             // in-guest os-release detection rescues a stale family anyway
-            spec.os.family = (f.method === "iso" ? "ubuntu" : f.distro) as VmSpec["os"]["family"];
-            spec.os.release = f.method === "cloudimg" ? f.release : "";
-            spec.os.desktop = f.desktop as VmSpec["os"]["desktop"];
+            const winGuest = f.method === "windows" || f.distro === "windows";
+            spec.os.family = (f.method === "iso" ? "ubuntu" : winGuest ? "windows" : f.distro) as VmSpec["os"]["family"];
+            spec.os.release = f.method === "cloudimg" || f.method === "windows" ? f.release : "";
+            spec.os.desktop = (winGuest ? "windows" : f.desktop) as VmSpec["os"]["desktop"];
+            spec.os.winDriver = f.winDriver as VmSpec["os"]["winDriver"];
+            if (f.winEdition) spec.os.winEdition = f.winEdition;
             spec.os.browser = f.browser as VmSpec["os"]["browser"];
             spec.os.snap = f.snap;
             spec.os.extraFonts = f.extraFonts;
@@ -649,6 +700,9 @@ export class CruiserService {
             } else if (f.method === "iso") {
                 const { provisionVmIso } = await import("../../provision/src/provision");
                 await provisionVmIso(h, { iso: f.iso, username: f.username, password: pw, onLog });
+            } else if (f.method === "windows") {
+                const { provisionVmWindows } = await import("../../provision/src/windows/provision");
+                await provisionVmWindows(h, { iso: f.iso || undefined, username: f.username, password: pw, onLog });
             } else if (f.method === "imported") {
                 spec.provisioned = { method: "imported", source: f.importPath, completedAt: new Date().toISOString() };
                 if (pw) {
@@ -696,6 +750,8 @@ export class CruiserService {
                 case "restore": await this.restoreSnapshot(name, p.arg!); break;
                 case "snapdel": await this.deleteSnapshot(name, p.arg!); break;
                 case "grow": await this.saveVm(); break;
+                case "backup": await this.backupVm(name); break;
+                case "compact": await this.compactVm(name); break;
             }
         } finally {
             await h.clearDiskKey();   // prompt-mode keys never outlive their op
@@ -870,6 +926,94 @@ export class CruiserService {
         await this.run(`resume ${name}`, () => h.resume(), { vm: name, verb: "resuming" });
     }
 
+    /** QMP stop — freezes the guest in place (RAM kept); Resume continues. */
+    async suspend(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        await this.run(`suspend ${name}`, () => h.suspend(), { vm: name, verb: "suspending" });
+    }
+
+    async reboot(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        await this.run(`reboot ${name}`, () => h.reboot(), { vm: name, verb: "rebooting" });
+    }
+
+    /** Suspend-to-disk — virgl/venus GPU state isn't migratable, so this is
+     *  a software-gpu-only path; the pre-check explains instead of failing. */
+    async hibernate(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        if (!h.isRunning()) { this.store.getState().setStatus(`${name} isn't running`, "warn"); return; }
+        if (h.spec.gpu.mode !== "software") {
+            this.store.getState().setStatus("hibernate needs gpu.mode=software — virgl/venus devices aren't migratable", "warn");
+            return;
+        }
+        await this.run(`hibernate ${name}`, () => h.hibernate(), { vm: name, verb: "hibernating" });
+    }
+
+    /** QMP send-key ctrl+alt+del — reaches the guest no matter what state
+     *  the viewer grab is in (Windows security screen / hung session). */
+    async sendCtrlAltDel(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        if (!h.isRunning()) { this.store.getState().setStatus(`${name} isn't running`, "warn"); return; }
+        await this.run(`ctrl+alt+del → ${name}`, () => h.sendCtrlAltDel(), { vm: name });
+    }
+
+    /** Live balloon resize — guest-visible MiB for this boot only, clamped
+     *  to the boot allocation by the handle. */
+    async setMemoryLive(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        const st = this.store.getState();
+        const mib = Math.round(Number(st.memTarget));
+        if (!Number.isFinite(mib) || mib < 256) { st.setStatus("memory target must be at least 256 MiB", "warn"); return; }
+        await this.run(`resize ${name} memory`, () => h.setMemory(mib),
+            { done: (t) => `${name}: guest-visible memory → ${t} MiB (this boot only)`, vm: name, verb: "resizing memory" });
+    }
+
+    /** Detail-page hot attach — key is the picker's "vid:pid[:serial]". */
+    async usbAttachNow(name: string, key: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        const st = this.store.getState();
+        const d = st.usbDevices.find((u) => u.key === key);
+        if (!d) { st.setStatus("that USB device isn't on the host anymore", "warn"); return; }
+        await this.run(`attach ${d.label} to ${name}`, async () => {
+            const id = await h.usbAttach(d.vendorId, d.productId, d.serial);
+            return id;
+        }, { done: (id) => `attached ${d.label} (${id})`, vm: name, verb: "attaching usb" });
+    }
+
+    async usbDetachNow(name: string, id: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        await this.run(`detach ${id} from ${name}`, () => h.usbDetach(id), { vm: name, verb: "detaching usb" });
+    }
+
+    /** Disk image copy — live blockdev-backup when running, offline convert
+     *  when stopped; destination picked with the save dialog. */
+    async backupVm(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        if (!this.diskKeyReady(h, "backup")) return;
+        const dest = await this.pickPath("save", `Backup ${name} to`,
+            join(dirname(h.paths.dir), `${h.spec.name}-backup.qcow2`));
+        if (!dest) return;
+        await this.run(`backup ${name}`, () => h.backup(dest),
+            { done: () => `backup → ${dest}`, vm: name, verb: "backing up" });
+    }
+
+    /** FITRIM all guest mounts — running VM only (QGA first, ssh fallback). */
+    async fstrimVm(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        if (!h.isRunning()) { this.store.getState().setStatus(`${name} isn't running — fstrim works inside the guest`, "warn"); return; }
+        await this.run(`fstrim ${name}`, () => h.fstrim(), { done: (r) => r, vm: name, verb: "trimming" });
+    }
+
+    /** Sparse-rewrite the qcow2 in place — stopped VM; the two-click arm is
+     *  the acceptance for dropping internal snapshots (force path). */
+    async compactVm(name: string): Promise<void> {
+        const h = this.handles.get(name); if (!h) return;
+        if (h.isRunning()) { this.store.getState().setStatus(`stop ${name} before compacting the disk`, "warn"); return; }
+        if (!this.diskKeyReady(h, "compact")) return;
+        await this.run(`compact ${name}`, () => h.compact({ force: true }),
+            { done: (r) => `${name}: ${fmtBytes(r.before)} → ${fmtBytes(r.after)} (${fmtBytes(r.before - r.after)} reclaimed)`, vm: name, verb: "compacting" });
+    }
+
     /** Save the edit form back onto the VM's spec. Only boot-time fields are
      *  editable — provisioning/credentials are baked in at provision time. */
     async saveVm(): Promise<void> {
@@ -893,6 +1037,8 @@ export class CruiserService {
             st.setStatus("the dmabuf viewer needs a GL gpu — pick venus/virgl or the rdp viewer", "warn");
             return;
         }
+        const lim = this.parseLimits(f);
+        if (!lim) return;
         const sched = this.parseSchedForm(f);
         if (typeof sched === "string") { st.setStatus(sched, "warn"); return; }
         // A changed VM location physically moves the dir — QEMU must not
@@ -910,17 +1056,26 @@ export class CruiserService {
             spec.resources.cpus = f.cpus;
             spec.resources.memoryMiB = f.memMiB;
             spec.resources.nestedVirt = f.nestedVirt;
+            spec.resources.limits = lim;
             spec.resources.sched = sched;
             spec.disk.sizeGiB = f.diskGiB;
             spec.gpu.mode = f.gpu as VmSpec["gpu"]["mode"];
             spec.gpu.softwareVk = f.swVk;
             spec.display.headMode = f.headMode as VmSpec["display"]["headMode"];
             spec.display.viewer = f.viewer as VmSpec["display"]["viewer"];
+            spec.display.sound = f.sound;
+            spec.display.microphone = f.microphone;
+            spec.display.clipboard = f.clipboard;
+            spec.display.urlOpen = f.urlOpen;
             if (f.vd > 0) spec.display.virtualDesktop = f.vd;
             spec.persist = f.persist as VmSpec["persist"];
             spec.autostart = f.autostart;
             spec.autostartView = f.autoView;
             spec.network.mode = f.netMode as VmSpec["network"]["mode"];
+            spec.network.vsock = f.vsock;
+            spec.security.tpm = f.tpm;
+            spec.security.secureBoot = f.secureBoot;
+            spec.qemu.extraArgs = splitQemuArgs(f.qemuArgs);
             spec.snapshots.auto = f.snapAuto as VmSpec["snapshots"]["auto"];
             spec.snapshots.trigger = f.snapTrigger as VmSpec["snapshots"]["trigger"];
             spec.snapshots.keep = f.snapKeep;
@@ -1434,6 +1589,15 @@ export class CruiserService {
         } catch { /* qemu-img unavailable — fall through to default */ }
         return { format: "qcow2", encrypted: false };
     }
+}
+
+/** Byte count → short human string for status lines. */
+function fmtBytes(n: number): string {
+    const gib = n / 1073741824;
+    if (gib >= 1) return `${gib.toFixed(1)} GiB`;
+    const mib = n / 1048576;
+    if (mib >= 1) return `${Math.round(mib)} MiB`;
+    return `${Math.round(n / 1024)} KiB`;
 }
 
 /** Same probe doctor runs: the host kvm module's nested= parameter. */

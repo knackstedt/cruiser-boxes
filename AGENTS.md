@@ -1,6 +1,8 @@
 # cruiser — agent notes
 
-WinBoat-style QEMU/KVM VM manager for **Linux guests only**, on the DownDraft
+WinBoat-style QEMU/KVM VM manager for **Linux guests plus a Windows target**
+(`os.family=windows` — unattend ISO install + virtio-win/yttrium drivers;
+linux-only features are schema- and UI-gated), on the DownDraft
 native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
 
 ## Commands
@@ -299,7 +301,13 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   Workspace::xineramaIndexToOutput during manage() (4x SIGSEGV restart
   loop observed, kwin recovered only after the window died). The
   session's setFullscreen (wmctrl path) evaluates the dormant hint —
-  same timing as freerdp /multimon.
+  same timing as freerdp /multimon. Two later KWin gotchas: (a) KWin
+  DELETES _NET_WM_FULLSCREEN_MONITORS when it consumes a fullscreen
+  transition, so the viewer re-arms it from PropertyNotify(type 28) —
+  without that the first toggle lost the span and shrank to one monitor;
+  (b) KWin clips an over-screen window to one output during manage(), so
+  the union XMoveResizeWindow is re-asserted ~1.5s after map (the pre-map
+  placement doesn't stick).
   head_rects() only uses the span layout while the drawable is union-sized
   (±2px) — a WM that collapsed the span gets the composite-letterbox
   fallback instead of a crop; windowed mode letterboxes the whole
@@ -325,6 +333,16 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   y0_top=false sample upright ONLY with the v-flip (v_bottom=(y+h)/bh);
   treating the flag literally renders every head upside-down (observed on
   NVIDIA EGL). Imports dedupe on fstat (dev,ino) + full attrib tuple.
+  Non-dmabuf scanouts (any guest without GL exports — stock virtio-win
+  viogpudo, WinPE, unaccelerated Linux): the listener also implements
+  `Scanout`/`Update` (inline pixels) and `ScanoutMAP`/`UpdateMAP`
+  (`Listener.Unix.Map` memfd → mmap), uploading into per-head GL textures
+  with damage-scissored `glTexSubImage2D`. Each head carries a live
+  kind (Dmabuf|Cpu|Mapped) and the worker holds ONE latest-job slot per
+  console, so a scanout-kind flip can't reorder a stale dma-buf over a
+  newer CPU frame; presents switch shader program/texture target per
+  head. One extra copy vs. dmabuf — the fallback keeps windows guests
+  and the installer visible on the same viewer.
   Clipboard (dmabuf): `-chardev qemu-vdagent,clipboard=on,mouse=off` +
   virtserialport `com.redhat.spice.0` (args.ts, gated on display.clipboard +
   a `-chardev help` probe — backend needs CONFIG_SPICE_PROTOCOL). Guest side
@@ -601,6 +619,68 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   watermarks in dead space. `shortcutsDoc` is viewer-aware (`display.viewer`
   rdp→freerdp text, dmabuf→viewer-dd) and drops the escape list when the
   host adapter can't bind shortcuts.
+  `windows/` — the `os.family=windows` pipeline
+  (`provision windows <vm> [iso]` / create-form "Windows" method):
+  `isos.ts` resolves three artifacts — the Windows ISO (Microsoft's
+  software-download-connector API: session-id'd tags→SKU→link flow with a
+  `Referer`, IP-sentinel-blocked on some networks → manual ISO path/URL
+  override), the virtio-win ISO (Fedora mirror, versioned dir → latest
+  fallback; CHECKSUM sidecar when published), and the yttrium release zip
+  (arehnman/yttrium-virtio-gpu GitHub releases) — all through
+  `ensureDownload`'s atomic cache. `unattend.ts` generates
+  autounattend.xml (EFI/MSR/Primary partition table, WinPE DriverPaths,
+  specialize RunSynchronous → cruiser-setup.ps1, OOBE autologon →
+  cruiser-done.cmd's shutdown = the host's install-complete signal) and
+  packs it + scripts + the yttrium payload into a Joliet seed ISO
+  (`buildSeedIso`). `install.ts` runs an OWNED QEMU with
+  `install.sata` — the three CDs on native AHCI so driverless WinPE sees
+  the media, while the system disk stays REAL virtio: the seed ISO's
+  WinPE DriverPaths supplies viostor, so the install runs on the same
+  storage path the production boot uses (no IDE→virtio 0x7B transition).
+  Completion = FirstLogonCommands' shutdown (QMP SHUTDOWN,guest=true) +
+  a marker on the serial log (COM1 echo — works for LUKS'd disks) or the
+  qcow2 MFT `strings` scan when unencrypted. `provision.ts` orchestrates: downloads →
+  seed ISO → install run → normal boot → QGA wait → `setup.ts`
+  PowerShell-over-`guestPs` (virtiofs→drive-letter mapping, vdagent
+  clipboard service, wallpaper, RDP) → `provisioned.method=windows-iso`.
+  Schema: `os.winDriver=yttrium|virtio2d` (yttrium needs
+  `gpu.mode=venus` + Secure Boot OFF — test-signed driver; virtio2d is
+  the stock signed fallback), `os.winEdition` selects the /IMAGE/NAME.
+  Multi-monitor = ONE virtio-gpu DEVICE per monitor (args.ts `winMulti`) —
+  viogpudo/viogpu3d are single-head drivers so max_outputs>1 leaves the
+  extra consoles dark. QEMU allows only one virtio-gpu-GL device, so
+  secondary monitors get plain virtio-gpu-pci (CPU Scanout path; viewer-dd
+  draws both). Each device head exports as its own D-Bus console in PCI
+  creation order, matching outs[].
+  Pointer agent (windows): virtio tablets enumerate as absolute HID MICE
+  and Windows pins them to the primary display — wisp's Digimon registry
+  association is digitizer-only (verified no-op) — so multi-monitor input
+  rides an in-guest agent: agent.ps1 dials the slirp guestfwd
+  (`guestfwd=tcp:10.0.2.250:28090-chardev:agfwd` — a QEMU-owned unix
+  server at run/agent.sock; guestfwd -unix: fails the launch since QEMU
+  connects at parse time, viewer-dd `--inject unix:` connects as the
+  client + re-dials on drop, CRUISER_VD_INJECT
+  overrides with a host:port connect-out for dev bridges) and injects
+  SendInput with MOUSEEVENTF_ABSOLUTE|VIRTUALDESK — spans the guest's
+  REAL display layout for any arrangement ("m <console> <x> <y>" lines,
+  DISPLAY<ci+1> → console ci; "b <btn> <down>", wheel on 3/4; "info"
+  logs the real layout). Dead/absent agent → viewer falls back to the
+  D-Bus tablet path (primary-confined but alive). Installed by setup.ts:
+  ProgramData\cruiser\agent.ps1 + INTERACTIVE-group logon task AND
+  HKLM\Run (Task Scheduler denies registration 0x80070005 even
+  user-context on hardened images; the agent's Local\ mutex makes the
+  double launch benign). Two shell caveats seen on win10 eval images:
+  powershell.exe via ShellExecute (Run dialog/Win+X) can fail "cannot
+  access the specified device, path, or file" while cmd→powershell
+  (CreateProcess) works fine — diagnose through a cmd /k window, not
+  the Run dialog; and `vm screenshot`/screendump never shows UAC or the
+  cursor (software cursor, no cursor plane — verify clicks by side
+  effects like menus, not pointer position).
+  The unattend password lives only in the transient seed ISO — never
+  the spec. QGA-on-windows is SYSTEM session 0: `guestPs` exec works but
+  `vm screenshot --guest` can't see the interactive desktop (schema/
+  screen.ts guard). CPU flags: windows specs get the hv_* enlightenment
+  set on -cpu host.
 - `libraries/app-mode` — waypipe over vsock (socat bridge) / ssh fallback.
   guestAppCatalog also scans flatpak export dirs (system+user), /usr/local,
   and snapd's, deduped by desktop id in XDG precedence order (user first);

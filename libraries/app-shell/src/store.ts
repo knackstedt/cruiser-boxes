@@ -3,11 +3,10 @@
 // ============================================================================
 
 import { createStore } from "zustand/vanilla";
-import type { VmState } from "../../vm-core/src/lifecycle/vm";
 import { syncFormDefaults, type SyncFormKey } from "../../vm-core/src/config/sync-channels";
+import type { VmState } from "../../vm-core/src/lifecycle/vm";
 
-export type { VmState };
-export type { SyncFormKey };
+export type { SyncFormKey, VmState };
 
 /** The flat sync* fields — keys derive from SYNC_CHANNELS.formKey, so the
  *  create form and spec.sync can never drift apart. */
@@ -28,6 +27,7 @@ export interface ShareRow {
 export interface VmSummary {
     name: string;
     state: VmState;
+    osFamily: string;              // spec.os.family — ubuntu|debian|fedora|windows
     gpuMode: string;
     swVk: boolean;                 // spec.gpu.softwareVk — host lavapipe over Venus
     headMode: string;
@@ -36,6 +36,21 @@ export interface VmSummary {
     memMiB: number;
     diskGiB: number;
     nestedVirt: boolean;           // spec.resources.nestedVirt
+    /** spec.resources.limits — host-side cgroup caps on QEMU (systemd --user
+     *  scope; boot-frozen). cpuQuota "50%" = half a core, "200%" = two;
+     *  memoryMax caps QEMU's RSS incl. guest RAM ("8G"); ioWeight 1-10000. */
+    limits: { cpuQuota?: string; memoryMax?: string; ioWeight?: number };
+    /** spec.security — swtpm + edk2 secure boot (boot-frozen). */
+    security: { tpm: boolean; secureBoot: boolean };
+    /** spec.display channel/device flags editable in the form (boot-frozen). */
+    dispFlags: { sound: boolean; microphone: boolean; clipboard: boolean; urlOpen: boolean };
+    vsock: boolean;                 // spec.network.vsock — vhost-vsock device
+    qemuArgs: string[];             // spec.qemu.extraArgs — raw argv escape hatch
+    hibernated: boolean;            // a pending suspend.mig/vmstate — Start resumes it
+    /** Live balloon readout (guest-visible MiB) — only fetched while running. */
+    memBalloonMiB?: number;
+    /** USB devices QEMU reports as passed through (info usb qmp ids). */
+    usbAttached?: { id: string; label: string }[];
     nice?: number;                 // spec.resources.sched.nice
     ioClass?: string;              // spec.resources.sched.ioClass — realtime|best-effort|idle
     ioPrio?: number;               // spec.resources.sched.ioPrio
@@ -92,6 +107,17 @@ export type CreateForm = SyncFormFields & {
     memMiB: number;
     diskGiB: number;
     nestedVirt: boolean;           // pass vmx/svm through — run KVM inside the guest
+    cpuQuota: string;              // resources.limits.cpuQuota — "50%", "" = uncapped
+    memMax: string;                // resources.limits.memoryMax — "8G", "" = uncapped
+    ioWeight: string;              // resources.limits.ioWeight — "1"-"10000", "" = default 100
+    qemuArgs: string;              // spec.qemu.extraArgs as one shell-lite string
+    tpm: boolean;                  // spec.security.tpm — swtpm 2.0
+    secureBoot: boolean;           // spec.security.secureBoot — edk2 secboot + SMM
+    sound: boolean;                // spec.display.sound — intel-hda guest audio
+    microphone: boolean;           // spec.display.microphone — hda-duplex mic in
+    clipboard: boolean;            // spec.display.clipboard — text clipboard sync
+    urlOpen: boolean;              // spec.display.urlOpen — guest links open on host
+    vsock: boolean;                // spec.network.vsock — vhost-vsock channel
     nice: string;                  // spec.resources.sched.nice — prefilled "0" (device default)
     ioClass: string;               // spec.resources.sched.ioClass — default|realtime|best-effort|idle
     ioPrio: string;                // spec.resources.sched.ioPrio — prefilled "4" (class default)
@@ -103,9 +129,11 @@ export type CreateForm = SyncFormFields & {
     autostart: boolean;            // spec.autostart — boot unit + start with the app
     autoView: boolean;             // spec.autostartView — viewer window opens on autostart
     netMode: string;               // spec.network.mode — nat|restricted|isolated|vmnet
-    method: string;                // none|cloudimg|iso|imported
-    distro: string;                // ubuntu|debian|fedora
-    release: string;               // cloudimg release
+    method: string;                // none|cloudimg|iso|windows|imported
+    distro: string;                // ubuntu|debian|fedora|windows
+    release: string;               // cloudimg release (or windows 10|11)
+    winDriver: string;             // yttrium|virtio2d — windows display driver
+    winEdition: string;            // unattend edition key ("" = ISO's default)
     desktop: string;               // gnome|kde
     browser: string;               // none|firefox|chrome|chromium|vivaldi|brave
     snap: boolean;                 // install snapd (off → flatpak only)
@@ -291,6 +319,8 @@ export interface CruiserState {
     unlockPw: string;
     /** Detail-screen password reveal — keyed to the VM, cleared on nav. */
     pwReveal: { vm: string; pw: string } | null;
+    /** Live balloon target input on the vm detail screen (MiB, session only). */
+    memTarget: string;
     /** Home-list filter string — matched against name/state/mode/desc. */
     vmFilter: string;
     /** USB picker: show devices that lack host access too. */
@@ -355,6 +385,7 @@ export interface CruiserActions {
     setAutoSnapPrompt(p: AutoSnapPrompt | null): void;
     setUnlockPrompt(p: UnlockPrompt | null): void;
     setPwReveal(r: { vm: string; pw: string } | null): void;
+    setMemTarget(v: string): void;
     setVmFilter(v: string): void;
     toggleUsbBlocked(): void;
     setOpenMenu(m: CruiserState["openMenu"]): void;
@@ -370,10 +401,14 @@ const defaultLogs = (): LogsState => ({
 
 const defaultCreate = (): CreateForm => ({
     name: "", cpus: 4, memMiB: 8192, diskGiB: 100, nestedVirt: false,
+    cpuQuota: "", memMax: "", ioWeight: "", qemuArgs: "",
+    tpm: false, secureBoot: false,
+    sound: true, microphone: true, clipboard: true, urlOpen: true, vsock: true,
     nice: "0", ioClass: "default", ioPrio: "4",
     gpu: "venus", swVk: false, headMode: "virtual-desktop", viewer: "dmabuf", persist: "daemonize",
     autostart: false, autoView: false, netMode: "nat",
     method: "cloudimg", distro: "ubuntu", release: "26.04", desktop: "gnome",
+    winDriver: "yttrium", winEdition: "",
     browser: "none", snap: false, extraFonts: false, autologin: true,
     preset: "standard", devtools: [],
     ...syncFormDefaults(),
@@ -414,6 +449,7 @@ export function createCruiserStore() {
         unlockPrompt: null,
         unlockPw: "",
         pwReveal: null,
+        memTarget: "",
         vmFilter: "",
         usbShowBlocked: false,
         openMenu: null,
@@ -446,6 +482,7 @@ export function createCruiserStore() {
         setAutoSnapPrompt: (autoSnapPrompt) => set({ autoSnapPrompt }),
         setUnlockPrompt: (unlockPrompt) => set({ unlockPrompt }),
         setPwReveal: (pwReveal) => set({ pwReveal }),
+        setMemTarget: (memTarget) => set({ memTarget }),
         setVmFilter: (vmFilter) => set({ vmFilter }),
         toggleUsbBlocked: () => set((s) => ({ usbShowBlocked: !s.usbShowBlocked })),
         setOpenMenu: (openMenu) => set({ openMenu }),

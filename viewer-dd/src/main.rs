@@ -17,9 +17,10 @@
 // the handlers only enqueue work — all GL happens on a dedicated worker
 // thread that owns the EGL context.
 use anyhow::{Context, Result};
+use std::io::Write as _;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 mod egl;
 use zbus::connection;
 use zvariant::Fd;
@@ -27,6 +28,15 @@ use zvariant::Fd;
 static DM_BUFS: AtomicU64 = AtomicU64::new(0);
 static UPDATES: AtomicU64 = AtomicU64::new(0);
 static MOUSE_VERBOSE: AtomicU64 = AtomicU64::new(0);
+/// --dump <path>: after every present, overwrite <path> with a PPM of the
+/// composited frame — lets a headless session read the guest's screen.
+static DUMP_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// --headless: listener-only probe — no window, no GL, no input grabs.
+/// ScanoutDMABUF2 events are logged with fstat'd dmabuf sizes instead of
+/// being handed to the GL worker.
+static HEADLESS: AtomicBool = AtomicBool::new(false);
+/// last logged headless scanout signature, for dedup
+static HD_SIG: AtomicU64 = AtomicU64::new(0);
 
 /// Per-console scanout dims — the window thread's input map needs them.
 struct Dims { w: AtomicU64, h: AtomicU64 }
@@ -39,6 +49,11 @@ struct Dims { w: AtomicU64, h: AtomicU64 }
 struct Heads {
     dims: Vec<std::sync::Arc<Dims>>,
     offsets: Vec<(u32, u32)>,
+    /// Per-console input mode: every console owns its absolute device
+    /// (e.g. a virtio-tablet bound display=gpuN), so SetAbsPosition takes
+    /// raw console-local px with no composite rescale. Signalled by an
+    /// all-zero --offsets list — there is no shared composite range.
+    local_input: bool,
 }
 
 /// GL-worker job — one shared channel for every console, so Fd carries
@@ -52,8 +67,35 @@ struct ScanFd {
     poff: u32, stride: u32, bw: u32, bh: u32,
     fourcc: u32, modifier: u64, y0_top: bool,
 }
+/// CPU-path scanout payload — the fallback for consoles QEMU exports as
+/// guest-RAM surfaces instead of dma-bufs (Windows virtio-2d, VGA boot,
+/// software gpu). Raw Scanout carries the pixels inline; ScanoutMap hands
+/// an fd+offset into shareable memory so the frame crosses p2p with no
+/// copy — only the GL texture upload still costs one.
+enum CpuSrc {
+    Pixels(Vec<u8>),
+    Mapped(std::os::fd::OwnedFd, u32),
+}
+struct CpuScan {
+    ci: usize,
+    src: CpuSrc,
+    w: u32, h: u32, stride: u32, fmt: u32,
+}
+/// Damage on a CPU-path console: `data` = raw Update pixels covering just
+/// the rect; None = UpdateMap (the rect is re-read from the stored mmap).
+struct CpuDmg {
+    ci: usize,
+    x: i32, y: i32, w: i32, h: i32,
+    stride: u32, fmt: u32,
+    data: Option<Vec<u8>>,
+}
 enum XJob {
     Fd(ScanFd),
+    /// Full CPU-frame scanout (raw Scanout or ScanoutMap) — replaces the
+    /// console's texture.
+    Cpu(CpuScan),
+    /// Damage on a CPU-frame console (raw Update or UpdateMap).
+    CpuDamage(CpuDmg),
     /// Damage rect on a console (scanout px) — QEMU emits one UpdateDMABUF
     /// per damaged region, so a frame's damage arrives as a serialized burst.
     Nudge(usize, i32, i32, i32, i32),
@@ -119,6 +161,50 @@ struct ViewerConsole {
 }
 
 impl ddproto::ConsoleEvents for ViewerConsole {
+    /// Raw (non-dmabuf) scanout — pixels inline in the method call.
+    fn scanout(&mut self, w: u32, h: u32, stride: u32, fmt: u32, data: Vec<u8>) {
+        let resized = self.dims.w.swap(w as u64, Ordering::Relaxed) != w as u64
+            || self.dims.h.swap(h as u64, Ordering::Relaxed) != h as u64;
+        static NS: AtomicU64 = AtomicU64::new(0);
+        let n = NS.fetch_add(1, Ordering::Relaxed) + 1;
+        if n % 120 == 1 || resized {
+            eprintln!("[listener:{}] Scanout#{n} {w}x{h} stride={stride} fmt={fmt:#x} bytes={}",
+                self.id, data.len());
+        }
+        let _ = self.tx.send(XJob::Cpu(CpuScan {
+            ci: self.idx, src: CpuSrc::Pixels(data), w, h, stride, fmt }));
+    }
+    /// Raw damage — `data` covers just the rect at `stride`.
+    fn update(&mut self, x: i32, y: i32, w: i32, h: i32, stride: u32, fmt: u32,
+              data: Vec<u8>) {
+        UPDATES.fetch_add(1, Ordering::Relaxed);
+        let _ = self.tx.send(XJob::CpuDamage(CpuDmg {
+            ci: self.idx, x, y, w, h, stride, fmt, data: Some(data) }));
+    }
+    /// memfd/mmap scanout — the frame lives in shared memory (guest-RAM
+    /// memfd), only the GL upload costs a copy.
+    fn scanout_map(&mut self, fd: zvariant::OwnedFd, off: u32, w: u32, h: u32,
+                   stride: u32, fmt: u32) {
+        let resized = self.dims.w.swap(w as u64, Ordering::Relaxed) != w as u64
+            || self.dims.h.swap(h as u64, Ordering::Relaxed) != h as u64;
+        static NM: AtomicU64 = AtomicU64::new(0);
+        let n = NM.fetch_add(1, Ordering::Relaxed) + 1;
+        if n % 120 == 1 || resized {
+            eprintln!("[listener:{}] ScanoutMap#{n} off={off} {w}x{h} stride={stride} fmt={fmt:#x}",
+                self.id);
+        }
+        // dup before returning — the callback fd's backing can go stale
+        let d = unsafe { std::os::fd::OwnedFd::from_raw_fd(libc::dup(fd.as_raw_fd())) };
+        let _ = self.tx.send(XJob::Cpu(CpuScan {
+            ci: self.idx, src: CpuSrc::Mapped(d, off), w, h, stride, fmt }));
+    }
+    /// Damage on the mapped scanout — no payload, the GL worker re-reads
+    /// the rect out of its live mmap.
+    fn update_map(&mut self, x: i32, y: i32, w: i32, h: i32) {
+        UPDATES.fetch_add(1, Ordering::Relaxed);
+        let _ = self.tx.send(XJob::CpuDamage(CpuDmg {
+            ci: self.idx, x, y, w, h, stride: 0, fmt: 0, data: None }));
+    }
     fn update_dmabuf(&mut self, x: i32, y: i32, w: i32, h: i32) {
         UPDATES.fetch_add(1, Ordering::Relaxed);
         // reply fast — QEMU gl-blocks the guest until this returns
@@ -159,6 +245,56 @@ impl ddproto::ConsoleEvents for ViewerConsole {
             eprintln!("[listener:{}] ScanoutDMABUF2#{n} planes={num_planes} {width}x{height} strides={strides:?} fourcc={} modifier=0x{modifier:x} backing={backing_width}x{backing_height} y0_top={y0_top}",
                 self.id, fourcc_str(fourcc));
         }
+        if HEADLESS.load(Ordering::Relaxed) {
+            let mut sig: u64 = 1469598103934665603;
+            let mut sizes: Vec<i64> = Vec::new();
+            for f in &dmabufs {
+                let sz = unsafe {
+                    let mut st: libc::stat = std::mem::zeroed();
+                    libc::fstat(f.as_raw_fd(), &mut st);
+                    st.st_size as i64
+                };
+                sizes.push(sz);
+            }
+            for v in [num_planes as u64, width as u64, height as u64,
+                      fourcc as u64, modifier, sizes.first().copied().unwrap_or(0) as u64] {
+                sig ^= v; sig = sig.wrapping_mul(1099511628211);
+            }
+            if HD_SIG.swap(sig, Ordering::Relaxed) != sig {
+                eprintln!("[headless:{}] ScanoutDMABUF2#{n} planes={num_planes} {width}x{height} strides={strides:?} offsets={offsets:?} fourcc={} modifier=0x{modifier:x} sizes={sizes:?}",
+                    self.id, fourcc_str(fourcc));
+            }
+            if let Some(p) = DUMP_PATH.get() {
+                let sz = sizes.first().copied().unwrap_or(0);
+                if sz > 0 {
+                    let map = unsafe {
+                        libc::mmap(std::ptr::null_mut(), sz as usize,
+                                   libc::PROT_READ, libc::MAP_SHARED,
+                                   dmabufs[0].as_raw_fd(), 0)
+                    };
+                    if map == libc::MAP_FAILED {
+                        eprintln!("[headless:{}] dmabuf mmap failed: {}",
+                            self.id, std::io::Error::last_os_error());
+                    } else {
+                        let stride = strides.first().copied().unwrap_or(0) as usize;
+                        let need = stride * height as usize;
+                        let data = unsafe { std::slice::from_raw_parts(map as *const u8, (sz as usize).min(need.max(sz as usize))) };
+                        let nz = data.iter().filter(|&&b| b != 0).count();
+                        let out = p.clone().replace(".ppm", &format!("-c{}-raw.bin", self.id));
+                        match std::fs::File::create(&out) {
+                            Ok(mut f) => {
+                                use std::io::Write;
+                                let _ = f.write_all(data);
+                                eprintln!("[headless:{}] dumped {} bytes ({} nonzero) → {}", self.id, data.len(), nz, out);
+                            }
+                            Err(e) => eprintln!("[headless:{}] dump write failed: {e}", self.id),
+                        }
+                        unsafe { libc::munmap(map, sz as usize); }
+                    }
+                }
+            }
+            return;
+        }
         if dmabufs.is_empty() || num_planes == 0 { return; }
         if num_planes > 1 { return; } // multi-plane not supported
         // hand the fd to the GL worker while it's live — QEMU fds can lose
@@ -173,7 +309,11 @@ impl ddproto::ConsoleEvents for ViewerConsole {
         }));
     }
     fn interfaces(&self) -> Vec<String> {
-        vec![ddproto::IFACE_LISTENER_DMABUF2.to_string()]
+        // DMABUF2 for GL scanouts (venus/yttrium path); Unix.Map so QEMU
+        // prefers the zero-copy-over-p2p memfd scanout for CPU consoles —
+        // raw Scanout/Update on the base iface needs no advertisement.
+        vec![ddproto::IFACE_LISTENER_DMABUF2.to_string(),
+             ddproto::IFACE_LISTENER_MAP.to_string()]
     }
 }
 
@@ -719,7 +859,7 @@ extern "C" fn xerror_handler(_d: *mut std::ffi::c_void, e: *mut XErrEv) -> i32 {
 /// are read; the rest is re-sent verbatim. `client` is written for the
 /// _NET_WM_STATE fullscreen request.
 #[repr(C)]
-union XEvBuf { any: XAnyEv, key: XKeyEv, client: XClientMsgEv, _pad: [u64; 24] }
+union XEvBuf { any: XAnyEv, key: XKeyEv, client: XClientMsgEv, prop: XPropEv, _pad: [u64; 24] }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -748,6 +888,17 @@ struct XClientMsgEv {
     t: i32, _p0: i32, _serial: u64, _send_event: i32, _p1: i32,
     _dpy: u64, win: u64, msg_type: u64, fmt: i32, _p2: i32,
     data: [u64; 5],
+}
+
+/// XPropertyEvent (type 28) — KWin DELETES _NET_WM_FULLSCREEN_MONITORS
+/// after evaluating a fullscreen transition (it's a request property to
+/// KWin, not persistent state), so the next toggle sees a bare window.
+/// state: 0=NewValue, 1=Delete — we re-arm on Delete only.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct XPropEv {
+    _t: i32, _p0: i32, _serial: u64, _send_event: i32, _p1: i32,
+    _dpy: u64, _win: u64, atom: u64, _time: u64, state: i32, _p2: i32,
 }
 
 #[repr(C)]
@@ -977,13 +1128,50 @@ fn mouse_set(monitor: &str, rel: bool) -> Result<()> {
 /// device activating during guest boot can steal the head handler back,
 /// so a call that fails on mode grounds re-asserts the wanted mode.
 fn input_worker(conn: std::sync::Arc<zbus::blocking::Connection>,
-                paths: Vec<String>, rx: std::sync::mpsc::Receiver<In>, monitor: String) {
+                paths: Vec<String>, rx: std::sync::mpsc::Receiver<In>, monitor: String,
+                inject_addr: Option<String>) {
     let kbds: Vec<_> = paths.iter().map(|p|
         zbus::blocking::Proxy::new(&conn, "org.qemu", p.as_str(),
             "org.qemu.Display1.Keyboard").expect("kbd proxy")).collect();
     let mice: Vec<_> = paths.iter().map(|p|
         zbus::blocking::Proxy::new(&conn, "org.qemu", p.as_str(),
             "org.qemu.Display1.Mouse").expect("mouse proxy")).collect();
+    // --inject — Windows guests can't map virtio-tablet's absolute HID
+    // mouse beyond the primary display, so pointer events go to a guest
+    // agent (SendInput VIRTUALDESK) instead of the Mouse proxies. Lines:
+    // "m <ci> <x> <y>" / "b <btn> <down>" (console-local px). Dead
+    // socket → fall back to the D-Bus path so input never dies.
+    //   unix:<path> — CONNECT to QEMU's guestfwd chardev socket (slirp
+    //     pipes guest→agent bytes here; QEMU owns the listener).
+    //   <host:port> — CONNECT to a dev bridge.
+    // Both are connect-mode: the guestfwd chardev exists before the viewer
+    // starts and re-accepts after disconnect, so a dead socket just
+    // re-dials (1s throttle) rather than stranding input.
+    fn dial_inject(a: &str) -> Option<Box<dyn std::io::Write + Send>> {
+        if let Some(path) = a.strip_prefix("unix:") {
+            match std::os::unix::net::UnixStream::connect(path) {
+                Ok(s) => return Some(Box::new(s)),
+                Err(e) => { eprintln!("[input] inject unix:{path} connect failed: {e}"); }
+            }
+        } else {
+            match std::net::TcpStream::connect(a) {
+                Ok(s) => { let _ = s.set_nodelay(true); return Some(Box::new(s)); }
+                Err(e) => { eprintln!("[input] inject connect {a} failed: {e}"); }
+            }
+        }
+        None
+    }
+    let mut inject: Option<Box<dyn std::io::Write + Send>> = None;
+    let mut connect_addr: Option<String> = None; // connect-mode target, for re-dial
+    match inject_addr.as_deref() {
+        Some(a) => {
+            connect_addr = Some(a.to_string());
+            inject = dial_inject(a);
+            if inject.is_some() { eprintln!("[input] inject → {a}"); }
+        }
+        None => {}
+    }
+    let mut last_redial = std::time::Instant::now() - std::time::Duration::from_secs(10);
     let mut moves = 0u64;
     let mut want_rel = false;
     let mut last_mode_set = std::time::Instant::now() - std::time::Duration::from_secs(1);
@@ -997,20 +1185,43 @@ fn input_worker(conn: std::sync::Arc<zbus::blocking::Connection>,
             last_mode_set = std::time::Instant::now();
             continue;
         }
+        // Re-dial — the guestfwd chardev re-accepts after disconnect, and
+        // a dev bridge may restart under us.
+        if inject.is_none() && last_redial.elapsed() > std::time::Duration::from_secs(1) {
+            if let Some(a) = &connect_addr {
+                last_redial = std::time::Instant::now();
+                if let Some(s) = dial_inject(a) {
+                    eprintln!("[input] inject → {a} (re-dial)");
+                    inject = Some(s);
+                }
+            }
+        }
         let r: Result<(), zbus::Error> = (|| match ev {
             In::Move(ci, x, y) => {
                 moves += 1;
                 if moves % 100 == 1 { eprintln!("[input] move#{moves} console={ci} guest={x},{y}"); }
+                if let Some(s) = inject.as_mut() {
+                    if let Err(e) = write!(s, "m {ci} {x} {y}\n") {
+                        eprintln!("[input] inject died: {e} — dbus path"); inject = None;
+                    } else { return Ok(()); }
+                }
                 match mice.get(ci) {
                     Some(m) => m.call::<_, _, ()>("SetAbsPosition", &(x, y)),
                     None => Ok(()),
                 }
             }
             In::Rel(dx, dy) => mice[0].call::<_, _, ()>("RelMotion", &(dx, dy)),
-            In::Btn(ci, b, d) => match mice.get(ci) {
-                Some(m) => m.call::<_, _, ()>(if d { "Press" } else { "Release" }, &(b as u32,)),
-                None => Ok(()),
-            },
+            In::Btn(ci, b, d) => {
+                if let Some(s) = inject.as_mut() {
+                    if let Err(e) = write!(s, "b {b} {}\n", d as u8) {
+                        eprintln!("[input] inject died: {e} — dbus path"); inject = None;
+                    } else { return Ok(()); }
+                }
+                match mice.get(ci) {
+                    Some(m) => m.call::<_, _, ()>(if d { "Press" } else { "Release" }, &(b as u32,)),
+                    None => Ok(()),
+                }
+            }
             In::Key(k, d) => kbds[0].call::<_, _, ()>(if d { "Press" } else { "Release" }, &(k,)),
             In::Mode(_) => unreachable!(),
         })();
@@ -1065,7 +1276,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                   crx: std::sync::mpsc::Receiver<CurJob>,
                   heads: std::sync::Arc<Heads>, span: Option<Span>,
                   esc: std::sync::Arc<EscState>, rel_mode: RelMode,
-                  monitor: String) -> Result<()> {
+                  monitor: String, inject: Option<String>) -> Result<()> {
     use minifb::{Window, WindowOptions};
     let nheads = console_paths.len();
     let span = span.map(std::sync::Arc::new);
@@ -1088,6 +1299,16 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     // --rects span mode; written with the same WM_STATE gating as the
     // fullscreen-monitors hint.
     let mut bypass_pending = span.is_some();
+    // The fsm value + atom, kept after the first write — KWin deletes the
+    // property when it consumes a transition, and PropertyNotify re-arms it.
+    let mut fsm_atom = 0u64;
+    let mut fsm_value: Option<[u32; 4]> = None;
+    // KWin clips an over-screen window to one monitor at manage() — the
+    // pre-map XMoveResizeWindow to the span union doesn't stick. Re-assert
+    // the union once the WM has managed us, so even windowed (pre-toggle)
+    // presentation keeps the host monitor layout.
+    let mut span_reassert: Option<(i32, i32, i32, i32)> =
+        span.as_ref().map(|s| s.union);
     let xwin_id;
 
     // GL worker owns the EGL context — all device calls are single-threaded
@@ -1152,7 +1373,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                     // switch unmaps us and the remapped window needs a
                     // repaint kick (damage-driven presents never fire on
                     // their own) — the drain turns those into XJob::Repaint.
-                    XSelectInput(d, xid, 0x38003); // Key|Exposure|Visibility|StructureNotify
+                    XSelectInput(d, xid, 0x438003); // +PropertyChange: fsm re-arm
                     XFlush(d);
                     xdpy = d;
                 }
@@ -1168,11 +1389,17 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                 eprintln!("[xegl] worker ready ({t})");
                 let mut fps_n = 0u64;
                 let mut fps_t = std::time::Instant::now();
-                // newest fd per console — coalescing collapses nudges and
-                // supersedes stale scanouts so one redraw+swap serves all heads
-                let mut latest: Vec<Option<ScanFd>> = (0..nheads).map(|_| None).collect();
+                // newest scanout per console — one slot for both kinds so a
+                // mid-run mode switch (VGA cpu → virtio-gpu dmabuf) applies
+                // in wire order; coalescing collapses nudges and supersedes
+                // stale scanouts so one redraw+swap serves all heads
+                enum HeadSrc { Dmabuf(ScanFd), Cpu(CpuScan) }
+                let mut latest: Vec<Option<HeadSrc>> = (0..nheads).map(|_| None).collect();
                 // per-console damage queue in scanout px — merged/capped by add_rect
                 let mut damage: Vec<Vec<WRect>> = (0..nheads).map(|_| Vec::new()).collect();
+                // cpu-scanout damage needing a pixel re-upload — drained
+                // after `latest` so a fresh scanout's texture exists first
+                let mut cpu_dmg: Vec<CpuDmg> = Vec::new();
                 let mut last_ext: Option<(i64, i64)> = None;
                 let mut last_geom = (0i32, 0i32);
                 let mut last_swap = std::time::Instant::now() - std::time::Duration::from_secs(1);
@@ -1182,8 +1409,9 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                 // remap/expose → full repaint next present (see XJob::Repaint)
                 let mut force_full = false;
                 let pump = |first: Option<XJob>,
-                                latest: &mut Vec<Option<ScanFd>>,
+                                latest: &mut Vec<Option<HeadSrc>>,
                                 damage: &mut Vec<Vec<WRect>>,
+                                cpu_dmg: &mut Vec<CpuDmg>,
                                 force_full: &mut bool| {
                     for j in first.into_iter().chain(std::iter::from_fn(|| jrx.try_recv().ok())) {
                         match j {
@@ -1196,7 +1424,24 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                                         .min(i32::MAX as u64).max(1) as i32;
                                     add_rect(&mut damage[s.ci], (0, 0, iw, ih));
                                     let ci = s.ci;
-                                    latest[ci] = Some(s);
+                                    latest[ci] = Some(HeadSrc::Dmabuf(s));
+                                }
+                            }
+                            XJob::Cpu(s) => {
+                                if s.ci < nheads {
+                                    let iw = gh.dims[s.ci].w.load(Ordering::Relaxed)
+                                        .min(i32::MAX as u64).max(1) as i32;
+                                    let ih = gh.dims[s.ci].h.load(Ordering::Relaxed)
+                                        .min(i32::MAX as u64).max(1) as i32;
+                                    add_rect(&mut damage[s.ci], (0, 0, iw, ih));
+                                    let ci = s.ci;
+                                    latest[ci] = Some(HeadSrc::Cpu(s));
+                                }
+                            }
+                            XJob::CpuDamage(d) => {
+                                if d.ci < nheads {
+                                    add_rect(&mut damage[d.ci], (d.x, d.y, d.w, d.h));
+                                    cpu_dmg.push(d);
                                 }
                             }
                             XJob::Nudge(ci, x, y, w, h) => {
@@ -1206,22 +1451,41 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                         }
                     }
                 };
-                let import_all = |latest: &mut Vec<Option<ScanFd>>,
+                let import_all = |latest: &mut Vec<Option<HeadSrc>>,
                                       xegl: &mut egl::XEgl| -> bool {
                     let mut imported = false;
                     for (ci, slot) in latest.iter_mut().enumerate() {
-                        if let Some(s) = slot.take() {
-                            if let Err(e) = egl::x11_import(xegl, ci, s.fd.as_raw_fd(),
-                                s.x, s.y, s.w, s.h, s.poff, s.stride, s.fourcc,
-                                s.bw, s.bh, s.modifier, s.y0_top) {
-                                static XF: AtomicU64 = AtomicU64::new(0);
-                                let n = XF.fetch_add(1, Ordering::Relaxed) + 1;
-                                if n % 120 == 1 { eprintln!("[xegl] import failed x{n}: {e:#}"); }
-                            }
-                            imported = true;
+                        let r = match slot.take() {
+                            Some(HeadSrc::Dmabuf(s)) => egl::x11_import(xegl, ci,
+                                s.fd.as_raw_fd(), s.x, s.y, s.w, s.h, s.poff,
+                                s.stride, s.fourcc, s.bw, s.bh, s.modifier, s.y0_top),
+                            Some(HeadSrc::Cpu(s)) => match s.src {
+                                CpuSrc::Pixels(px) => egl::x11_cpu_upload(xegl, ci,
+                                    Some(&px), None, s.w, s.h, s.stride, s.fmt),
+                                CpuSrc::Mapped(fd, off) => egl::x11_cpu_upload(xegl, ci,
+                                    None, Some((fd.as_raw_fd(), off)),
+                                    s.w, s.h, s.stride, s.fmt),
+                            },
+                            None => continue,
+                        };
+                        if let Err(e) = r {
+                            static XF: AtomicU64 = AtomicU64::new(0);
+                            let n = XF.fetch_add(1, Ordering::Relaxed) + 1;
+                            if n % 120 == 1 { eprintln!("[xegl] import failed x{n}: {e:#}"); }
                         }
+                        imported = true;
                     }
                     imported
+                };
+                let apply_cpu_dmg = |cpu_dmg: &mut Vec<CpuDmg>, xegl: &mut egl::XEgl| {
+                    for d in cpu_dmg.drain(..) {
+                        if let Err(e) = egl::x11_cpu_update(xegl, d.ci, d.x, d.y,
+                            d.w, d.h, d.stride, d.fmt, d.data.as_deref()) {
+                            static CU: AtomicU64 = AtomicU64::new(0);
+                            let n = CU.fetch_add(1, Ordering::Relaxed) + 1;
+                            if n % 120 == 1 { eprintln!("[xegl] cpu update failed x{n}: {e:#}"); }
+                        }
+                    }
                 };
                 while let Ok(first) = jrx.recv() {
                     fps_n += 1;
@@ -1242,8 +1506,10 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                     }
                     // drain the burst — QEMU emits one UpdateDMABUF call per
                     // damage rect, serialized by its guest-side gl-block
-                    pump(Some(first), &mut latest, &mut damage, &mut force_full);
+                    pump(Some(first), &mut latest, &mut damage, &mut cpu_dmg,
+                         &mut force_full);
                     let mut imported = import_all(&mut latest, &mut xegl);
+                    apply_cpu_dmg(&mut cpu_dmg, &mut xegl);
                     // windowed single-head: track the guest resolution like
                     // the old per-console windows did — spans are
                     // monitor-locked and multi-head windowed letterboxes.
@@ -1264,8 +1530,10 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                         if let Some(rem) = PACE.checked_sub(last_swap.elapsed()) {
                             if !rem.is_zero() {
                                 std::thread::sleep(rem);
-                                pump(None, &mut latest, &mut damage, &mut force_full);
+                                pump(None, &mut latest, &mut damage, &mut cpu_dmg,
+                                     &mut force_full);
                                 imported = import_all(&mut latest, &mut xegl) || imported;
+                                apply_cpu_dmg(&mut cpu_dmg, &mut xegl);
                             }
                         }
                         let (ww, wh) = egl::x11_geom(&xegl);
@@ -1325,6 +1593,13 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                             let n = XF2.fetch_add(1, Ordering::Relaxed) + 1;
                             if n % 120 == 1 { eprintln!("[xegl] redraw failed x{n}: {e:#}"); }
                         }
+                        if let Some(p) = DUMP_PATH.get() {
+                            if let Err(e) = egl::x11_dump(&mut xegl, &rects, (ww, wh), p) {
+                                static XF3: AtomicU64 = AtomicU64::new(0);
+                                let n = XF3.fetch_add(1, Ordering::Relaxed) + 1;
+                                if n % 120 == 1 { eprintln!("[xegl] dump failed x{n}: {e:#}"); }
+                            }
+                        }
                         hist.push_back(dmg);
                         if hist.len() > 4 { hist.pop_front(); }
                         last_swap = std::time::Instant::now();
@@ -1343,7 +1618,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
     {
         let ic2 = iconn.clone();
         let paths = console_paths.clone();
-        std::thread::spawn(move || input_worker(ic2, paths, irx, monitor));
+        std::thread::spawn(move || input_worker(ic2, paths, irx, monitor, inject));
     }
 
     let mut mouse = (-1.0f32, -1.0f32);
@@ -1393,6 +1668,7 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
         let (vx, vy, vw, vh) = egl::fit_viewport(rw.max(1) as u32, rh.max(1) as u32, iw, ih);
         let lx = ((mx - (rx + vx) as f32) / vw as f32 * iw as f32).clamp(0.0, iw as f32 - 1.0);
         let ly = ((my - (ry + vy) as f32) / vh as f32 * ih as f32).clamp(0.0, ih as f32 - 1.0);
+        if heads.local_input { return (best, lx as u32, ly as u32); }
         let (ox, oy) = head_offset(&heads, best);
         let (cw_total, ch_total) = composite_extent(&heads);
         let gx = ((ox as f32 + lx) * iw as f32 / cw_total as f32)
@@ -1589,10 +1865,23 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
             // them at the session's setFullscreen transition, same as freerdp.
             // Give up after ~10s of WM_STATE absence (no WM → the hints are
             // useless anyway and the X roundtrip per loop is waste).
-            if (fsm_pending.is_some() || bypass_pending)
+            if (fsm_pending.is_some() || bypass_pending || span_reassert.is_some())
                 && wm_managed(xdpy, xwin_id, wm_state_atom) {
+                if let Some(u) = span_reassert.take() {
+                    unsafe {
+                        XMoveResizeWindow(xdpy, xwin_id, u.0, u.1,
+                            u.2 as u32, u.3 as u32);
+                        XFlush(xdpy);
+                    }
+                    eprintln!("[+{}s][xegl] span union re-asserted {}x{} ({title})",
+                        ts(), u.2, u.3);
+                }
                 if let Some(fsm) = fsm_pending.take() {
                     set_fullscreen_monitors(xdpy, xwin_id, &fsm);
+                    fsm_value = Some(fsm);
+                    fsm_atom = unsafe {
+                        XInternAtom(xdpy, c"_NET_WM_FULLSCREEN_MONITORS".as_ptr().cast(), 0)
+                    };
                     eprintln!("[+{}s][xegl] fullscreen-monitors hint set ({title})", ts());
                 }
                 if bypass_pending {
@@ -1607,9 +1896,11 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                     }
                     eprintln!("[+{}s][xegl] bypass-compositor hint set ({title})", ts());
                 }
-            } else if (fsm_pending.is_some() || bypass_pending) && ts() > 10 {
+            } else if (fsm_pending.is_some() || bypass_pending
+                || span_reassert.is_some()) && ts() > 10 {
                 fsm_pending = None;
                 bypass_pending = false;
+                span_reassert = None;
             }
         }
         if esc.enabled && !xdpy.is_null() {
@@ -1744,6 +2035,18 @@ fn present_window(iconn: std::sync::Arc<zbus::blocking::Connection>,
                 // while the guest is idle, so kick the GL worker.
                 if a.t == 12 || a.t == 15 || a.t == 19 {
                     let _ = jtx.send(XJob::Repaint);
+                    continue;
+                }
+                // PropertyNotify(28): KWin deletes _NET_WM_FULLSCREEN_MONITORS
+                // when it consumes the value during a fullscreen transition
+                // — re-arm so the NEXT toggle still spans the monitor union.
+                if a.t == 28 {
+                    let p = unsafe { ev.prop };
+                    if p.state == 1 && p.atom == fsm_atom && p.atom != 0 {
+                        if let Some(fsm) = fsm_value {
+                            set_fullscreen_monitors(xdpy, xwin_id, &fsm);
+                        }
+                    }
                     continue;
                 }
                 if (a.t == 2 || a.t == 3) && unsafe { ev.key }._win == xwin_id {
@@ -2243,16 +2546,26 @@ async fn main() -> Result<()> {
     let mut probes: Vec<String> = Vec::new();
     let mut clipboard = true;
     let mut grab = false;
+    let mut headless = false;
     let mut rel_mode = RelMode::Off;
     let mut escapes: Vec<EscCombo> = Vec::new();
     // --proxy <ddproxy.sock> — attach via the per-VM display broker instead
     // of minting QMP @dbus-display channels; a dead/absent proxy falls back
     // to the direct channel so the viewer never regresses.
     let mut proxy: Option<String> = None;
+    let mut inject: Option<String> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--proxy" => proxy = args.next(),
+            // Windows multi-monitor: pointer events are line-pushed to a
+            // guest SendInput agent instead of the confined virtio-tablet
+            "--inject" => inject = args.next(),
+            "--dump" => { if let Some(p) = args.next() { let _ = DUMP_PATH.set(p); } }
+            "--dump-raw" => { if let Some(p) = args.next() { egl::set_dump_raw(&p); } }
+            "--probe-mods" => { if let Some(p) = args.next() { egl::set_probe_mods(&p); } }
             "--no-clipboard" => clipboard = false,
+            // diagnostic: register listeners and log scanouts — no window
+            "--headless" => headless = true,
             // grab the keyboard while the window is focused (spec.display.grabKeyboard)
             "--grab" => grab = true,
             // spec.display.pointerLock — relative pointer capture policy
@@ -2315,7 +2628,8 @@ async fn main() -> Result<()> {
             _ => {}
         }
     }
-    eprintln!("[*] monitor: {monitor} size={w}x{h} proxy={proxy:?}");
+    HEADLESS.store(headless, Ordering::Relaxed);
+    eprintln!("[*] monitor: {monitor} size={w}x{h} proxy={proxy:?} headless={headless}");
 
     // channel #1: control conn (VM/Console objects) — prefer the proxy; if
     // the socket is dead, fall straight back to the direct QMP channel.
@@ -2478,8 +2792,14 @@ async fn main() -> Result<()> {
         });
     }
 
+    if headless {
+        eprintln!("[*] headless — {} console(s) registered, no window", _lconns.len());
+        loop { std::thread::sleep(std::time::Duration::from_secs(3600)); }
+    }
+
     let heads = std::sync::Arc::new(Heads {
         dims: pending.iter().map(|p| p.dims.clone()).collect(),
+        local_input: offsets.len() > 1 && offsets.iter().all(|&o| o == (0, 0)),
         offsets,
     });
 
@@ -2513,7 +2833,7 @@ async fn main() -> Result<()> {
     // the runtime's workers while we join.
     let t = title.clone();
     let wh = std::thread::spawn(move ||
-        present_window(iconn, paths, &t, w, h, jrx, jtx, crx, heads, span, esc, rel_mode, monitor));
+        present_window(iconn, paths, &t, w, h, jrx, jtx, crx, heads, span, esc, rel_mode, monitor, inject));
     let r = wh.join().unwrap_or_else(|_| Err(anyhow::anyhow!("window thread panicked")));
     eprintln!("[*] window closed — {r:?}");
     Ok(())

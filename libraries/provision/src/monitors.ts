@@ -36,7 +36,11 @@ export async function hostMirroredGuestMonitors(spec: VmSpec): Promise<GuestMoni
     const host = await detectAdapter().monitors().catch(() => [] as MonitorInfo[]);
     const sel = spec.display.monitors;
     const picked = sel === "all" ? host : host.filter((m) => sel.includes(m.name));
-    return picked.length ? guestLayoutFromHost(spec.name, picked).monitors : undefined;
+    // Windows multi-monitor rides one virtio-gpu DEVICE per output (args.ts
+    // winMulti) since the drivers are single-head — the 4-device virtio cap
+    // is the shared ceiling either way.
+    const maxOut = 4;
+    return picked.length ? guestLayoutFromHost(spec.name, picked, maxOut).monitors : undefined;
 }
 
 /**

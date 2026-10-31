@@ -25,6 +25,9 @@ export interface Digest { algo: DigestAlgo; hex: string }
 export interface DownloadOpts {
     /** Expected content digest — verified before the atomic rename. */
     expect?: Digest;
+    /** Extra request headers — some mirrors (fedorapeople's Anubis wall)
+     *  challenge browser UAs but pass CLI tools. */
+    headers?: Record<string, string>;
 }
 
 export interface DownloadResult {
@@ -39,7 +42,7 @@ export interface DownloadResult {
 export async function downloadTo(url: string, dst: string, opts: DownloadOpts = {}): Promise<DownloadResult> {
     await mkdir(dirname(dst), { recursive: true });
     const part = `${dst}.part`;
-    const res = await fetch(url, { redirect: "follow" });
+    const res = await fetch(url, { redirect: "follow", headers: opts.headers });
     if (!res.ok || !res.body) throw new Error(`fetch ${url}: HTTP ${res.status}`);
     const algo = opts.expect?.algo ?? "sha256";
     const hash = createHash(algo);
