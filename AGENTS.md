@@ -137,7 +137,10 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   "restart pending" marker (vm row/detail) + the edit form's
   "needs restart"/"applies live" field tags. persist/headMode/sync/
   copy-shares are LIVE (session-level), resources/gpu/display-viewer/
-  network/usb/mount-shares are boot-frozen. display.viewer defaults to
+  network/usb/mount-shares are boot-frozen. spec.autostartView rides
+  spec.autostart — both edges also open the VM's viewer: the app edge
+  via svc.view, the systemd edge by `systemd-run --user --scope`'ing a
+  `vm view` so the oneshot's cgroup teardown can't reap it. display.viewer defaults to
   dmabuf — a create/edit "Viewer" row on both surfaces; software gpu has
   no GL scanouts to export, so the UI coerces rdp on pick + guards on
   save and the cli falls back (explicit --viewer dmabuf --gpu software

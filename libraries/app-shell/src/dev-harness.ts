@@ -69,7 +69,7 @@ function installFakeVm({ store }: DevHarnessCtx, env: NodeJS.ProcessEnv): void {
         memBalloonMiB: 6144,
         usbAttached: [{ id: "usb-1bbb-0168-1-26", label: "UT3 Drawing Pad" }],
         sshPort: 4022, rdpPort: 43389,
-        provisioned: "cloudimg", persist: "daemonize", autostart: false, netMode: "nat",
+        provisioned: "cloudimg", persist: "daemonize", autostart: false, autostartView: false, netMode: "nat",
         snapshots: [], vd: 0, usbKeys: [],
         username: "cruiser", hasPassword: true,
         encrypt: "off", keyStorage: "store", diskLocked: false,

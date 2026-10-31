@@ -187,6 +187,41 @@ export class CruiserShell {
             }
             if (route === "settings") void svc.refreshSettings();
         });
+        // Single-select dropdowns: the head click measures its rect and the
+        // overlay list renders at .content's end, anchored under it in
+        // scroll space (see screens.ts selRow). Re-clicking the open head
+        // closes; any other click is dismissed by the generic click handler
+        // in wireInputs. up flips the list above the head when it wouldn't
+        // fit below inside the scrollport.
+        this.host.onAction("menu-toggle", (d) => {
+            const key = String(d.menu ?? "");
+            if (!key) return;
+            if (st().openMenu?.key === key) { st().setOpenMenu(null); return; }
+            // .content's own rect is scroll-shifted (its y is scroll-space 0
+            // mapped to viewport coords), so the scrollport's fixed top edge
+            // comes from the un-scrolled .topbar sibling instead.
+            void Promise.all([
+                this.panel?.getRect(`.selhead[data-menu="${key}"]`),
+                this.panel?.getRect(".content"),
+                this.panel?.getRect(".topbar"),
+            ]).then(([hr, cr, tb]) => {
+                if (!hr || !cr || !tb || st().openMenu?.key === key) return;
+                const contentTop = tb.y + tb.h; // fixed viewport y of the scrollport's top edge
+                // estimated list height (~31px/item + padding/border)
+                const est = Number(d.count ?? 0) * 31 + 10;
+                st().setOpenMenu({
+                    key,
+                    up: hr.y + hr.h + 4 + est > contentTop + cr.h && hr.y - 4 - est >= contentTop,
+                    // .selmenu anchors in .content's scroll space — getRect
+                    // gives viewport coords and cr is scroll-space 0 mapped
+                    // to viewport, so scroll-space = viewport - cr.
+                    sx: hr.x - cr.x,
+                    sy: hr.y - cr.y,
+                    w: hr.w,
+                    h: hr.h,
+                });
+            });
+        });
         this.host.onAction("set-field", (d) => {
             const k = d.field as keyof CreateForm;
             if (!k) return;
@@ -199,6 +234,7 @@ export class CruiserShell {
             // restores dmabuf — the fast default; rdp stays a re-pick.
             const gpuChanged = k === "gpu" && v !== st().create.gpu;
             st().setField(k, v as never);
+            st().setOpenMenu(null);
             if (k === "gpu") {
                 if (v === "software" && st().create.viewer === "dmabuf")
                     st().setField("viewer", "rdp");
@@ -246,8 +282,9 @@ export class CruiserShell {
             st().setField("distro", fam);
             // each family has its own release namespace — jump to its default
             st().setField("release", DISTROS[fam].releases[0]!.id);
+            st().setOpenMenu(null);
         });
-        this.host.onAction("set-vd", (d) => st().setField("vd", Number(d.vd) || 0));
+        this.host.onAction("set-vd", (d) => { st().setField("vd", Number(d.vd) || 0); st().setOpenMenu(null); });
         this.host.onAction("set-preset", (d) => {
             const preset = d.value === "developer" ? "developer" : "standard";
             st().setField("preset", preset);
@@ -255,6 +292,7 @@ export class CruiserShell {
             // heavy/optional entries (db servers, k3s, editors, cloud sdks)
             // stay opt-in; user can toggle individually or per category.
             st().setField("devtools", preset === "developer" ? [...DEVTOOLS_PRESET] : []);
+            st().setOpenMenu(null);
         });
         this.host.onAction("devtools-toggle", (d) => { if (d.key) st().toggleDevtool(d.key); });
         this.host.onAction("devtools-cat", (d) => {
@@ -304,7 +342,7 @@ export class CruiserShell {
                 viewer: vm.gpuMode === "software" ? "rdp" : "dmabuf",
                 persist: vm.persist,
                 vmDir: dirname(vm.vmDir),
-                autostart: vm.autostart, netMode: vm.netMode,
+                autostart: vm.autostart, autoView: vm.autostartView, netMode: vm.netMode,
                 vd: vm.vd, usb: [...vm.usbKeys], agentKeys: [...(vm.agentKeys ?? [])],
                 snapAuto: vm.snapAuto, snapTrigger: vm.snapTrigger, snapKeep: vm.snapKeep,
                 tpm: vm.security.tpm, secureBoot: vm.security.secureBoot,
@@ -426,6 +464,21 @@ export class CruiserShell {
             }
             if (ev.t === "scroll") {
                 if (ev.id === "logpane") void this.updateLogPin();
+                // The open dropdown anchors in .content's scroll space so it
+                // rides the scroll with its head — still close on scroll:
+                // the head can scroll out of view leaving a stranded menu.
+                if (this.store.getState().openMenu) this.store.getState().setOpenMenu(null);
+                return;
+            }
+            if (ev.t === "click") {
+                // Outside-click dismiss: every element emits click events and
+                // ev.d collects the nearest ancestor's data-* attrs — a click
+                // on the open head/menu-toggle is left to that handler (it
+                // toggles or re-anchors), anything else closes the menu. The
+                // menu's item picks carry their own action (set-field etc.)
+                // which clears openMenu itself.
+                const om = this.store.getState().openMenu;
+                if (om && ev.d?.action !== "menu-toggle") this.store.getState().setOpenMenu(null);
                 return;
             }
             if (ev.t === "keydown") {

@@ -59,6 +59,7 @@ export interface VmSummary {
     provisioned?: string;          // method or undefined
     persist: string;
     autostart: boolean;            // spec.autostart — start with the app + at login
+    autostartView: boolean;        // spec.autostartView — also open the viewer on autostart
     netMode: string;               // spec.network.mode — nat|restricted|isolated|vmnet
     username: string;              // spec.credentials.username
     hasPassword: boolean;          // spec.credentials.passwordFile set
@@ -126,6 +127,7 @@ export type CreateForm = SyncFormFields & {
     viewer: string;                // dmabuf|rdp — dmabuf needs gpu venus/virgl
     persist: string;               // daemonize|owned|ephemeral
     autostart: boolean;            // spec.autostart — boot unit + start with the app
+    autoView: boolean;             // spec.autostartView — viewer window opens on autostart
     netMode: string;               // spec.network.mode — nat|restricted|isolated|vmnet
     method: string;                // none|cloudimg|iso|windows|imported
     distro: string;                // ubuntu|debian|fedora|windows
@@ -227,6 +229,8 @@ export interface HostResources {
     memGiB: number;
     /** Free space (GiB) at the chosen disk directory. */
     diskFreeGiB: number;
+    /** The host kvm module's nested=1 — lets a guest run VMs of its own. */
+    nestedOn: boolean;
 }
 
 /** USB device row for the passthrough picker (subset of vm-core UsbDevice). */
@@ -321,6 +325,10 @@ export interface CruiserState {
     vmFilter: string;
     /** USB picker: show devices that lack host access too. */
     usbShowBlocked: boolean;
+    /** The open single-select dropdown: its field key + the head's rect in
+     *  document px (the overlay list renders at .content's end so it
+     *  hit-tests above every row). */
+    openMenu: { key: string; up: boolean; sx: number; sy: number; w: number; h: number } | null;
 }
 
 export interface ShareForm {
@@ -380,6 +388,7 @@ export interface CruiserActions {
     setMemTarget(v: string): void;
     setVmFilter(v: string): void;
     toggleUsbBlocked(): void;
+    setOpenMenu(m: CruiserState["openMenu"]): void;
 }
 
 export type CruiserStore = CruiserState & CruiserActions;
@@ -397,7 +406,7 @@ const defaultCreate = (): CreateForm => ({
     sound: true, microphone: true, clipboard: true, urlOpen: true, vsock: true,
     nice: "0", ioClass: "default", ioPrio: "4",
     gpu: "venus", swVk: false, headMode: "virtual-desktop", viewer: "dmabuf", persist: "daemonize",
-    autostart: false, netMode: "nat",
+    autostart: false, autoView: false, netMode: "nat",
     method: "cloudimg", distro: "ubuntu", release: "26.04", desktop: "gnome",
     winDriver: "yttrium", winEdition: "",
     browser: "none", snap: false, extraFonts: false, autologin: true,
@@ -443,7 +452,8 @@ export function createCruiserStore() {
         memTarget: "",
         vmFilter: "",
         usbShowBlocked: false,
-        setRoute: (route, vm = null) => set({ route, selectedVm: vm, confirm: null, editVm: null, pwReveal: null, unlockPrompt: null, unlockPw: "" }),
+        openMenu: null,
+        setRoute: (route, vm = null) => set({ route, selectedVm: vm, confirm: null, editVm: null, pwReveal: null, unlockPrompt: null, unlockPw: "", openMenu: null }),
         setVms: (vms) => set({ vms }),
         setStatus: (status, kind = "info") => set({ status, statusKind: kind }),
         setBusy: (busy) => set({ busy }),
@@ -475,6 +485,7 @@ export function createCruiserStore() {
         setMemTarget: (memTarget) => set({ memTarget }),
         setVmFilter: (vmFilter) => set({ vmFilter }),
         toggleUsbBlocked: () => set((s) => ({ usbShowBlocked: !s.usbShowBlocked })),
+        setOpenMenu: (openMenu) => set({ openMenu }),
         toggleUsb: (key) => set((s) => ({
             create: {
                 ...s.create,
