@@ -599,8 +599,10 @@ native runtime (winit + wgpu + Blitz html-ui — no Electron/Chromium).
   and Windows pins them to the primary display — wisp's Digimon registry
   association is digitizer-only (verified no-op) — so multi-monitor input
   rides an in-guest agent: agent.ps1 dials the slirp guestfwd
-  (`-netdev user,guestfwd=tcp:10.0.2.250:28090-unix:run/agent.sock`,
-  args.ts; viewer-dd `--inject unix:` listens there, CRUISER_VD_INJECT
+  (`guestfwd=tcp:10.0.2.250:28090-chardev:agfwd` — a QEMU-owned unix
+  server at run/agent.sock; guestfwd -unix: fails the launch since QEMU
+  connects at parse time, viewer-dd `--inject unix:` connects as the
+  client + re-dials on drop, CRUISER_VD_INJECT
   overrides with a host:port connect-out for dev bridges) and injects
   SendInput with MOUSEEVENTF_ABSOLUTE|VIRTUALDESK — spans the guest's
   REAL display layout for any arrangement ("m <console> <x> <y>" lines,

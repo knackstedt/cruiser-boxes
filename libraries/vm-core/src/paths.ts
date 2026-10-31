@@ -93,9 +93,10 @@ export interface VmPaths {
     serialSock: string;
     /** virtserialport org.cruiser.urlopen.0 — guest → host URL forwarding. */
     urlOpenSock: string;
-    /** slirp guestfwd → unix socket (windows pointer agent): QEMU dials
-     *  this when the guest connects to 10.0.2.250:28090; viewer-dd listens
-     *  here for inject-mode input (agent attach/detach events). */
+    /** slirp guestfwd chardev (windows pointer agent): QEMU owns this unix
+     *  socket server-side (-chardev socket,server=on); the guest's agent
+     *  dials 10.0.2.250:28090 → slirp → here; viewer-dd --inject unix:
+     *  connects as the client. */
     agentSock: string;
     /** ddproxy display broker: viewer-facing p2p socket, pidfile, log.
      *  Present only while a dmabuf VM's broker is up. */

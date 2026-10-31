@@ -95,7 +95,7 @@ w32tm /resync /force 2>&1 | Out-String`, say, "timesync");
     // mice and Windows pins them to the primary display (wisp's Digimon
     // association is digitizer-only, verified no-op), so multi-monitor
     // input rides a per-logon agent: it dials QEMU's slirp guestfwd
-    // (10.0.2.250:28090 → run/agent.sock → viewer-dd --inject unix:) and
+    // (10.0.2.250:28090 → run/agent.sock chardev → viewer-dd --inject) and
     // injects SendInput with MOUSEEVENTF_VIRTUALDESK, which spans the
     // guest's real display layout for ANY arrangement. Runs as the
     // interactive user — a SYSTEM service can't SendInput into a session.
@@ -153,7 +153,7 @@ public class Inj {
 }
 '@
 function Connect {
-  # 10.0.2.250 = QEMU guestfwd → run/agent.sock (viewer-dd listens there).
+  # 10.0.2.250 = QEMU guestfwd → run/agent.sock chardev (viewer-dd connects).
   # 10.0.2.2   = raw slirp host address — a host-side bridge, if any.
   foreach ($h in @('10.0.2.250','10.0.2.2')) {
     try { $c = New-Object System.Net.Sockets.TcpClient; $c.Connect($h, 28090); return $c } catch {}

@@ -1142,40 +1142,33 @@ fn input_worker(conn: std::sync::Arc<zbus::blocking::Connection>,
     // agent (SendInput VIRTUALDESK) instead of the Mouse proxies. Lines:
     // "m <ci> <x> <y>" / "b <btn> <down>" (console-local px). Dead
     // socket → fall back to the D-Bus path so input never dies.
-    //   unix:<path> — LISTEN; QEMU guestfwd dials it per guest connection
-    //     (newest conn wins — agent reconnects on viewer restarts).
+    //   unix:<path> — CONNECT to QEMU's guestfwd chardev socket (slirp
+    //     pipes guest→agent bytes here; QEMU owns the listener).
     //   <host:port> — CONNECT to a dev bridge.
-    let (iatx, iarx) = std::sync::mpsc::channel::<Box<dyn std::io::Write + Send>>();
+    // Both are connect-mode: the guestfwd chardev exists before the viewer
+    // starts and re-accepts after disconnect, so a dead socket just
+    // re-dials (1s throttle) rather than stranding input.
+    fn dial_inject(a: &str) -> Option<Box<dyn std::io::Write + Send>> {
+        if let Some(path) = a.strip_prefix("unix:") {
+            match std::os::unix::net::UnixStream::connect(path) {
+                Ok(s) => return Some(Box::new(s)),
+                Err(e) => { eprintln!("[input] inject unix:{path} connect failed: {e}"); }
+            }
+        } else {
+            match std::net::TcpStream::connect(a) {
+                Ok(s) => { let _ = s.set_nodelay(true); return Some(Box::new(s)); }
+                Err(e) => { eprintln!("[input] inject connect {a} failed: {e}"); }
+            }
+        }
+        None
+    }
     let mut inject: Option<Box<dyn std::io::Write + Send>> = None;
     let mut connect_addr: Option<String> = None; // connect-mode target, for re-dial
     match inject_addr.as_deref() {
-        Some(a) if a.starts_with("unix:") => {
-            let path = &a[5..];
-            let _ = std::fs::remove_file(path); // stale listener from a dead viewer
-            match std::os::unix::net::UnixListener::bind(path) {
-                Ok(l) => {
-                    eprintln!("[input] inject listening on {path}");
-                    std::thread::spawn(move || {
-                        for c in l.incoming().flatten() {
-                            if iatx.send(Box::new(c) as Box<dyn std::io::Write + Send>).is_err() {
-                                return;
-                            }
-                        }
-                    });
-                }
-                Err(e) => eprintln!("[input] inject bind {path} failed: {e} — dbus path"),
-            }
-        }
         Some(a) => {
             connect_addr = Some(a.to_string());
-            match std::net::TcpStream::connect(a) {
-                Ok(s) => {
-                    let _ = s.set_nodelay(true);
-                    eprintln!("[input] inject → {a}");
-                    inject = Some(Box::new(s));
-                }
-                Err(e) => eprintln!("[input] inject connect {a} failed: {e} — dbus path"),
-            }
+            inject = dial_inject(a);
+            if inject.is_some() { eprintln!("[input] inject → {a}"); }
         }
         None => {}
     }
@@ -1193,19 +1186,14 @@ fn input_worker(conn: std::sync::Arc<zbus::blocking::Connection>,
             last_mode_set = std::time::Instant::now();
             continue;
         }
-        // Fresh agent connection (unix listen mode) — newest wins.
-        while let Ok(s) = iarx.try_recv() {
-            eprintln!("[input] inject: guest agent attached");
-            inject = Some(s);
-        }
-        // Connect-mode re-dial — the bridge/agent may restart under us.
+        // Re-dial — the guestfwd chardev re-accepts after disconnect, and
+        // a dev bridge may restart under us.
         if inject.is_none() && last_redial.elapsed() > std::time::Duration::from_secs(1) {
             if let Some(a) = &connect_addr {
                 last_redial = std::time::Instant::now();
-                if let Ok(s) = std::net::TcpStream::connect(a) {
-                    let _ = s.set_nodelay(true);
+                if let Some(s) = dial_inject(a) {
                     eprintln!("[input] inject → {a} (re-dial)");
-                    inject = Some(Box::new(s));
+                    inject = Some(s);
                 }
             }
         }

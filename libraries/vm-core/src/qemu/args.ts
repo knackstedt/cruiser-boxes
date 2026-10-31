@@ -282,11 +282,17 @@ export function buildArgs(
         const fwd = spec.network.hostfwd
             .map((f) => `hostfwd=${f.proto}:127.0.0.1:${f.hostPort}-:${f.guestPort}`);
         // Windows pointer agent: the guest's cruiser-agent dials a fixed
-        // slirp address; guestfwd wires it to run/agent.sock, which
-        // viewer-dd listens on in --inject unix: mode (SendInput-based
-        // multi-monitor pointer — virtio tablets pin to the primary).
+        // slirp address; guestfwd wires it to chardev agfwd (a unix socket
+        // QEMU owns server-side — viewer-dd --inject unix: connects to it as
+        // a client, so it may attach/detach freely). guestfwd -unix: would
+        // instead require the socket to already exist at parse time and
+        // fails the whole launch. SendInput-based multi-monitor pointer —
+        // virtio tablets pin to the primary.
+        if (spec.os.family === "windows") {
+            push("-chardev", `socket,id=agfwd,path=${paths.agentSock},server=on,wait=off`);
+        }
         const guestfwd = spec.os.family === "windows"
-            ? `,guestfwd=tcp:10.0.2.250:28090-unix:${paths.agentSock}`
+            ? `,guestfwd=tcp:10.0.2.250:28090-chardev:agfwd`
             : "";
         push("-netdev", `user,id=n0${netMode === "restricted" ? ",restrict=on" : ""}${fwd.length ? "," + fwd.join(",") : ""}${guestfwd}`);
         push("-device", "virtio-net-pci,netdev=n0");
