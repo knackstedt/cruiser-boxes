@@ -277,7 +277,7 @@ const VIEWER_LABEL: Record<string, string> = { dmabuf: "direct" };
  *  nothing to someone who didn't read the QEMU docs). */
 const PERSIST_LABEL: Record<string, string> = {
     daemonize: "keeps running after the app exits",
-    owned: "stops with the app",
+    owned: "turns off when the app exits",
     ephemeral: "deleted when the app exits",
 };
 /** spec.provisioned → friendly label (the raw method name is jargon). */
@@ -786,9 +786,10 @@ function create(s: CruiserState): string {
         <div class="hint">where the VM's screen shows up — a whole virtual desktop, a fullscreen monitor,
             a regular window, or only its app windows.</div>
         ${vdPicker}
-        ${selRow("When cruiser closes", "persist", f.persist, [["daemonize", "survives app"], ["owned", "stops with app"], ["ephemeral", "deleted on exit"]], s, menus, "set-field", aptag("live"))}
+        ${selRow("Exit behavior", "persist", f.persist, [["daemonize", "keep running"], ["owned", "turn off on exit"], ["ephemeral", "delete on exit"]], s, menus, "set-field", aptag("live"))}
         <div class="hint">${PERSIST_HINT[f.persist] ?? ""}</div>
-        ${checkRow("Start on boot", "autostart", f.autostart, "boots this VM in the background when you log in — no window until you open one", aptag("live"))}
+        ${checkRow("Start on boot", "autostart", f.autostart, "boots this VM in the background when you log in", aptag("live"))}
+        ${f.autostart ? checkRow("Open a window", "autoView", f.autoView, "opens the VM's screen too once it's up — for the virtual-desktop and fullscreen-monitor modes", aptag("live")) : ""}
         ${selRow("Network", "netMode", f.netMode, [["nat", "nat"], ["restricted", "restricted"], ["isolated", "isolated"], ["vmnet", "vmnet"]], s, menus, "set-field", aptag("boot"))}
         <div class="hint">${{
             nat: "normal internet + LAN for the VM — you can also forward ports into it.",

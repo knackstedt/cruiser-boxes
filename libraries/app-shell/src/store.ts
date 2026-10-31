@@ -44,6 +44,7 @@ export interface VmSummary {
     provisioned?: string;          // method or undefined
     persist: string;
     autostart: boolean;            // spec.autostart — start with the app + at login
+    autostartView: boolean;        // spec.autostartView — also open the viewer on autostart
     netMode: string;               // spec.network.mode — nat|restricted|isolated|vmnet
     username: string;              // spec.credentials.username
     hasPassword: boolean;          // spec.credentials.passwordFile set
@@ -100,6 +101,7 @@ export type CreateForm = SyncFormFields & {
     viewer: string;                // dmabuf|rdp — dmabuf needs gpu venus/virgl
     persist: string;               // daemonize|owned|ephemeral
     autostart: boolean;            // spec.autostart — boot unit + start with the app
+    autoView: boolean;             // spec.autostartView — viewer window opens on autostart
     netMode: string;               // spec.network.mode — nat|restricted|isolated|vmnet
     method: string;                // none|cloudimg|iso|imported
     distro: string;                // ubuntu|debian|fedora
@@ -370,7 +372,7 @@ const defaultCreate = (): CreateForm => ({
     name: "", cpus: 4, memMiB: 8192, diskGiB: 100, nestedVirt: false,
     nice: "0", ioClass: "default", ioPrio: "4",
     gpu: "venus", swVk: false, headMode: "virtual-desktop", viewer: "dmabuf", persist: "daemonize",
-    autostart: false, netMode: "nat",
+    autostart: false, autoView: false, netMode: "nat",
     method: "cloudimg", distro: "ubuntu", release: "26.04", desktop: "gnome",
     browser: "none", snap: false, extraFonts: false, autologin: true,
     preset: "standard", devtools: [],

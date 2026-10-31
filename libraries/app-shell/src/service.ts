@@ -128,10 +128,9 @@ export class CruiserService {
         }
     }
 
-    /** App-launch autostart — flagged stopped VMs boot headless (no
-     *  viewer: autostart readies the guest, an explicit start/view opens
-     *  the console). Serialized so a slow first boot doesn't fan out
-     *  parallel QEMU starts. */
+    /** App-launch autostart — flagged stopped VMs boot in the background;
+     *  autostartView ones get their viewer opened too. Serialized so a
+     *  slow first boot doesn't fan out parallel QEMU starts. */
     private async autostartVms(): Promise<void> {
         for (const h of this.handles.values()) {
             if (!h.spec.autostart || h.isRunning()) continue;
@@ -141,6 +140,7 @@ export class CruiserService {
                 const { hostMirroredGuestMonitors } = await import("../../provision/src/monitors");
                 return h.start({ guestMonitors: await hostMirroredGuestMonitors(h.spec) });
             }, { vm: h.spec.name, verb: "starting" });
+            if (h.spec.autostartView) void this.view(h.spec.name);
         }
     }
 
@@ -254,6 +254,7 @@ export class CruiserService {
             ioPrio: s.resources.sched.ioPrio,
             sshPort: s.network.sshPort, rdpPort: s.network.rdpPort,
             provisioned: s.provisioned.method, persist: s.persist, autostart: s.autostart,
+            autostartView: s.autostartView,
             netMode: s.network.mode,
             username: s.credentials.username, hasPassword: !!s.credentials.passwordFile,
             encrypt: s.disk.encrypt, keyStorage: s.disk.keyStorage,
@@ -574,6 +575,7 @@ export class CruiserService {
             spec.display.viewer = f.viewer as VmSpec["display"]["viewer"];
             spec.persist = f.persist as VmSpec["persist"];
             spec.autostart = f.autostart;
+            spec.autostartView = f.autoView;
             spec.network.mode = f.netMode as VmSpec["network"]["mode"];
             spec.snapshots.auto = f.snapAuto as VmSpec["snapshots"]["auto"];
             spec.snapshots.trigger = f.snapTrigger as VmSpec["snapshots"]["trigger"];
@@ -917,6 +919,7 @@ export class CruiserService {
             if (f.vd > 0) spec.display.virtualDesktop = f.vd;
             spec.persist = f.persist as VmSpec["persist"];
             spec.autostart = f.autostart;
+            spec.autostartView = f.autoView;
             spec.network.mode = f.netMode as VmSpec["network"]["mode"];
             spec.snapshots.auto = f.snapAuto as VmSpec["snapshots"]["auto"];
             spec.snapshots.trigger = f.snapTrigger as VmSpec["snapshots"]["trigger"];

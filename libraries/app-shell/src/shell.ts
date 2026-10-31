@@ -321,7 +321,7 @@ export class CruiserShell {
                 viewer: vm.gpuMode === "software" ? "rdp" : "dmabuf",
                 persist: vm.persist,
                 vmDir: dirname(vm.vmDir),
-                autostart: vm.autostart, netMode: vm.netMode,
+                autostart: vm.autostart, autoView: vm.autostartView, netMode: vm.netMode,
                 vd: vm.vd, usb: [...vm.usbKeys], agentKeys: [...(vm.agentKeys ?? [])],
                 snapAuto: vm.snapAuto, snapTrigger: vm.snapTrigger, snapKeep: vm.snapKeep,
             });

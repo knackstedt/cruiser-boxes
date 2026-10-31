@@ -474,6 +474,11 @@ export const VmSpec = z.object({
     }).prefault({}),
 
     autostart: z.boolean().default(false),
+    /** Also open the viewer window when this VM autostarts — the point of
+     *  virtual-desktop / fullscreen-monitor head modes (a headless boot
+     *  leaves nothing to look at). Best-effort on the systemd edge: no
+     *  display server ready = no window, the VM still starts. */
+    autostartView: z.boolean().default(false),
 });
 export type VmSpec = z.infer<typeof VmSpec>;
 

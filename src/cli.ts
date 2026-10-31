@@ -26,7 +26,7 @@ import type { ViewerSession } from "../libraries/host-int/src/session";
 import { listUsbDevices } from "../libraries/vm-core/src/usb/usb";
 import { createDisk } from "../libraries/vm-core/src/disk/ops";
 import { resolveToolchain } from "../libraries/vm-core/src/qemu/resolve";
-import { run, which, virtiofsdPath } from "../libraries/sys/src/exec";
+import { run, which, virtiofsdPath, spawnChild } from "../libraries/sys/src/exec";
 
 const argv = process.argv.slice(2);
 
@@ -115,7 +115,7 @@ usage: cruiser <area> <command> [args]
   vm move <name> <dir>                  relocate a stopped VM's dir under <dir>/<name>
                                        (vms/<name> stays linked — the disk goes with it)
   vm autostart <name> [on|off]          start this VM with the app + at login (systemd
-                                       --user unit, headless — opens no console)
+                                      --user unit); "view on|off" also opens the window
   vm rm <name> [--disk]                vm view <name>   launch freerdp viewer + place window
   vm ssh <name> [cmd...]               interactive guest shell (or run cmd) over the cruiser key
   vm serial <name>                     interactive serial console on ttyS1 (ctrl+] to detach) —
@@ -493,6 +493,16 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
         }
         case "autostart": {
             const h = await needVm(args[0]);
+            // `vm autostart <name> view [on|off]` — the auto-open-window flag.
+            if (args[1] === "view") {
+                const v = args[2];
+                if (v === undefined) { console.log(`${h.spec.name} autostart view: ${h.spec.autostartView ? "on" : "off"}`); break; }
+                if (v !== "on" && v !== "off") usage();
+                h.spec.autostartView = v === "on";
+                await h.saveSpec();
+                console.log(`${h.spec.name} autostart view ${v}`);
+                break;
+            }
             const v = args[1];
             if (v === undefined) { console.log(`${h.spec.name} autostart: ${h.spec.autostart ? "on" : "off"}`); break; }
             if (v !== "on" && v !== "off") usage();
@@ -523,6 +533,21 @@ async function vmCmd(cmd: string | undefined, args: string[]) {
                     }
                     await h.start({});
                     console.log(`autostart: ${name} started`);
+                    // spec.autostartView — open the VM's viewer too. This
+                    // runs under a oneshot whose cgroup teardown reaps
+                    // leftover children, so put the viewer in its own
+                    // systemd-run scope (detached spawn as fallback).
+                    if (h.spec.autostartView) {
+                        const { cliArgv } = await import("../libraries/vm-core/src/lifecycle/autostart");
+                        const argv = [...cliArgv(), "vm", "view", name];
+                        const srun = await which("systemd-run");
+                        if (srun) {
+                            spawnChild(srun, ["--user", "--scope", "--quiet", `--unit=cruiser-view-${name}`, "--", ...argv], { detached: true }).unref();
+                        } else {
+                            spawnChild(argv[0]!, argv.slice(1), { detached: true }).unref();
+                        }
+                        console.log(`autostart: ${name} viewer opening`);
+                    }
                 } catch (e) {
                     console.error(`autostart: ${name} failed — ${e instanceof Error ? e.message : e}`);
                 } finally { await h.clearDiskKey().catch(() => {}); }

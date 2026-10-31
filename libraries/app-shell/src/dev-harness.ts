@@ -62,7 +62,7 @@ function installFakeVm({ store }: DevHarnessCtx, env: NodeJS.ProcessEnv): void {
         viewer: "dmabuf", vmDir: "/var/tmp/cruiser-vms/fake-runner",
         forwards: [],
         cpus: 4, memMiB: 8192, diskGiB: 64, nestedVirt: false, sshPort: 4022, rdpPort: 43389,
-        provisioned: "cloudimg", persist: "daemonize", autostart: false, netMode: "nat",
+        provisioned: "cloudimg", persist: "daemonize", autostart: false, autostartView: false, netMode: "nat",
         snapshots: [], vd: 0, usbKeys: [],
         username: "cruiser", hasPassword: true,
         encrypt: "off", keyStorage: "store", diskLocked: false,
