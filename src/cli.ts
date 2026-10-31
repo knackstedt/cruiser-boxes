@@ -193,7 +193,11 @@ async function holdViewer(s: ViewerSession): Promise<void> {
     const onSig = () => { void s.close(); };
     process.on("SIGINT", onSig);
     process.on("SIGTERM", onSig);
-    await s.exited();
+    // bun#14951: a pending top-level await whose only resolver is the
+    // unref'd viewer child spins the entry wait at 100% CPU — a ref'd
+    // no-op timer gives the loop ref'd work to park on.
+    const keepAlive = setInterval(() => {}, 60_000);
+    try { await s.exited(); } finally { clearInterval(keepAlive); }
     process.off("SIGINT", onSig);
     process.off("SIGTERM", onSig);
 }
